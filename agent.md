@@ -18,7 +18,7 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 - Dataset export includes only positive images or reviewed negatives, groups video/time segments and byte-identical images into the same split, preserves image pixels, and writes normalized YOLO labels plus an integrity/provenance manifest into a new version directory.
 - Open the app directly into the extraction workspace. Run engine health in the background and keep its status in the toolbar; do not show a blocking welcome/check-engine screen.
 - The user's source videos are primarily Full HD (1920×1080). Read actual media dimensions and preserve exact crop/annotation geometry for other resolutions too.
-- Exact Center Crop preview keeps the actual decoded source frame visible and overlays the crop rectangle using its exact source-pixel geometry; do not switch the preview to a cropped output image.
+- Exact Center Crop preview keeps the actual decoded source frame visible and draws a dashed orange rectangle using the exact source-pixel crop geometry; do not switch the preview to a cropped output image.
 
 ## Development practice
 

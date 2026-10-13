@@ -97,6 +97,14 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Git:** Đã commit trên nhánh `feature/manual-labeling`; push vẫn chờ GitHub authentication do lần thử trước thiếu credentials.
 - **Giới hạn:** Engine suite không chạy lại trong lượt này; mẫu video smoke check được tạo tạm trong `/tmp`.
 
+### 2026-10-14 — Làm rõ viền crop preview
+
+- **Thay đổi:** Đổi viền overlay sang nét đứt màu cam để phân biệt rõ vùng W×H đang được chọn. Hình học vẫn bám tọa độ frame nguồn; preset 320×320 được thể hiện thành ô vuông trên frame thật, còn kích thước W×H khác nhau vẫn là hình chữ nhật.
+- **Tài liệu:** Cập nhật README.md, AGENTS.md, agent.md, DESIGN.md, DEVELOPMENT.md, CHANGELOG.md và brief giao diện trích xuất.
+- **Kiểm tra:** `pnpm build` — thành công với Node.js runtime đi kèm Codex; `pnpm tauri build --bundles app` — app bundle macOS 5.46 MiB thành công. Rust báo `rust-objcopy` thiếu `libLLVM.dylib` khi bỏ debug symbols nhưng bundle vẫn được tạo. Chưa chạy bộ test cho thay đổi CSS này.
+- **Git:** Commit `2ba33e2` trên nhánh `feature/manual-labeling`; chưa push vì xác thực GitHub vẫn chưa sẵn sàng.
+- **Giới hạn:** Cửa sổ app release hiện tại vẫn giữ asset đã nạp; khởi động lại app để xem viền mới.
+
 ### 2026-10-14 — Manual labeling và startup
 
 - **Thay đổi:** Nối tab Gán nhãn vào workspace; thêm canvas box pixel-coordinate, chọn class, di chuyển/resize/đổi class/xóa, undo/redo, zoom/pan, chuyển ảnh và đánh dấu review. Annotation tự lưu vào dự án SQLite sau khi người dùng lưu dự án; engine xác thực class, bounds, box có diện tích và fingerprint ảnh. Giữ màn chào kiểm tra engine đã gỡ; kiểm tra nền chỉ cập nhật badge trên toolbar.

@@ -4,7 +4,7 @@
 - Giữ giao diện và thông báo người dùng bằng tiếng Việt.
 - Kiểm tra `git status` trước khi sửa và giữ nguyên thay đổi có sẵn.
 - Không hiển thị preview, metadata model hoặc detection giả. Chỉ bật hành động khi engine thực hiện được thật.
-- Preview Exact Center Crop luôn giữ frame thật được giải mã từ video và vẽ khung vùng crop đúng tọa độ/kích thước lên frame; không thay frame bằng ảnh crop khi người dùng xem preview.
+- Preview Exact Center Crop luôn giữ frame thật được giải mã từ video và vẽ viền cam nét đứt đúng tọa độ/kích thước vùng crop lên frame; không thay frame bằng ảnh crop khi người dùng xem preview.
 - Gán nhãn thủ công hoạt động độc lập với inference; không tạo hoặc gợi ý kết quả AI giả. Khi chỉnh sửa annotation, yêu cầu dự án đã lưu và bảo toàn tọa độ pixel của ảnh.
 - Dataset chỉ xuất ảnh có box hợp lệ hoặc ảnh trống đã được review; giữ cùng video/đoạn và ảnh trùng byte trong cùng split, ghi nhãn YOLO chuẩn hóa và manifest provenance vào phiên bản mới.
 - Video người dùng chủ yếu ở Full HD (1920×1080); vẫn đọc kích thước media thật, không hard-code độ phân giải hoặc tự resize crop chính xác.

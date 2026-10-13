@@ -18,7 +18,7 @@
 
 **FORM:** The user screenshot is the visual source of truth. The UI Pro Max searchable styles returned landing-page patterns and were discarded; the Operate guidance supplied accessibility and dense-control considerations. Impeccable written references guided the UI review; its CLI audit did not run because the local checksum sidecar was unavailable.
 
-**CROP:** The orange overlay represents the exact W×H source-pixel rectangle centered with floor-based coordinates while keeping the decoded source frame visible. The crop output appears in the gallery after extraction. Preset sizes are shortcuts and custom integer dimensions remain available. Out-of-frame dimensions are explained before extraction. Blur and near-duplicate filtering inspect the source crop.
+**CROP:** The dashed orange overlay represents the exact W×H source-pixel rectangle centered with floor-based coordinates while keeping the decoded source frame visible. The crop output appears in the gallery after extraction. Preset sizes are shortcuts and custom integer dimensions remain available. Out-of-frame dimensions are explained before extraction. Blur and near-duplicate filtering inspect the source crop.
 
 **FINISH:** Disabled/loading/error/empty states, reduced motion, keyboard focus and panel bounds are present. Inference, label editing and export stay visibly unavailable until their real workflows exist.
 

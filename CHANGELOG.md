@@ -16,6 +16,7 @@
 - Thêm trình gán nhãn thủ công: Head (0), Body (1), thao tác box, undo/redo, review và autosave vào dự án `.ffproj`.
 - Giữ kiểm tra Python engine chạy nền trên toolbar; không hiện lại màn chào buộc người dùng bấm kiểm tra mỗi lần mở app.
 - Bỏ chế độ chuyển preview sang ảnh crop; khung crop hiển thị trực tiếp trên frame video, viền nằm trong hình học vùng crop.
+- Đổi khung crop preview sang viền cam nét đứt để vùng W×H dễ phân biệt trên frame nguồn.
 
 ## 0.1.0 — Nền tảng
 

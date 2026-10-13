@@ -24,7 +24,7 @@ Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa sour
 ## Exact Center Crop
 
 - Đây là chế độ crop mặc định, dùng hình chữ nhật W×H cố định ở tâm từng frame đã giải mã. Tọa độ bắt đầu dùng `floor((frame - crop) / 2)` và vùng lấy theo half-open slicing; không resize hoặc padding.
-- Preview luôn giữ frame nguồn thật và vẽ khung màu cam tại tâm theo đúng W×H pixel, co giãn cùng frame khi preview đổi kích thước. Ảnh crop đầu ra được xem trong gallery sau khi trích xuất.
+- Preview luôn giữ frame nguồn thật và vẽ viền cam nét đứt tại tâm theo đúng W×H pixel, co giãn cùng frame khi preview đổi kích thước. Ảnh crop đầu ra được xem trong gallery sau khi trích xuất.
 - Preset vuông 192, 256, 320, 416, 512 và 640 chỉ là lối tắt; hai trường W/H vẫn nhận kích thước nguyên tùy chỉnh độc lập.
 - Center crop nhận kích thước nguyên 1–4096 px; crop lớn hơn frame bị báo lỗi trước khi trích. Letterbox/Grid giữ giới hạn hiện có 16–4096 px. Blur và near-duplicate ở chế độ center đo trên crop nguồn.
 - Full Frame/Letterbox và Grid là thuật toán riêng; chỉ các mode đó mới resize hoặc padding.
