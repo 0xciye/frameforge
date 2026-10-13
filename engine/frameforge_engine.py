@@ -8,7 +8,7 @@ import platform
 import sys
 from typing import Any, Callable, Dict, Optional
 
-from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_frame
+from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, save_project
 
 
@@ -35,6 +35,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "health",
                     "inspect_sources",
                     "preview_frame",
+                    "preview_center_crop",
                     "extract_frames",
                     "project_persistence",
                     "model_inspection",
@@ -57,6 +58,13 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = inspect_model(arguments["path"])
         elif command == "preview_frame":
             result = preview_frame(arguments["path"], arguments.get("frame_index", 0))
+        elif command == "preview_center_crop":
+            result = preview_center_crop(
+                arguments["path"],
+                arguments.get("frame_index", 0),
+                arguments["width"],
+                arguments["height"],
+            )
         elif command == "extract_frames":
             result = extract_frames(
                 arguments.get("paths", []),

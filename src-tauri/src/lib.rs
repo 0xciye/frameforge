@@ -262,6 +262,32 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        "preview_center_crop" => {
+            validate_media_path(
+                arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu đường dẫn media.")?,
+                false,
+            )?;
+            if arguments
+                .get("frame_index")
+                .and_then(Value::as_u64)
+                .is_none()
+            {
+                return Err("Chỉ số frame phải là số nguyên không âm.".to_string());
+            }
+            for key in ["width", "height"] {
+                let size = arguments
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| format!("Thiếu kích thước crop {key}."))?;
+                if !(1..=4096).contains(&size) {
+                    return Err("Kích thước crop phải từ 1 đến 4096 px.".to_string());
+                }
+            }
+            Ok(())
+        }
         "inspect_model" => {
             let path = canonical_existing_path(
                 arguments
@@ -301,14 +327,23 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .get("options")
                 .and_then(Value::as_object)
                 .ok_or("Thiếu cài đặt trích xuất.")?;
-            if let Some(width) = options.get("output_width").and_then(Value::as_u64) {
-                if !(16..=4096).contains(&width) {
-                    return Err("Chiều rộng đầu ra phải từ 16 đến 4096 px.".to_string());
-                }
+            let mode = options
+                .get("crop_mode")
+                .and_then(Value::as_str)
+                .unwrap_or("letterbox");
+            if !["center", "letterbox", "grid"].contains(&mode) {
+                return Err("Chế độ crop chưa khả dụng.".to_string());
             }
-            if let Some(height) = options.get("output_height").and_then(Value::as_u64) {
-                if !(16..=4096).contains(&height) {
-                    return Err("Chiều cao đầu ra phải từ 16 đến 4096 px.".to_string());
+            let minimum_size = if mode == "center" { 1 } else { 16 };
+            for key in ["output_width", "output_height"] {
+                let size = options
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| format!("Thiếu kích thước đầu ra {key}."))?;
+                if !(minimum_size..=4096).contains(&size) {
+                    return Err(format!(
+                        "Kích thước đầu ra phải từ {minimum_size} đến 4096 px."
+                    ));
                 }
             }
             Ok(())

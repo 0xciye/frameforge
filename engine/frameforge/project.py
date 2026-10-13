@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -41,7 +41,12 @@ def _initialize(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS images (
             path TEXT PRIMARY KEY,
             source_path TEXT,
+            source_id TEXT,
             frame_index INTEGER,
+            timestamp_seconds REAL,
+            crop_rect_json TEXT,
+            sharpness_score REAL,
+            extraction_settings_json TEXT,
             width INTEGER NOT NULL,
             height INTEGER NOT NULL,
             status TEXT NOT NULL
@@ -64,6 +69,29 @@ def _initialize(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    connection.execute(
+        "INSERT OR REPLACE INTO project_meta(key, value) VALUES('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT value FROM project_meta WHERE key = 'schema_version'").fetchone()
+    version = int(row[0]) if row else 0
+    if version == SCHEMA_VERSION:
+        return
+    if version != 1:
+        raise ValueError("Phiên bản cấu trúc dự án không được hỗ trợ.")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(images)")}
+    for name, definition in (
+        ("source_id", "TEXT"),
+        ("timestamp_seconds", "REAL"),
+        ("crop_rect_json", "TEXT"),
+        ("sharpness_score", "REAL"),
+        ("extraction_settings_json", "TEXT"),
+    ):
+        if name not in columns:
+            connection.execute("ALTER TABLE images ADD COLUMN {0} {1}".format(name, definition))
     connection.execute(
         "INSERT OR REPLACE INTO project_meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -109,11 +137,19 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
             if not isinstance(image, dict) or not image.get("path"):
                 continue
             connection.execute(
-                "INSERT INTO images(path, source_path, frame_index, width, height, status) VALUES(?, ?, ?, ?, ?, ?)",
+                """INSERT INTO images(
+                    path, source_path, source_id, frame_index, timestamp_seconds, crop_rect_json,
+                    sharpness_score, extraction_settings_json, width, height, status
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(image["path"]),
                     image.get("source_path"),
+                    image.get("source_id"),
                     image.get("frame_index"),
+                    image.get("timestamp_seconds"),
+                    json.dumps(image["crop_rect"], ensure_ascii=False) if image.get("crop_rect") is not None else None,
+                    image.get("sharpness_score"),
+                    json.dumps(image["extraction_settings"], ensure_ascii=False) if image.get("extraction_settings") is not None else None,
                     int(image.get("width", 0)),
                     int(image.get("height", 0)),
                     str(image.get("status", "ready")),
@@ -184,7 +220,7 @@ def _is_frameforge_project(path: Path) -> bool:
             return False
         meta = {row[0]: row[1] for row in connection.execute("SELECT key, value FROM project_meta")}
         return (
-            meta.get("schema_version") == str(SCHEMA_VERSION)
+            meta.get("schema_version") in {"1", str(SCHEMA_VERSION)}
             and bool(meta.get("project_id"))
             and bool(meta.get("name"))
             and meta.get("application") == "FrameForge"
@@ -226,6 +262,8 @@ def save_project(path_value: str, project: Dict[str, Any]) -> Dict[str, Any]:
         connection = _connect(path)
         if created:
             _initialize(connection)
+        else:
+            _migrate(connection)
         return _save(connection, project)
     except BaseException:
         if connection is not None:
@@ -252,7 +290,8 @@ def load_project(path_value: str) -> Dict[str, Any]:
         if check != "ok":
             raise ValueError("Tệp dự án SQLite không hợp lệ.")
         meta = {row["key"]: row["value"] for row in connection.execute("SELECT key, value FROM project_meta")}
-        if int(meta.get("schema_version", 0)) != SCHEMA_VERSION:
+        version = int(meta.get("schema_version", 0))
+        if version < 1 or version > SCHEMA_VERSION:
             raise ValueError("Phiên bản cấu trúc dự án không được hỗ trợ.")
         sources = [json.loads(row["metadata_json"]) for row in connection.execute("SELECT metadata_json FROM sources ORDER BY position")]
         settings = {row["key"]: json.loads(row["value_json"]) for row in connection.execute("SELECT key, value_json FROM project_settings")}
@@ -267,7 +306,25 @@ def load_project(path_value: str) -> Dict[str, Any]:
             })
         images = []
         for row in connection.execute("SELECT * FROM images"):
-            image = dict(row)
+            keys = row.keys()
+            image = {
+                "path": row["path"],
+                "source_path": row["source_path"],
+                "frame_index": row["frame_index"],
+                "width": row["width"],
+                "height": row["height"],
+                "status": row["status"],
+            }
+            for field, column in (
+                ("source_id", "source_id"),
+                ("timestamp_seconds", "timestamp_seconds"),
+                ("sharpness_score", "sharpness_score"),
+            ):
+                if column in keys:
+                    image[field] = row[column]
+            for field, column in (("crop_rect", "crop_rect_json"), ("extraction_settings", "extraction_settings_json")):
+                if column in keys and row[column] is not None:
+                    image[field] = json.loads(row[column])
             image["annotations"] = annotations.get(image["path"], [])
             images.append(image)
         class_names = [row["name"] for row in connection.execute("SELECT name FROM classes ORDER BY class_id")]

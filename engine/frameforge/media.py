@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import os
@@ -153,6 +154,33 @@ def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -
         "width": source_width,
         "height": source_height,
         "frame_index": max(0, int(frame_index)),
+    }
+
+
+def preview_center_crop(
+    path_value: str,
+    frame_index: int,
+    width: int,
+    height: int,
+    max_edge: int = 1600,
+) -> Dict[str, Any]:
+    frame = _read_frame(Path(path_value).expanduser().resolve(strict=True), frame_index)
+    source_height, source_width = frame.shape[:2]
+    cropped, crop_rect = _center_crop(frame, width, height)
+    scale = min(1.0, max_edge / max(width, height))
+    if scale < 1:
+        cropped = cv2.resize(cropped, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    if not ok:
+        raise ValueError("Không tạo được preview crop.")
+    return {
+        "data_url": "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii"),
+        "width": width,
+        "height": height,
+        "frame_index": max(0, int(frame_index)),
+        "source_width": source_width,
+        "source_height": source_height,
+        "crop_rect": crop_rect,
     }
 
 
@@ -309,15 +337,39 @@ def _axis_starts(source: int, window: int, overlap: float) -> List[int]:
     return starts
 
 
-def _crop_frames(frame: np.ndarray, options: Dict[str, Any]) -> List[Tuple[np.ndarray, str]]:
+def _center_crop(frame: np.ndarray, width: int, height: int) -> Tuple[np.ndarray, Dict[str, int]]:
+    source_height, source_width = frame.shape[:2]
+    if width <= 0 or height <= 0:
+        raise ValueError("Chiều rộng và chiều cao crop phải lớn hơn 0 px.")
+    if width > source_width or height > source_height:
+        raise ValueError(
+            "Crop {0}×{1} vượt quá khung nguồn {2}×{3}; giảm kích thước crop hoặc chọn nguồn phù hợp.".format(
+                width, height, source_width, source_height
+            )
+        )
+    x0 = (source_width - width) // 2
+    y0 = (source_height - height) // 2
+    x1 = x0 + width
+    y1 = y0 + height
+    crop = frame[y0:y1, x0:x1]
+    if crop.shape[1] != width or crop.shape[0] != height:
+        raise ValueError("Frame sau crop không khớp kích thước đã chọn.")
+    return crop, {"x": x0, "y": y0, "width": width, "height": height}
+
+
+def _crop_frames(frame: np.ndarray, options: Dict[str, Any]) -> List[Tuple[np.ndarray, str, Dict[str, int], np.ndarray]]:
     width = int(options.get("output_width", 416))
     height = int(options.get("output_height", 416))
     mode = options.get("crop_mode", "letterbox")
     padding = _padding_bgr(options)
+    source_height, source_width = frame.shape[:2]
+    full_frame = {"x": 0, "y": 0, "width": source_width, "height": source_height}
+    if mode == "center":
+        crop, crop_rect = _center_crop(frame, width, height)
+        return [(crop, "center", crop_rect, crop)]
     if mode == "letterbox":
-        return [(_letterbox(frame, width, height, padding), "full")]
+        return [(_letterbox(frame, width, height, padding), "full", full_frame, frame)]
     if mode == "grid":
-        source_height, source_width = frame.shape[:2]
         overlap_x = float(options.get("overlap_x", 0.2))
         overlap_y = float(options.get("overlap_y", 0.2))
         if not 0 <= overlap_x < 1 or not 0 <= overlap_y < 1:
@@ -329,13 +381,26 @@ def _crop_frames(frame: np.ndarray, options: Dict[str, Any]) -> List[Tuple[np.nd
             for column, left in enumerate(xs):
                 right = min(source_width, left + width)
                 bottom = min(source_height, top + height)
-                tiles.append((_letterbox(frame[top:bottom, left:right], width, height, padding), "r{0:02d}_c{1:02d}".format(row + 1, column + 1)))
+                crop_rect = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+                source_crop = frame[top:bottom, left:right]
+                tiles.append((
+                    _letterbox(source_crop, width, height, padding),
+                    "r{0:02d}_c{1:02d}".format(row + 1, column + 1),
+                    crop_rect,
+                    source_crop,
+                ))
         return tiles
     if mode == "object_centered":
         raise ValueError("Crop quanh object cần model ONNX đã nạp; thao tác chưa khả dụng trong phiên này.")
     if mode == "manual":
         raise ValueError("Crop thủ công cần vùng crop đã được người dùng chọn trên preview.")
     raise ValueError("Chế độ crop không hợp lệ.")
+
+
+def _source_identity(source: Path) -> str:
+    stat = source.stat()
+    identity = "{0}\0{1}\0{2}".format(os.path.normcase(str(source.resolve())), stat.st_size, stat.st_mtime_ns)
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Dict[str, Any]):
@@ -427,8 +492,12 @@ def extract_frames(
     output.mkdir(parents=True, exist_ok=True)
     width = int(options.get("output_width", 416))
     height = int(options.get("output_height", 416))
-    if not 16 <= width <= 4096 or not 16 <= height <= 4096:
-        raise ValueError("Kích thước đầu ra phải nằm trong khoảng 16–4096 px.")
+    mode = options.get("crop_mode", "letterbox")
+    if mode not in {"center", "letterbox", "grid"}:
+        raise ValueError("Chế độ crop chưa khả dụng.")
+    minimum_size = 1 if mode == "center" else 16
+    if not minimum_size <= width <= 4096 or not minimum_size <= height <= 4096:
+        raise ValueError("Kích thước crop phải nằm trong khoảng {0}–4096 px.".format(minimum_size))
     image_format = options.get("image_format", "jpg")
     if image_format not in {"jpg", "png"}:
         raise ValueError("Định dạng đầu ra chỉ hỗ trợ JPG hoặc PNG.")
@@ -442,8 +511,10 @@ def extract_frames(
     totals = {
         "candidate_frames": 0,
         "accepted_frames": 0,
-        "duplicate_frames": 0,
-        "blurry_frames": 0,
+        "candidate_crops": 0,
+        "accepted_crops": 0,
+        "duplicate_crops": 0,
+        "blurry_crops": 0,
         "exported_images": 0,
         "skipped_files": 0,
         "failed_sources": 0,
@@ -456,6 +527,7 @@ def extract_frames(
     selected_paths, _ = _candidate_paths(source_paths)
     total_sources = len(selected_paths)
     max_frames = max(0, int(options.get("max_frames", 0)))
+    extraction_settings = dict(options)
 
     def emit(source_index: int, source: Path, frame_index: int) -> None:
         if progress is not None:
@@ -468,14 +540,68 @@ def extract_frames(
                 **totals,
             })
 
+    def process_frame(source_index: int, source: Path, source_id: str, frame_index: int, timestamp: float, frame: np.ndarray) -> None:
+        totals["candidate_frames"] += 1
+        accepted_frame = False
+        for crop, suffix, crop_rect, filter_crop in _crop_frames(frame, options):
+            totals["candidate_crops"] += 1
+            sharpness = _blur_score(filter_crop)
+            if options.get("filter_blurry") and sharpness < float(options.get("blur_threshold", 60)):
+                totals["blurry_crops"] += 1
+                continue
+            current_hash = _dhash(filter_crop)
+            if options.get("filter_duplicates") and recent_hashes.contains_near(current_hash):
+                totals["duplicate_crops"] += 1
+                continue
+            if options.get("filter_duplicates"):
+                recent_hashes.add(current_hash)
+
+            totals["accepted_crops"] += 1
+            accepted_frame = True
+            base = "{0}_frame_{1:06d}_{2}".format(source.stem, frame_index, suffix)
+            target = (output / base).with_suffix(".png" if image_format == "png" else ".jpg")
+            if target.exists() and file_behavior == "skip":
+                totals["skipped_files"] += 1
+                continue
+            if target.exists() and file_behavior == "rename":
+                version = 1
+                while target.exists():
+                    target = output / "{0}_{1}{2}".format(base, version, ".png" if image_format == "png" else ".jpg")
+                    version += 1
+            if not _write_image(crop, target, image_format, quality):
+                raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
+            totals["exported_images"] += 1
+            if len(exported) < 500:
+                exported.append({
+                    "path": str(target),
+                    "source_path": str(source),
+                    "source_id": source_id,
+                    "name": target.name,
+                    "frame_index": frame_index,
+                    "timestamp_seconds": timestamp,
+                    "crop_rect": crop_rect,
+                    "width": int(crop.shape[1]),
+                    "height": int(crop.shape[0]),
+                    "sharpness_score": sharpness,
+                    "extraction_settings": extraction_settings,
+                    "thumbnail_data_url": _thumbnail_data_url(crop),
+                })
+        if accepted_frame:
+            totals["accepted_frames"] += 1
+        if totals["candidate_frames"] % 20 == 0:
+            emit(source_index, source, frame_index)
+
     for source_index, source in enumerate(selected_paths):
         if max_frames and totals["candidate_frames"] >= max_frames:
             break
         try:
             info = probe_media(str(source))
+            source_id = _source_identity(source)
             if info["kind"] == "image":
                 frame = cv2.imread(str(source), cv2.IMREAD_COLOR)
-                candidates = [(0, 0.0, frame)] if frame is not None else []
+                if frame is None:
+                    raise ValueError("Không đọc được ảnh nguồn.")
+                process_frame(source_index, source, source_id, 0, 0.0, frame)
             else:
                 capture = cv2.VideoCapture(str(source))
                 if not capture.isOpened():
@@ -486,97 +612,10 @@ def extract_frames(
                         source_options["max_frames"] = max_frames - totals["candidate_frames"]
                     candidates = _sample_capture(capture, info, source_options)
                     for frame_index, timestamp, frame in candidates:
-                        totals["candidate_frames"] += 1
-                        if options.get("filter_blurry") and _blur_score(frame) < float(options.get("blur_threshold", 60)):
-                            totals["blurry_frames"] += 1
-                            if totals["candidate_frames"] % 20 == 0:
-                                emit(source_index, source, frame_index)
-                            continue
-                        current_hash = _dhash(frame)
-                        if options.get("filter_duplicates") and recent_hashes.contains_near(current_hash):
-                            totals["duplicate_frames"] += 1
-                            if totals["candidate_frames"] % 20 == 0:
-                                emit(source_index, source, frame_index)
-                            continue
-                        if options.get("filter_duplicates"):
-                            recent_hashes.add(current_hash)
-                        totals["accepted_frames"] += 1
-                        tiles = _crop_frames(frame, options)
-                        for tile, suffix in tiles:
-                            base = "{0}_frame_{1:06d}_{2}".format(source.stem, frame_index, suffix)
-                            target = output / base
-                            extension = ".png" if image_format == "png" else ".jpg"
-                            target = target.with_suffix(extension)
-                            if target.exists() and file_behavior == "skip":
-                                totals["skipped_files"] += 1
-                                continue
-                            if target.exists() and file_behavior == "rename":
-                                version = 1
-                                while target.exists():
-                                    target = output / "{0}_{1}{2}".format(base, version, extension)
-                                    version += 1
-                            if not _write_image(tile, target, image_format, quality):
-                                raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
-                            totals["exported_images"] += 1
-                            if len(exported) < 500:
-                                exported.append({
-                                    "path": str(target),
-                                    "source_path": str(source),
-                                    "name": target.name,
-                                    "frame_index": frame_index,
-                                    "timestamp_seconds": timestamp,
-                                    "width": width,
-                                    "height": height,
-                                    "thumbnail_data_url": _thumbnail_data_url(tile),
-                                })
-                        if totals["candidate_frames"] % 20 == 0:
-                            emit(source_index, source, frame_index)
+                        process_frame(source_index, source, source_id, frame_index, timestamp, frame)
                 finally:
                     capture.release()
                 emit(source_index, source, -1)
-                continue
-
-            if not candidates or candidates[0][2] is None:
-                raise ValueError("Không đọc được ảnh nguồn.")
-            frame_index, timestamp, frame = candidates[0]
-            totals["candidate_frames"] += 1
-            if options.get("filter_blurry") and _blur_score(frame) < float(options.get("blur_threshold", 60)):
-                totals["blurry_frames"] += 1
-                continue
-            current_hash = _dhash(frame)
-            if options.get("filter_duplicates") and recent_hashes.contains_near(current_hash):
-                totals["duplicate_frames"] += 1
-                continue
-            if options.get("filter_duplicates"):
-                recent_hashes.add(current_hash)
-            totals["accepted_frames"] += 1
-            for tile, suffix in _crop_frames(frame, options):
-                base = "{0}_{1}".format(source.stem, suffix)
-                target = output / base
-                extension = ".png" if image_format == "png" else ".jpg"
-                target = target.with_suffix(extension)
-                if target.exists() and file_behavior == "skip":
-                    totals["skipped_files"] += 1
-                    continue
-                if target.exists() and file_behavior == "rename":
-                    version = 1
-                    while target.exists():
-                        target = output / "{0}_{1}{2}".format(base, version, extension)
-                        version += 1
-                if not _write_image(tile, target, image_format, quality):
-                    raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
-                totals["exported_images"] += 1
-                if len(exported) < 500:
-                    exported.append({
-                        "path": str(target),
-                        "source_path": str(source),
-                        "name": target.name,
-                        "frame_index": 0,
-                        "timestamp_seconds": 0.0,
-                        "width": width,
-                        "height": height,
-                        "thumbnail_data_url": _thumbnail_data_url(tile),
-                    })
         except (OSError, ValueError, cv2.error) as error:
             totals["failed_sources"] += 1
             errors.append({"path": str(source), "message": str(error)})

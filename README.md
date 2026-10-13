@@ -1,8 +1,8 @@
 # FrameForge
 
-FrameForge là ứng dụng desktop local-first để trích xuất ảnh từ video và chuẩn bị dữ liệu cho quy trình gán nhãn. Workspace tiếng Việt hỗ trợ nhập video/ảnh bằng dialog hoặc kéo thả, xem metadata và preview frame thật, lấy mẫu theo frame hoặc thời gian, lọc frame gần giống và ảnh mờ, crop letterbox hoặc grid, rồi lưu ảnh JPG/PNG cùng dự án SQLite `.ffproj`.
+FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, huấn luyện YOLO11n và tiếp tục cải thiện model đã huấn luyện. Workspace hiện hỗ trợ nhập video/ảnh, preview media thật, lấy mẫu theo frame/giây, Exact Center Crop đúng pixel, lọc blur/dHash trên crop, crop letterbox/grid và lưu JPG/PNG cùng dự án SQLite `.ffproj`.
 
-Ứng dụng có thể nạp một tệp ONNX bằng ONNX Runtime CPU để đọc thông tin tensor và metadata lớp. Đây mới là bước kiểm tra model; **inference, sinh/chỉnh sửa nhãn và xuất YOLO chưa được triển khai**. FrameForge không huấn luyện hoặc fine-tune model, và không tạo detection giả.
+Huấn luyện YOLO11n, fine-tuning, inference, gán nhãn, quản lý dataset, benchmarking và export model là mục tiêu của sản phẩm nhưng **chưa triển khai**. Hiện ứng dụng chỉ đọc tensor/metadata của tệp ONNX bằng ONNX Runtime CPU; không tạo detection hay kết quả huấn luyện giả.
 
 ## Yêu cầu
 
@@ -53,4 +53,4 @@ pnpm tauri build
 
 ## Trạng thái
 
-Đã triển khai media inspection/preview, trích frame có progress và hủy, lọc dHash/Laplacian, crop letterbox/grid, SQLite create/save/load và kiểm tra metadata ONNX bằng CPU. Hiện các tác vụ này có kiểm thử Python; inference YOLO, biên tập annotation, export dataset, đóng gói Python sidecar và kiểm thử Windows vẫn còn ở roadmap.
+Đã triển khai media inspection/preview, trích frame có progress và hủy, Exact Center Crop, lọc dHash/Laplacian trên vùng crop, crop letterbox/grid, lưu provenance crop trong SQLite `.ffproj` và kiểm tra metadata ONNX bằng CPU. Inference, biên tập annotation, export dataset, YOLO11n training/fine-tuning, benchmarking, đóng gói Python sidecar và xác nhận Windows vẫn còn ở roadmap.

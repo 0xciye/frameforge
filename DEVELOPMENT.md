@@ -7,13 +7,18 @@
 | Tauri 2 + React/TypeScript workspace | IMPLEMENTED | Giao diện tiếng Việt theo ảnh tham chiếu |
 | Python JSON-lines IPC | IMPLEMENTED | JSON-lines engine process có test; Rust command đã `cargo check`, runtime desktop toàn tuyến còn cần smoke test |
 | Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; seek bằng tác vụ nền |
-| Trích frame, lọc, crop, JPG/PNG | TESTED_MACOS | Có fixture video tổng hợp; grid tạo crop chồng lấp |
-| Dự án SQLite `.ffproj` | TESTED_MACOS | Create/save/load; bảo vệ tệp tồn tại không phải dự án |
+| Exact Center Crop, preview overlay, xem crop thật | TESTED_MACOS | Pixel slicing không resize/padding; geometry và preview có test; Tauri native smoke test còn chờ |
+| Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên vùng crop nguồn; progress/hủy |
+| Dự án SQLite `.ffproj` | TESTED_MACOS | Create/save/load; schema v1 nâng cấp lên v2 khi save; giữ provenance crop |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
-| Inference, sửa annotation, xuất YOLO | NOT_STARTED | Tab và hành động chưa khả dụng, không sinh kết quả giả |
+| Inference YOLO, confidence filtering | NOT_STARTED | Chưa có adapter/detection; không sinh kết quả giả |
+| Manual labeling, dataset manager, YOLO export | NOT_STARTED | Chưa có editor, validation, split hoặc exporter |
+| YOLO11n training trên MPS/CPU, multi-resolution | NOT_STARTED | Chưa cài PyTorch/Ultralytics; chưa có training job manager |
+| Checkpoint discovery, fine-tuning, resume | NOT_STARTED | Chưa có model registry hoặc checkpoint workflow |
+| Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có metrics/benchmark/export thật |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Giai đoạn đang làm là hoàn thiện workspace trích xuất và tiến tới inference CPU. Không gộp trạng thái macOS với xác nhận Windows.
+Thứ tự ưu tiên: Exact Center Crop → filtering → manual labeling → YOLO dataset → YOLO11n training → fine-tuning → confidence-based AI expansion → benchmark → deployment export. Không gộp xác nhận macOS với Windows.
 
 ## Công cụ và cài đặt
 
@@ -39,7 +44,7 @@ Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `v
 
 Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `extract_frames`, `create_project`, `save_project`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng và đường dẫn trước khi chạy Python. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
+Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `preview_center_crop`, `extract_frames`, `create_project`, `save_project`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng, kích thước và đường dẫn trước khi chạy Python. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
 
 Ví dụ:
 
@@ -54,15 +59,31 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Frame gốc không bị sửa. Ảnh đầu ra được ghi atomically qua tệp tạm; collisions có lựa chọn bỏ qua, đổi tên hoặc ghi đè.
 - Hạn mức frame áp dụng tổng trên các nguồn đã chọn. Danh sách file/thumbnail trả về cho gallery hiện giới hạn 500 ảnh mỗi request để tránh giữ lượng dữ liệu không giới hạn trong frontend.
 - Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; bộ lọc là heuristic và không đảm bảo phát hiện mọi ảnh gần giống.
-- Crop grid hiện chỉ xử lý ảnh; việc truyền nhãn/box qua crop chờ inference và annotation editor.
+- Center crop dùng `floor((frame - crop) / 2)` và half-open slicing; crop vượt frame trả lỗi rõ ràng. Full-frame letterbox và grid tiếp tục resize/padding theo mode riêng.
+- Blur/Laplacian và dHash đo source crop trước output resize/padding. `candidate_crops`, `blurry_crops` và `duplicate_crops` là số liệu crop-level; `candidate_frames` giữ nghĩa frame-level.
+- Mỗi ảnh lưu source identity (SHA-256 từ path/size/mtime), frame/timestamp, crop rectangle, sharpness score và extraction settings. Đây là identity fingerprint, không phải content hash.
+- SQLite schema v2 thêm metadata crop; schema v1 được đọc và migrate cộng thêm cột khi người dùng save.
 - Python engine được đóng gói cùng nguồn, nhưng runtime và dependency Python vẫn cần cài riêng khi chạy ứng dụng. Standalone sidecar packaging chưa làm.
 
 ## Kiểm chứng macOS của task gần nhất
 
-- `pnpm test:engine`: pytest engine trên Python 3.12; kiểm thử fixture ảnh/video, lọc/crop, project SQLite và JSON-lines.
+- `pnpm test:engine`: 21 pytest engine trên Python 3.12; fixture ảnh/video, exact crop geometry (gồm crop 1×1), crop-level filters, project schema migration và JSON-lines.
 - `pnpm build`: TypeScript strict và Vite production build.
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` và `cargo check --manifest-path src-tauri/Cargo.toml`: định dạng cùng biên dịch crate Tauri.
-- Workspace chạy trong browser 1024×700 để kiểm tra overflow và vị trí panel. Tauri dev được build/chạy, nhưng màn hình được CUA quan sát là app cài sẵn Phase 1; vì vậy chưa ghi nhận smoke test native cho workspace mới hoặc Tauri↔engine end-to-end.
+- Exact crop overlay/canvas dùng kích thước preview đã đo để giữ alignment khi resize. Đã mở app bundle macOS và xác nhận startup vào thẳng workspace Trích xuất, không còn màn chào v0.1.0.
+- Engine Python qua Tauri IPC chuyển từ `Đang kết nối` sang `Engine sẵn sàng`; health trên bundle trả `status: ok`.
+- `pnpm tauri build --bundles app` build thành công. Lệnh mặc định `pnpm tauri build` cũng tạo `.app` nhưng lỗi ở bước tạo DMG (`bundle_dmg.sh`).
+
+## Nhật ký công việc
+
+### 2026-10-13 — Exact Center Crop
+
+- **Thay đổi:** Cài đặt crop W×H chính xác từ tâm frame, crop preview và overlay khóa; thêm preset và kiểm tra kích thước; đo blur/dHash trên crop nguồn; lưu crop rectangle và provenance trong SQLite schema v2.
+- **Tài liệu:** Cập nhật README, PRODUCT, agent notes, DESIGN, CHANGELOG và hợp đồng giao diện Extract.
+- **Kiểm tra:** `pnpm test:engine` — 21 passed; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` — thành công; `cargo check --manifest-path src-tauri/Cargo.toml` — thành công; `pnpm tauri build --bundles app` — thành công; `git diff --check` — thành công.
+- **Giới hạn:** Tạo DMG lỗi trong `bundle_dmg.sh`; Windows vẫn `PENDING_WINDOWS_VALIDATION`.
+- **Git:** `feat(crop): implement exact center crop`.
+- **Bước tiếp:** Hoàn tất filtering và bắt đầu manual labeling theo roadmap.
 
 ## Quy trình thay đổi
 

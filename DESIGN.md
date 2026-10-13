@@ -10,10 +10,18 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Tabs quy trình: Trích xuất khả dụng; Gán nhãn và Xuất dữ liệu bị khóa đến khi có chức năng thật.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật, độ phân giải, điều khiển frame/timeline.
-- Cột phải: sampling, filter, crop, kích thước, định dạng và thư mục đầu ra.
+- Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
 - Gallery ngang ở dưới: thumbnail của ảnh thật vừa trích; trạng thái tổng kết ở thanh cuối.
 
 Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa source/preview/settings và trên gallery kéo được bằng chuột hoặc phím mũi tên; kích thước lưu ở local storage. Ở cửa sổ hẹp hơn 1240px, panel co theo CSS trong khi nội dung settings/gallery cuộn độc lập. Cửa sổ Tauri khởi tạo ở 1440×960, tối thiểu 1024×700.
+
+## Exact Center Crop
+
+- Đây là chế độ crop mặc định, dùng hình chữ nhật W×H cố định ở tâm từng frame đã giải mã. Tọa độ bắt đầu dùng `floor((frame - crop) / 2)` và vùng lấy theo half-open slicing; không resize hoặc padding.
+- Overlay nét đứt màu cam khóa ở tâm ảnh nguồn, co giãn theo kích thước preview. Nút `Xem crop` gọi engine để hiển thị chính ảnh crop đã tính; `Xem nguồn` quay lại frame gốc.
+- Preset vuông 192, 256, 320, 416, 512 và 640 chỉ là lối tắt; hai trường W/H vẫn nhận kích thước nguyên tùy chỉnh độc lập.
+- Center crop nhận kích thước nguyên 1–4096 px; crop lớn hơn frame bị báo lỗi trước khi trích. Letterbox/Grid giữ giới hạn hiện có 16–4096 px. Blur và near-duplicate ở chế độ center đo trên crop nguồn.
+- Full Frame/Letterbox và Grid là thuật toán riêng; chỉ các mode đó mới resize hoặc padding.
 
 ## Tương tác và tiếp cận
 

@@ -2,29 +2,32 @@
 
 ## Mục tiêu
 
-FrameForge là ứng dụng desktop local-first giúp người làm dataset đi từ video/ảnh đến dữ liệu gán nhãn YOLO. Sản phẩm không huấn luyện model. Mọi preview, metadata, nhãn và file đầu ra phải đến từ dữ liệu thật của người dùng.
+FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ liệu object detection từ video/ảnh, gán nhãn, huấn luyện YOLO11n, fine-tune checkpoint tương thích, so sánh benchmark và export model triển khai. Mọi preview, metadata, nhãn, metric và file đầu ra phải đến từ dữ liệu hoặc phép tính thật.
 
 ## Đã triển khai
 
 - Workspace desktop Tauri 2, React và TypeScript bằng tiếng Việt.
 - Nhập video/ảnh bằng dialog, kéo thả hoặc quét thư mục; đọc metadata và preview frame thật.
 - Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian.
-- Crop letterbox/grid, chọn kích thước, màu viền, JPG/PNG, xử lý tên file trùng, progress và hủy.
-- Lưu/mở dự án SQLite `.ffproj` gồm nguồn, cài đặt, ảnh và annotation schema.
+- Exact Center Crop cắt đúng vùng W×H từ tâm frame không resize/padding; overlay khóa trong preview; full-frame letterbox và grid vẫn khả dụng.
+- Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
+- Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1 lên v2.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.
 
 ## Chưa khả dụng
 
-- Adapter YOLO, inference, bounding box thật, class mapping đầy đủ.
-- Canvas sửa nhãn, review workflow, undo/redo.
-- Export YOLO và kiểm tra tương ứng image/label.
+- Adapter YOLO và inference.
+- Canvas gán/sửa bounding box, review workflow, undo/redo.
+- Quản lý/kiểm tra dataset và export YOLO.
+- YOLO11n training trên MPS/CPU, hàng đợi resolution, checkpoint discovery và fine-tuning.
+- Benchmark/experiment tracking và export ONNX/TensorRT/OpenVINO.
 - Đóng gói Python engine thành sidecar standalone.
 
-Các hành động chưa triển khai được khóa rõ trong giao diện. Không thay bằng demo detection hoặc dữ liệu giả.
+Các hành động chưa triển khai phải khóa rõ trong giao diện. Không thay bằng demo detection, metric hoặc training progress giả.
 
 ## Hướng trải nghiệm
 
-Người dùng nhập media → xác nhận preview và thông số thật → thiết lập sampling/filter/crop → trích ảnh → nạp model đã huấn luyện → chạy inference → rà soát/chỉnh box → lưu và xuất dataset. Workspace giữ nguồn, preview, thiết lập và gallery trong cùng cửa sổ.
+Người dùng nhập media → xác nhận Exact Center Crop → lọc ảnh → gán nhãn thủ công hoặc hỗ trợ bởi inference → quản lý và chia dataset → huấn luyện YOLO11n → fine-tune checkpoint → benchmark → export model. Mọi bước chạy cục bộ theo mặc định; remote training là tùy chọn sau này.
 
 ## Nguyên tắc
 

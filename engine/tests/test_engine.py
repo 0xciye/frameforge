@@ -1,4 +1,6 @@
+import base64
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +13,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
-from frameforge.media import _RecentHashes, _letterbox, extract_frames, inspect_sources, preview_frame
+from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, save_project
 
 
@@ -58,6 +60,30 @@ def test_letterbox_applies_user_selected_rgb_padding_as_bgr():
     assert output[0, 0].tolist() == [0, 0, 255]
 
 
+def test_exact_center_crop_uses_floor_geometry_without_resizing():
+    frame = np.arange(7 * 11 * 3, dtype=np.uint8).reshape(7, 11, 3)
+
+    crop, rect = _center_crop(frame, 5, 3)
+
+    assert rect == {"x": 3, "y": 2, "width": 5, "height": 3}
+    assert crop.shape == (3, 5, 3)
+    assert np.array_equal(crop, frame[2:5, 3:8])
+
+
+def test_exact_center_crop_rejects_crop_larger_than_source():
+    with pytest.raises(ValueError, match="vượt quá khung nguồn"):
+        _center_crop(np.zeros((24, 32, 3), dtype=np.uint8), 33, 24)
+
+
+def test_exact_center_crop_accepts_one_pixel_custom_dimensions():
+    frame = np.arange(5 * 7 * 3, dtype=np.uint8).reshape(5, 7, 3)
+
+    crop, rect = _center_crop(frame, 1, 1)
+
+    assert rect == {"x": 3, "y": 2, "width": 1, "height": 1}
+    assert np.array_equal(crop, frame[2:3, 3:4])
+
+
 def test_health_response_contains_engine_capabilities():
     response = frameforge_engine.handle_request({"id": "test-1", "command": "health"})
 
@@ -85,6 +111,23 @@ def test_model_inspection_command_routes_to_onnx_inspector(monkeypatch: pytest.M
     assert response["data"] == {"path": "/models/detector.onnx", "format": "ONNX"}
 
 
+def test_center_crop_preview_command_routes_to_crop_preview(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "preview_center_crop",
+        lambda path, frame_index, width, height: {"path": path, "frame_index": frame_index, "width": width, "height": height},
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "crop-preview-1",
+        "command": "preview_center_crop",
+        "arguments": {"path": "/media/clip.mp4", "frame_index": 6, "width": 320, "height": 256},
+    })
+
+    assert response["ok"] is True
+    assert response["data"] == {"path": "/media/clip.mp4", "frame_index": 6, "width": 320, "height": 256}
+
+
 def test_media_inspection_and_preview_read_real_image(tmp_path: Path):
     image_path = tmp_path / "ảnh thử.png"
     image = distinct_frame(2)
@@ -98,6 +141,13 @@ def test_media_inspection_and_preview_read_real_image(tmp_path: Path):
     assert (result["sources"][0]["width"], result["sources"][0]["height"]) == (64, 48)
     assert preview["data_url"].startswith("data:image/jpeg;base64,")
     assert (preview["width"], preview["height"]) == (64, 48)
+
+    crop_preview = preview_center_crop(str(image_path), 0, 32, 24)
+    encoded = crop_preview["data_url"].split(",", 1)[1]
+    cropped = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert crop_preview["crop_rect"] == {"x": 16, "y": 12, "width": 32, "height": 24}
+    assert (crop_preview["width"], crop_preview["height"]) == (32, 24)
+    assert cropped.shape[:2] == (24, 32)
 
 
 def test_video_sampling_filters_and_output_dimensions(tmp_path: Path):
@@ -130,6 +180,76 @@ def test_video_sampling_filters_and_output_dimensions(tmp_path: Path):
         assert image.shape[:2] == (32, 32)
 
 
+def test_exact_center_crop_extraction_records_geometry_and_source_identity(tmp_path: Path):
+    video_path = tmp_path / "center.avi"
+    output_path = tmp_path / "center-output"
+    create_video(video_path, [distinct_frame(2)])
+
+    result = extract_frames(
+        [str(video_path)],
+        str(output_path),
+        {
+            "interval": 1,
+            "interval_unit": "frames",
+            "filter_duplicates": False,
+            "filter_blurry": False,
+            "crop_mode": "center",
+            "output_width": 32,
+            "output_height": 24,
+            "image_format": "png",
+        },
+    )
+
+    image = result["files"][0]
+    cropped = cv2.imread(image["path"])
+    assert cropped.shape[:2] == (24, 32)
+    assert image["crop_rect"] == {"x": 16, "y": 12, "width": 32, "height": 24}
+    assert len(image["source_id"]) == 64
+    assert image["extraction_settings"]["crop_mode"] == "center"
+    assert result["candidate_crops"] == result["accepted_crops"] == 1
+
+
+def test_blur_and_duplicate_filters_measure_extracted_crops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    video_path = tmp_path / "filter-crops.avi"
+    output_path = tmp_path / "filter-crops-output"
+    create_video(video_path, [distinct_frame(index) for index in range(3)])
+    measured_shapes = []
+
+    def sharpness(crop: np.ndarray) -> float:
+        measured_shapes.append(crop.shape[:2])
+        return 1.0
+
+    def perceptual_hash(crop: np.ndarray) -> int:
+        measured_shapes.append(crop.shape[:2])
+        return 0
+
+    monkeypatch.setattr("frameforge.media._blur_score", sharpness)
+    monkeypatch.setattr("frameforge.media._dhash", perceptual_hash)
+
+    result = extract_frames(
+        [str(video_path)],
+        str(output_path),
+        {
+            "interval": 1,
+            "interval_unit": "frames",
+            "filter_duplicates": True,
+            "duplicate_threshold": 0,
+            "filter_blurry": True,
+            "blur_threshold": 0,
+            "crop_mode": "center",
+            "output_width": 32,
+            "output_height": 24,
+            "image_format": "jpg",
+        },
+    )
+
+    assert measured_shapes and set(measured_shapes) == {(24, 32)}
+    assert result["candidate_frames"] == 3
+    assert result["candidate_crops"] == 3
+    assert result["duplicate_crops"] == 2
+    assert result["exported_images"] == 1
+
+
 def test_duplicate_and_blur_filters_reject_unusable_frames(tmp_path: Path):
     video_path = tmp_path / "still.avi"
     output_path = tmp_path / "filtered"
@@ -155,7 +275,7 @@ def test_duplicate_and_blur_filters_reject_unusable_frames(tmp_path: Path):
     )
 
     assert result["candidate_frames"] == 5
-    assert result["blurry_frames"] == 5
+    assert result["blurry_crops"] == 5
     assert result["exported_images"] == 0
 
 
@@ -221,7 +341,10 @@ def test_sqlite_project_round_trips_settings_images_and_annotations(tmp_path: Pa
         "settings": {"interval": 5, "crop_mode": "letterbox"},
         "images": [{
             "path": "/tmp/frame.jpg", "source_path": "/tmp/source.mp4", "frame_index": 10,
-            "width": 416, "height": 416, "status": "ready", "annotations": [{
+            "source_id": "source-identity", "timestamp_seconds": 1.25,
+            "crop_rect": {"x": 1120, "y": 560, "width": 320, "height": 320},
+            "sharpness_score": 82.5, "extraction_settings": {"crop_mode": "center"},
+            "width": 320, "height": 320, "status": "ready", "annotations": [{
                 "id": "annotation-1", "class_id": 0, "x_min": 10, "y_min": 20,
                 "x_max": 100, "y_max": 120, "confidence": 0.9, "source": "ai",
                 "review_status": "unreviewed",
@@ -237,7 +360,56 @@ def test_sqlite_project_round_trips_settings_images_and_annotations(tmp_path: Pa
     assert reopened["settings"] == project["settings"]
     assert reopened["sources"][0]["path"] == "/tmp/source.mp4"
     assert reopened["images"][0]["annotations"][0]["class_id"] == 0
+    assert reopened["images"][0]["source_id"] == "source-identity"
+    assert reopened["images"][0]["timestamp_seconds"] == 1.25
+    assert reopened["images"][0]["crop_rect"] == project["images"][0]["crop_rect"]
+    assert reopened["images"][0]["sharpness_score"] == 82.5
+    assert reopened["images"][0]["extraction_settings"] == {"crop_mode": "center"}
     assert reopened["class_names"] == ["person"]
+
+
+def test_schema_v1_project_loads_and_migrates_on_save(tmp_path: Path):
+    project_path = tmp_path / "legacy.ffproj"
+    connection = sqlite3.connect(project_path)
+    connection.executescript(
+        """
+        CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE sources (path TEXT PRIMARY KEY, position INTEGER NOT NULL, kind TEXT NOT NULL, metadata_json TEXT NOT NULL);
+        CREATE TABLE project_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+        CREATE TABLE images (path TEXT PRIMARY KEY, source_path TEXT, frame_index INTEGER, width INTEGER NOT NULL, height INTEGER NOT NULL, status TEXT NOT NULL);
+        CREATE TABLE classes (class_id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE annotations (
+            annotation_id TEXT PRIMARY KEY, image_path TEXT NOT NULL REFERENCES images(path) ON DELETE CASCADE,
+            class_id INTEGER NOT NULL, x_min REAL NOT NULL, y_min REAL NOT NULL, x_max REAL NOT NULL, y_max REAL NOT NULL,
+            confidence REAL, source TEXT NOT NULL, review_status TEXT NOT NULL
+        );
+        INSERT INTO project_meta VALUES('schema_version', '1');
+        INSERT INTO project_meta VALUES('project_id', 'legacy-project');
+        INSERT INTO project_meta VALUES('application', 'FrameForge');
+        INSERT INTO project_meta VALUES('name', 'Legacy');
+        INSERT INTO sources VALUES('/tmp/source.mp4', 0, 'video', '{"path":"/tmp/source.mp4","name":"source.mp4","kind":"video"}');
+        INSERT INTO images VALUES('/tmp/old-frame.jpg', '/tmp/source.mp4', 2, 640, 360, 'ready');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    loaded = load_project(str(project_path))
+    loaded["images"][0].update({
+        "source_id": "source-identity",
+        "timestamp_seconds": 0.2,
+        "crop_rect": {"x": 16, "y": 12, "width": 32, "height": 24},
+        "extraction_settings": {"crop_mode": "center"},
+    })
+    save_project(str(project_path), loaded)
+
+    reopened = load_project(str(project_path))
+    assert reopened["images"][0]["path"] == "/tmp/old-frame.jpg"
+    assert reopened["images"][0]["crop_rect"] == {"x": 16, "y": 12, "width": 32, "height": 24}
+    connection = sqlite3.connect(project_path)
+    version = connection.execute("SELECT value FROM project_meta WHERE key = 'schema_version'").fetchone()[0]
+    connection.close()
+    assert version == "2"
 
 
 def test_save_project_preserves_an_unrelated_existing_file(tmp_path: Path):

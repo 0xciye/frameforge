@@ -12,6 +12,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   CircleHelp,
+  Crop,
   FileImage,
   FileVideo2,
   FolderOpen,
@@ -45,8 +46,12 @@ type MediaSource = {
 type ProjectImage = {
   path: string;
   source_path?: string;
+  source_id?: string;
   frame_index?: number;
   timestamp_seconds?: number;
+  crop_rect?: CropRect;
+  sharpness_score?: number;
+  extraction_settings?: ExtractionOptions;
   width: number;
   height: number;
   status: string;
@@ -63,7 +68,7 @@ type ExtractionOptions = {
   duplicate_threshold: number;
   filter_blurry: boolean;
   blur_threshold: number;
-  crop_mode: "letterbox" | "grid";
+  crop_mode: "center" | "letterbox" | "grid";
   output_width: number;
   output_height: number;
   overlap_x: number;
@@ -90,6 +95,13 @@ type FramePreview = {
   frame_index: number;
 };
 
+type CropRect = { x: number; y: number; width: number; height: number };
+type CenterCropPreview = FramePreview & {
+  source_width: number;
+  source_height: number;
+  crop_rect: CropRect;
+};
+
 type EngineProgress = {
   source_index: number;
   source_total: number;
@@ -98,8 +110,10 @@ type EngineProgress = {
   elapsed_seconds: number;
   candidate_frames: number;
   accepted_frames: number;
-  duplicate_frames: number;
-  blurry_frames: number;
+  candidate_crops: number;
+  accepted_crops: number;
+  duplicate_crops: number;
+  blurry_crops: number;
   exported_images: number;
   skipped_files: number;
   failed_sources: number;
@@ -138,9 +152,9 @@ const DEFAULT_OPTIONS: ExtractionOptions = {
   duplicate_threshold: 5,
   filter_blurry: true,
   blur_threshold: 60,
-  crop_mode: "letterbox",
-  output_width: 416,
-  output_height: 416,
+  crop_mode: "center",
+  output_width: 320,
+  output_height: 320,
   overlap_x: 0.2,
   overlap_y: 0.2,
   padding_color: "#000000",
@@ -208,6 +222,11 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [frameIndex, setFrameIndex] = useState(0);
   const [preview, setPreview] = useState<FramePreview | null>(null);
+  const [cropPreview, setCropPreview] = useState<CenterCropPreview | null>(null);
+  const [showCropPreview, setShowCropPreview] = useState(false);
+  const [cropPreviewLoading, setCropPreviewLoading] = useState(false);
+  const [cropPreviewError, setCropPreviewError] = useState<string | null>(null);
+  const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
@@ -230,6 +249,7 @@ function App() {
   const sourcePanelRef = useRef<HTMLElement | null>(null);
   const settingsPanelRef = useRef<HTMLElement | null>(null);
   const galleryPanelRef = useRef<HTMLElement | null>(null);
+  const previewStageRef = useRef<HTMLDivElement | null>(null);
 
   const selectedSource = useMemo(
     () => project.sources.find((source) => source.path === selectedPath) ?? null,
@@ -249,6 +269,25 @@ function App() {
       ? frameIndex / selectedSource.fps
       : null;
   const duration = selectedSource?.duration_seconds ?? null;
+  const displayPreview = showCropPreview ? cropPreview : preview;
+  const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
+  const cropSizeValid = Number.isInteger(options.output_width) && Number.isInteger(options.output_height)
+    && options.output_width >= minimumOutputSize && options.output_width <= 4096
+    && options.output_height >= minimumOutputSize && options.output_height <= 4096;
+  const cropFitsPreview = Boolean(cropSizeValid && preview && options.output_width <= preview.width && options.output_height <= preview.height);
+  const cropRect = preview
+    ? {
+        x: Math.floor((preview.width - options.output_width) / 2),
+        y: Math.floor((preview.height - options.output_height) / 2),
+        width: options.output_width,
+        height: options.output_height,
+      }
+    : null;
+  const previewFrameBox = useMemo(() => {
+    if (!displayPreview || !previewStageSize.width || !previewStageSize.height) return null;
+    const scale = Math.min(1, previewStageSize.width / displayPreview.width, previewStageSize.height / displayPreview.height);
+    return { width: displayPreview.width * scale, height: displayPreview.height * scale };
+  }, [displayPreview, previewStageSize]);
 
   async function callEngine<T>(command: string, args: Record<string, unknown> = {}) {
     return invoke<T>("engine_request", {
@@ -275,6 +314,16 @@ function App() {
       // Keep the workspace usable when storage is unavailable.
     }
   }, [panelLayout]);
+
+  useEffect(() => {
+    const element = previewStageRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setPreviewStageSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const fitPanels = () => {
@@ -327,27 +376,56 @@ function App() {
   useEffect(() => {
     if (!selectedSource) {
       setPreview(null);
+      setCropPreview(null);
       setPreviewError(null);
+      setCropPreviewError(null);
+      setCropPreviewLoading(false);
       return;
     }
     const sequence = ++previewSequence.current;
     const path = selectedSource.path;
     const index = selectedSource.kind === "image" ? 0 : frameIndex;
     setPreviewError(null);
+    setCropPreviewError(null);
+    const shouldPreviewCrop = showCropPreview && options.crop_mode === "center" && cropSizeValid;
+    setCropPreview(null);
+    setCropPreviewLoading(shouldPreviewCrop);
     const timer = window.setTimeout(() => {
-      void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
-        .then((result) => {
-          if (sequence === previewSequence.current) setPreview(result);
+      if (!showCropPreview) {
+        void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
+          .then((result) => {
+            if (sequence === previewSequence.current) setPreview(result);
+          })
+          .catch((reason) => {
+            if (sequence === previewSequence.current) {
+              setPreview(null);
+              setPreviewError(String(reason));
+            }
+          });
+      }
+      if (showCropPreview && options.crop_mode === "center" && cropSizeValid) {
+        void callEngine<CenterCropPreview>("preview_center_crop", {
+          path,
+          frame_index: index,
+          width: options.output_width,
+          height: options.output_height,
         })
-        .catch((reason) => {
-          if (sequence === previewSequence.current) {
-            setPreview(null);
-            setPreviewError(String(reason));
-          }
-        });
+          .then((result) => {
+            if (sequence === previewSequence.current) setCropPreview(result);
+          })
+          .catch((reason) => {
+            if (sequence === previewSequence.current) {
+              setCropPreview(null);
+              setCropPreviewError(String(reason));
+            }
+          })
+          .finally(() => {
+            if (sequence === previewSequence.current) setCropPreviewLoading(false);
+          });
+      }
     }, 90);
     return () => window.clearTimeout(timer);
-  }, [selectedSource?.path, selectedSource?.kind, frameIndex]);
+  }, [selectedSource?.path, selectedSource?.kind, frameIndex, showCropPreview, options.crop_mode, options.output_width, options.output_height]);
 
   useEffect(() => {
     if (!playing || !selectedSource || selectedSource.kind !== "video") return;
@@ -361,6 +439,7 @@ function App() {
   }, [playing, selectedSource?.path, selectedSource?.fps, selectedSource?.kind, sourceFrameCount, frameIndex]);
 
   function updateOptions(patch: Partial<ExtractionOptions>) {
+    if (patch.crop_mode && patch.crop_mode !== "center") setShowCropPreview(false);
     setOptions((current) => ({ ...current, ...patch }));
     setProject((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
     setDirty(true);
@@ -627,6 +706,13 @@ function App() {
       setError("Khoảng lấy mẫu phải lớn hơn 0.");
       return;
     }
+    const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
+    if (!Number.isInteger(options.output_width) || !Number.isInteger(options.output_height)
+      || options.output_width < minimumOutputSize || options.output_width > 4096
+      || options.output_height < minimumOutputSize || options.output_height > 4096) {
+      setError(`Chiều rộng và chiều cao phải là số nguyên từ ${minimumOutputSize} đến 4096 px.`);
+      return;
+    }
     let destination = outputDirectory;
     if (!destination) {
       try {
@@ -862,13 +948,46 @@ function App() {
               <span className="live-indicator" />
               <strong>{selectedSource?.name ?? "Preview"}</strong>
             </div>
-            <span className="preview-resolution">
-              {preview ? `${preview.width} × ${preview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
-            </span>
+            <div className="preview-tools">
+              <span className="preview-resolution">
+                {displayPreview ? `${displayPreview.width} × ${displayPreview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
+              </span>
+              {options.crop_mode === "center" && <button
+                type="button"
+                className="preview-mode-button"
+                aria-pressed={showCropPreview}
+                disabled={!preview || (!showCropPreview && !cropFitsPreview) || !selectedSource}
+                title={showCropPreview ? "Trở lại khung nguồn" : cropFitsPreview ? "Xem ảnh crop thực tế từ frame hiện tại" : "Kích thước crop phải vừa với frame nguồn"}
+                onClick={() => {
+                  setPlaying(false);
+                  setShowCropPreview((current) => !current);
+                }}
+              >
+                <Crop size={13} aria-hidden="true" />{showCropPreview ? "Xem nguồn" : "Xem crop"}
+              </button>}
+            </div>
           </div>
-          <div className="preview-stage">
-            {preview ? (
-              <img className="preview-image" src={preview.data_url} alt={`Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`} />
+          <div className="preview-stage" ref={previewStageRef}>
+            {displayPreview && previewFrameBox ? (
+              <div className="preview-frame" style={{ width: previewFrameBox.width, height: previewFrameBox.height }}>
+                <img
+                  className="preview-image"
+                  src={displayPreview.data_url}
+                  alt={showCropPreview ? `Crop ${displayPreview.width} × ${displayPreview.height} từ ${selectedSource?.name ?? "nguồn"}` : `Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`}
+                />
+                {!showCropPreview && options.crop_mode === "center" && cropRect && preview && <div
+                  className={`crop-overlay${cropFitsPreview ? "" : " invalid"}`}
+                  style={{
+                    left: `${cropRect.x / preview.width * 100}%`,
+                    top: `${cropRect.y / preview.height * 100}%`,
+                    width: `${cropRect.width / preview.width * 100}%`,
+                    height: `${cropRect.height / preview.height * 100}%`,
+                  }}
+                  aria-hidden="true"
+                ><span>Khóa · {options.output_width} × {options.output_height}</span></div>}
+              </div>
+            ) : showCropPreview && cropPreviewLoading ? (
+              <div className="preview-empty"><LoaderCircle className="spin" size={25} /><p>Đang tạo preview crop…</p><small>Frame gốc không bị thay đổi.</small></div>
             ) : previewError ? (
               <div className="preview-empty preview-error"><AlertCircle size={26} /><p>Không tải được frame</p><small>{previewError}</small></div>
             ) : (
@@ -879,6 +998,8 @@ function App() {
                 {!selectedSource && <button type="button" className="primary-button" onClick={() => void chooseMedia(false)}><Plus size={15} /> Thêm media</button>}
               </div>
             )}
+            {showCropPreview && cropPreviewLoading && <div className="crop-preview-loading" role="status"><LoaderCircle className="spin" size={13} />Đang cập nhật crop…</div>}
+            {showCropPreview && cropPreviewError && <div className="crop-preview-error" role="status"><AlertCircle size={14} />{cropPreviewError}</div>}
           </div>
           <div className="player-controls">
             <div className="transport-controls">
@@ -933,6 +1054,10 @@ function App() {
 
             <section className="settings-section">
               <div className="section-title-row"><h3>Chế độ crop</h3></div>
+              <label className={`radio-option ${options.crop_mode === "center" ? "checked" : ""}`}>
+                <input type="radio" name="crop-mode" value="center" checked={options.crop_mode === "center"} onChange={() => updateOptions({ crop_mode: "center" })} />
+                <span><strong>Exact Center Crop</strong><small>Cắt đúng pixel tại tâm, không resize</small></span>
+              </label>
               <label className={`radio-option ${options.crop_mode === "letterbox" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="letterbox" checked={options.crop_mode === "letterbox"} onChange={() => updateOptions({ crop_mode: "letterbox" })} />
                 <span><strong>Full frame</strong><small>Giữ tỷ lệ, thêm viền</small></span>
@@ -952,18 +1077,23 @@ function App() {
             </section>
 
             <section className="settings-section">
-              <div className="section-title-row"><h3>Kích thước</h3><span className="section-caption">px</span></div>
-              <div className="preset-row">
-                {[320, 416, 640, 1024].map((size) => <button key={size} type="button" className={options.output_width === size && options.output_height === size ? "size-preset active" : "size-preset"} onClick={() => updateOptions({ output_width: size, output_height: size })}>{size}</button>)}
+              <div className="section-title-row"><h3>Kích thước</h3><span className="section-caption">{options.crop_mode === "center" ? "crop · px" : "output · px"}</span></div>
+              <div className="preset-row" role="group" aria-label="Preset kích thước crop vuông">
+                {[192, 256, 320, 416, 512, 640].map((size) => <button key={size} type="button" className={options.output_width === size && options.output_height === size ? "size-preset active" : "size-preset"} aria-pressed={options.output_width === size && options.output_height === size} onClick={() => updateOptions({ output_width: size, output_height: size })}>{size}</button>)}
               </div>
               <div className="form-grid two-col dimension-row">
-                <label className="field-label">Rộng<input type="number" min="16" max="4096" step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
-                <label className="field-label">Cao<input type="number" min="16" max="4096" step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
+                <label className="field-label">Rộng<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
+                <label className="field-label">Cao<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
               </div>
               <div className="form-grid two-col output-options">
                 <label className="field-label">Định dạng<select value={options.image_format} onChange={(event) => updateOptions({ image_format: event.target.value as ExtractionOptions["image_format"] })}><option value="jpg">JPG</option><option value="png">PNG</option></select></label>
-                <label className="field-label">Viền<input type="color" value={options.padding_color} onChange={(event) => updateOptions({ padding_color: event.target.value })} /></label>
+                {options.crop_mode !== "center" && <label className="field-label">Viền<input type="color" value={options.padding_color} onChange={(event) => updateOptions({ padding_color: event.target.value })} /></label>}
               </div>
+              {options.crop_mode === "center" && !cropSizeValid
+                ? <p className="crop-validation" role="alert">Nhập chiều rộng và chiều cao là số nguyên từ 1 đến 4096 px.</p>
+                : options.crop_mode === "center" && preview && !cropFitsPreview
+                  ? <p className="crop-validation" role="alert">Crop {options.output_width} × {options.output_height} vượt khung nguồn {preview.width} × {preview.height}. Hãy giảm kích thước crop.</p>
+                  : options.crop_mode === "center" && <p className="crop-helper">Tâm crop dùng floor((khung − kích thước) / 2). Ảnh giữ nguyên pixel nguồn.</p>}
               {options.image_format === "jpg" && <label className="quality-row">JPEG quality <input type="range" min="50" max="100" value={options.jpeg_quality} onChange={(event) => updateOptions({ jpeg_quality: Number(event.target.value) })} /><strong>{options.jpeg_quality}</strong></label>}
             </section>
 
@@ -996,8 +1126,8 @@ function App() {
             <div><h2>Frame vừa trích</h2><span>{project.images.length} trong dự án{fileListTruncated ? " · đang hiển thị tối đa 500 ảnh gần nhất" : ""}</span></div>
             <div className="gallery-summary">
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
-              {progress && progress.duplicate_frames > 0 && <span>{progress.duplicate_frames} trùng</span>}
-              {progress && progress.blurry_frames > 0 && <span>{progress.blurry_frames} mờ</span>}
+              {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop trùng</span>}
+              {progress && progress.blurry_crops > 0 && <span>{progress.blurry_crops} crop mờ</span>}
               {progress && <span>{progress.elapsed_seconds}s</span>}
             </div>
           </div>
