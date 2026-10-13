@@ -1,37 +1,56 @@
 # FrameForge
 
-Ứng dụng desktop mã nguồn mở để chuẩn bị video và dữ liệu gán nhãn. Phase 1 thiết lập nền tảng Tauri 2, React/TypeScript và Python engine chạy cục bộ. Hiện ứng dụng có health check thật qua giao thức JSON-lines; các tính năng xử lý video và gán nhãn chưa được triển khai.
+FrameForge là ứng dụng desktop local-first để trích xuất ảnh từ video và chuẩn bị dữ liệu cho quy trình gán nhãn. Workspace tiếng Việt hỗ trợ nhập video/ảnh bằng dialog hoặc kéo thả, xem metadata và preview frame thật, lấy mẫu theo frame hoặc thời gian, lọc frame gần giống và ảnh mờ, crop letterbox hoặc grid, rồi lưu ảnh JPG/PNG cùng dự án SQLite `.ffproj`.
+
+Ứng dụng có thể nạp một tệp ONNX bằng ONNX Runtime CPU để đọc thông tin tensor và metadata lớp. Đây mới là bước kiểm tra model; **inference, sinh/chỉnh sửa nhãn và xuất YOLO chưa được triển khai**. FrameForge không huấn luyện hoặc fine-tune model, và không tạo detection giả.
 
 ## Yêu cầu
 
 - Node.js tương thích với Vite 8 và pnpm
-- Rust stable và các công cụ build desktop của hệ điều hành
-- Python 3
+- Rust stable cùng công cụ build desktop của hệ điều hành
+- Python 3.10 trở lên
+
+## Cài đặt môi trường Python
+
+Từ thư mục repository:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e "engine[dev]"
+pnpm install
+```
+
+Trên Windows, dùng `.venv\Scripts\python.exe` thay cho `.venv/bin/python`. Có thể đặt `FRAMEFORGE_PYTHON` để chọn một Python interpreter khác đã cài các dependency trong `engine/pyproject.toml`.
 
 ## Chạy ứng dụng
 
 ```sh
-pnpm install
 pnpm tauri dev
 ```
 
-Nếu Python không nằm trong `PATH`, đặt `FRAMEFORGE_PYTHON` thành đường dẫn tới trình thông dịch Python trước khi chạy ứng dụng.
+Vite sử dụng cổng `1420`. Tauri gọi tiến trình Python qua JSON-lines và kiểm tra đường dẫn/lệnh ở Rust trước khi chạy.
 
 ## Kiểm tra và build
 
 ```sh
 pnpm test:engine
 pnpm build
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo check --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-`pnpm test:engine` chạy kiểm thử giao thức bằng thư viện `unittest` có sẵn của Python. `pnpm build` kiểm tra TypeScript và build frontend. `pnpm tauri build` tạo gói desktop cho hệ điều hành hiện tại.
+`pnpm test:engine` chạy pytest trên fixture media tổng hợp nhỏ. `pnpm build` kiểm tra TypeScript và build frontend. Các lệnh Tauri build trên hệ điều hành hiện tại; build thành công trên macOS không xác nhận Windows.
 
 ## Cấu trúc
 
-- `src/` — giao diện React/TypeScript
-- `src-tauri/` — ứng dụng desktop và lệnh Rust
-- `engine/` — tiến trình Python và kiểm thử giao thức
-- `PRODUCT.md`, `DESIGN.md`, `DEVELOPMENT.md` — phạm vi sản phẩm, thiết kế và hướng dẫn phát triển
+- `src/` — React/TypeScript workspace
+- `src-tauri/` — ứng dụng Tauri 2 và cầu nối Rust an toàn
+- `engine/` — Python/OpenCV/ONNX Runtime, trích xuất và lưu dự án
+- `docs/design/` — hợp đồng giao diện cho workspace trích xuất
+- `PRODUCT.md`, `DESIGN.md`, `DEVELOPMENT.md` — phạm vi, hướng thiết kế và trạng thái phát triển
 
-Lệnh `engine_health` khởi chạy Python engine, gửi một dòng JSON, rồi xác thực phản hồi JSON-lines. Engine chỉ hỗ trợ lệnh `health` ở giai đoạn này và không giả lập kết quả nhận diện.
+## Trạng thái
+
+Đã triển khai media inspection/preview, trích frame có progress và hủy, lọc dHash/Laplacian, crop letterbox/grid, SQLite create/save/load và kiểm tra metadata ONNX bằng CPU. Hiện các tác vụ này có kiểm thử Python; inference YOLO, biên tập annotation, export dataset, đóng gói Python sidecar và kiểm thử Windows vẫn còn ở roadmap.

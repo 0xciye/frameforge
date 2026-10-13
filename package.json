@@ -8,10 +8,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:engine": "python3 -m unittest discover -s engine/tests"
+    "test:engine": "node scripts/python-runner.mjs -m pytest engine/tests"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "~2.8.2",
+    "lucide-react": "^1.55.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

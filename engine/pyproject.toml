@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frameforge-engine"
+version = "0.1.0"
+description = "Local media processing engine for FrameForge"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.10,<5",
+  "onnxruntime>=1.20,<2",
+  "Pillow>=10,<13",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[tool.setuptools]
+py-modules = ["frameforge_engine"]
+packages = ["frameforge"]
+package-dir = {"" = "."}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

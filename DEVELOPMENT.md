@@ -1,37 +1,73 @@
-# Phát triển
+# Phát triển FrameForge
 
-## Công cụ
+## Trạng thái hiện tại
 
-- Node.js và pnpm để chạy Vite/React
-- Rust stable và toolchain native tương ứng để build Tauri
-- Python 3 để chạy engine
+| Khả năng | Trạng thái | Ghi chú |
+|---|---|---|
+| Tauri 2 + React/TypeScript workspace | IMPLEMENTED | Giao diện tiếng Việt theo ảnh tham chiếu |
+| Python JSON-lines IPC | IMPLEMENTED | JSON-lines engine process có test; Rust command đã `cargo check`, runtime desktop toàn tuyến còn cần smoke test |
+| Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; seek bằng tác vụ nền |
+| Trích frame, lọc, crop, JPG/PNG | TESTED_MACOS | Có fixture video tổng hợp; grid tạo crop chồng lấp |
+| Dự án SQLite `.ffproj` | TESTED_MACOS | Create/save/load; bảo vệ tệp tồn tại không phải dự án |
+| Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
+| Inference, sửa annotation, xuất YOLO | NOT_STARTED | Tab và hành động chưa khả dụng, không sinh kết quả giả |
+| Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Ứng dụng ưu tiên Python `python3` trên macOS/Linux và `python` trên Windows. Đặt `FRAMEFORGE_PYTHON` nếu cần dùng một interpreter ở đường dẫn khác.
+Giai đoạn đang làm là hoàn thiện workspace trích xuất và tiến tới inference CPU. Không gộp trạng thái macOS với xác nhận Windows.
+
+## Công cụ và cài đặt
+
+- Node.js, pnpm, Rust stable và toolchain native của hệ điều hành.
+- Python 3.10 trở lên.
+- Từ root: `python3 -m venv .venv`, `.venv/bin/python -m pip install -e "engine[dev]"`, `pnpm install`.
+- Windows dùng `.venv\Scripts\python.exe`; đặt `FRAMEFORGE_PYTHON` nếu cần chọn interpreter khác.
 
 ## Lệnh thường dùng
 
 ```sh
-pnpm install
 pnpm tauri dev
-pnpm build
 pnpm test:engine
+pnpm build
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo check --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-Tauri chạy Vite tại cổng `1420`. Không đổi cổng nếu chưa cập nhật đồng thời cấu hình Tauri và Vite.
+Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `vite.config.ts` nếu đổi cổng. `pnpm test:engine` sử dụng `.venv` khi có, nếu không sẽ dùng `FRAMEFORGE_PYTHON` hoặc Python trên `PATH`.
 
-## Cầu nối engine
+## Engine và IPC
 
-Rust mở `engine/frameforge_engine.py` trực tiếp dưới dạng tiến trình con, gửi JSON-lines qua stdin và đọc phản hồi từ stdout. Chẩn đoán của engine phải ghi vào stderr để không làm hỏng giao thức. Script được đóng gói cùng ứng dụng; interpreter Python là dependency ở Phase 1.
+Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Request hiện hỗ trợ:
+Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `extract_frames`, `create_project`, `save_project`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng và đường dẫn trước khi chạy Python. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
+
+Ví dụ:
 
 ```json
-{"id":"health","command":"health"}
+{"id":"health-1","command":"health","arguments":{}}
 ```
 
-Response thành công có `id`, `ok: true` và `data` gồm trạng thái engine, phiên bản Python và danh sách khả năng. Request sai hoặc command chưa hỗ trợ trả `ok: false` cùng mã lỗi và thông điệp.
+Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các response JSON-lines riêng có `event`. Không ghi log vào stdout của engine.
 
-## Hệ điều hành
+## Dữ liệu và giới hạn
 
-Phase 1 được phát triển trên macOS. Các gói Windows chưa được build và xác nhận trên Windows; không tuyên bố hỗ trợ phát hành Windows cho đến khi hoàn tất xác nhận native.
+- Frame gốc không bị sửa. Ảnh đầu ra được ghi atomically qua tệp tạm; collisions có lựa chọn bỏ qua, đổi tên hoặc ghi đè.
+- Hạn mức frame áp dụng tổng trên các nguồn đã chọn. Danh sách file/thumbnail trả về cho gallery hiện giới hạn 500 ảnh mỗi request để tránh giữ lượng dữ liệu không giới hạn trong frontend.
+- Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; bộ lọc là heuristic và không đảm bảo phát hiện mọi ảnh gần giống.
+- Crop grid hiện chỉ xử lý ảnh; việc truyền nhãn/box qua crop chờ inference và annotation editor.
+- Python engine được đóng gói cùng nguồn, nhưng runtime và dependency Python vẫn cần cài riêng khi chạy ứng dụng. Standalone sidecar packaging chưa làm.
+
+## Kiểm chứng macOS của task gần nhất
+
+- `pnpm test:engine`: pytest engine trên Python 3.12; kiểm thử fixture ảnh/video, lọc/crop, project SQLite và JSON-lines.
+- `pnpm build`: TypeScript strict và Vite production build.
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` và `cargo check --manifest-path src-tauri/Cargo.toml`: định dạng cùng biên dịch crate Tauri.
+- Workspace chạy trong browser 1024×700 để kiểm tra overflow và vị trí panel. Tauri dev được build/chạy, nhưng màn hình được CUA quan sát là app cài sẵn Phase 1; vì vậy chưa ghi nhận smoke test native cho workspace mới hoặc Tauri↔engine end-to-end.
+
+## Quy trình thay đổi
+
+Đọc `AGENTS.md`, `agent.md`, `PRODUCT.md`, `DESIGN.md` và mục liên quan trong file này trước khi sửa. Sau thay đổi đáng kể, chạy kiểm tra phù hợp, ghi kết quả thật, cập nhật tài liệu và xem lại diff. Không commit môi trường `.venv`, `node_modules`, cache, media người dùng hoặc model weights.
+
+## Windows handoff
+
+Windows chưa được build hoặc xác nhận. Các việc còn lại: xác nhận native dialogs/paths, đóng gói Python và DLL của OpenCV/ONNX Runtime, build Tauri, kiểm tra Windows 10/11, tích hợp DirectML và benchmark trên RX 6600. Chỉ ghi `TESTED_WINDOWS_CI` hoặc `VERIFIED_WINDOWS_HARDWARE` sau đúng loại kiểm thử đó.

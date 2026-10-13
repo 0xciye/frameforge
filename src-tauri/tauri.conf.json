@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "FrameForge",
-        "width": 960,
-        "height": 720,
-        "minWidth": 600,
-        "minHeight": 560
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1024,
+        "minHeight": 700
       }
     ],
     "security": {
@@ -27,7 +27,10 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../engine/frameforge_engine.py": "engine/frameforge_engine.py"
+      "../engine/frameforge_engine.py": "engine/frameforge_engine.py",
+      "../engine/frameforge/__init__.py": "engine/frameforge/__init__.py",
+      "../engine/frameforge/media.py": "engine/frameforge/media.py",
+      "../engine/frameforge/project.py": "engine/frameforge/project.py"
     },
     "icon": [
       "icons/32x32.png",
