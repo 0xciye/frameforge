@@ -362,6 +362,44 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .ok_or("Thiếu đường dẫn dự án.")?;
             validate_new_project_path(path)
         }
+        "save_annotations" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let image_path = arguments
+                .get("image_path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn ảnh.")?;
+            let image_path = validate_media_path(image_path, false)?;
+            let extension = image_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"].contains(&extension.as_str()) {
+                return Err("Chỉ lưu nhãn cho tệp ảnh.".to_string());
+            }
+            if arguments
+                .get("annotations")
+                .and_then(Value::as_array)
+                .is_none_or(|annotations| annotations.len() > 10000)
+            {
+                return Err("Danh sách nhãn phải có tối đa 10000 box.".to_string());
+            }
+            let fingerprint = arguments
+                .get("image_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu fingerprint ảnh đã preview.")?;
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("Fingerprint ảnh không hợp lệ.".to_string());
+            }
+            if !matches!(arguments.get("status").and_then(Value::as_str), Some("ready" | "reviewed")) {
+                return Err("Trạng thái ảnh không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
         "load_project" => {
             let path = arguments
                 .get("path")
@@ -430,6 +468,20 @@ fn validate_new_project_path(value: &str) -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("Không xác định được thư mục dự án: {error}"))?;
     Ok(())
+}
+
+fn validate_existing_project_path(value: &str) -> Result<(), String> {
+    let path = canonical_existing_path(value)?;
+    if path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ffproj"))
+    {
+        Ok(())
+    } else {
+        Err("Hãy chọn một tệp dự án .ffproj hợp lệ.".to_string())
+    }
 }
 
 fn engine_script_path(app: &AppHandle) -> Result<PathBuf, String> {

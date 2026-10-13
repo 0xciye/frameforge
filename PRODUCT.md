@@ -9,7 +9,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Workspace desktop Tauri 2, React và TypeScript bằng tiếng Việt.
 - Nhập video/ảnh bằng dialog, kéo thả hoặc quét thư mục; đọc metadata và preview frame thật.
 - Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian.
-- Exact Center Crop cắt đúng vùng W×H từ tâm frame không resize/padding; overlay khóa trong preview; full-frame letterbox và grid vẫn khả dụng.
+- Exact Center Crop cắt đúng vùng W×H từ tâm frame không resize/padding; preview giữ frame nguồn và phủ overlay vùng crop đúng pixel; full-frame letterbox và grid vẫn khả dụng.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
 - Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1 lên v2.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.

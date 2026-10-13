@@ -9,7 +9,7 @@ import sys
 from typing import Any, Callable, Dict, Optional
 
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
-from frameforge.project import create_project, load_project, save_project
+from frameforge.project import create_project, load_project, save_annotations, save_project
 
 
 def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
@@ -37,6 +37,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "preview_frame",
                     "preview_center_crop",
                     "extract_frames",
+                    "save_annotations",
                     "project_persistence",
                     "model_inspection",
                 ],
@@ -76,6 +77,14 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = create_project(arguments["path"], arguments.get("name", "Dự án mới"))
         elif command == "save_project":
             result = save_project(arguments["path"], arguments["project"])
+        elif command == "save_annotations":
+            result = save_annotations(
+                arguments["path"],
+                arguments["image_path"],
+                arguments["annotations"],
+                arguments["status"],
+                arguments["image_fingerprint"],
+            )
         elif command == "load_project":
             result = load_project(arguments["path"])
         else:
@@ -84,7 +93,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, extract_frames, create_project, save_project, load_project.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, load_project.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:

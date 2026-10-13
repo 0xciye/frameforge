@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import sqlite3
 import uuid
@@ -12,6 +14,7 @@ from typing import Any, Dict
 
 
 SCHEMA_VERSION = 2
+DEFAULT_CLASS_NAMES = ("head", "body")
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -196,7 +199,14 @@ def create_project(path_value: str, name: str) -> Dict[str, Any]:
     try:
         connection = _connect(path)
         _initialize(connection)
-        project = {"id": str(uuid.uuid4()), "name": name, "sources": [], "settings": {}, "images": [], "class_names": []}
+        project = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "sources": [],
+            "settings": {},
+            "images": [],
+            "class_names": list(DEFAULT_CLASS_NAMES),
+        }
         return _save(connection, project)
     except BaseException:
         if connection is not None:
@@ -275,6 +285,123 @@ def save_project(path_value: str, project: Dict[str, Any]) -> Dict[str, Any]:
     finally:
         if connection is not None:
             connection.close()
+
+
+def save_annotations(
+    path_value: str,
+    image_path: str,
+    annotations: Any,
+    image_status: str,
+    image_fingerprint: str,
+) -> Dict[str, Any]:
+    path = Path(path_value).expanduser().resolve(strict=True)
+    if path.suffix.lower() != ".ffproj" or not path.is_file():
+        raise ValueError("Hãy chọn một tệp dự án FrameForge .ffproj.")
+    if image_status not in {"ready", "reviewed"}:
+        raise ValueError("Trạng thái ảnh không hợp lệ.")
+    if not isinstance(annotations, list) or len(annotations) > 10000:
+        raise ValueError("Danh sách nhãn phải là một mảng có tối đa 10000 box.")
+    image_file = Path(image_path).expanduser()
+    if not image_file.is_file():
+        raise ValueError("Không tìm thấy ảnh để lưu nhãn.")
+    if not isinstance(image_fingerprint, str) or len(image_fingerprint) != 64:
+        raise ValueError("Thiếu fingerprint ảnh đã preview.")
+    if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
+        raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu nhãn.")
+    try:
+        valid_project = _is_frameforge_project(path)
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Tệp đã tồn tại nhưng không phải là dự án FrameForge hợp lệ.") from error
+    if not valid_project:
+        raise ValueError("Tệp đã tồn tại nhưng không phải là dự án FrameForge hợp lệ.")
+
+    connection = _connect(path)
+    try:
+        _migrate(connection)
+        image = connection.execute(
+            "SELECT width, height FROM images WHERE path = ?", (image_path,)
+        ).fetchone()
+        if image is None:
+            raise ValueError("Ảnh không thuộc dự án hiện tại.")
+        width, height = int(image["width"]), int(image["height"])
+        if width <= 0 or height <= 0:
+            raise ValueError("Kích thước ảnh trong dự án không hợp lệ.")
+        class_ids = {row["class_id"] for row in connection.execute("SELECT class_id FROM classes")}
+
+        cleaned = []
+        annotation_ids = set()
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                raise ValueError("Mỗi nhãn phải là một object hợp lệ.")
+            raw_class_id = annotation.get("class_id")
+            if isinstance(raw_class_id, bool) or not isinstance(raw_class_id, int) or raw_class_id not in class_ids:
+                raise ValueError("Nhãn tham chiếu class ID không tồn tại trong dự án.")
+            try:
+                x_min, y_min, x_max, y_max = (
+                    float(annotation[key]) for key in ("x_min", "y_min", "x_max", "y_max")
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Tọa độ box không hợp lệ.") from error
+            if not all(math.isfinite(value) for value in (x_min, y_min, x_max, y_max)):
+                raise ValueError("Tọa độ box phải là số hữu hạn.")
+            if not (0 <= x_min < x_max <= width and 0 <= y_min < y_max <= height):
+                raise ValueError("Box phải có diện tích dương và nằm trong ảnh.")
+
+            annotation_id = annotation.get("id")
+            if annotation_id is None:
+                annotation_id = str(uuid.uuid4())
+            if not isinstance(annotation_id, str) or not annotation_id or len(annotation_id) > 128:
+                raise ValueError("Mã nhãn không hợp lệ.")
+            if annotation_id in annotation_ids:
+                raise ValueError("Mã nhãn bị trùng lặp.")
+            annotation_ids.add(annotation_id)
+
+            source = annotation.get("source", "manual")
+            review_status = annotation.get("review_status", "unreviewed")
+            if source != "manual" or review_status not in {"unreviewed", "reviewed"}:
+                raise ValueError("Nguồn hoặc trạng thái review của nhãn không hợp lệ.")
+            confidence = annotation.get("confidence")
+            if confidence is not None:
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("Confidence phải nằm trong khoảng 0 đến 1.") from error
+                if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                    raise ValueError("Confidence phải nằm trong khoảng 0 đến 1.")
+            cleaned.append((
+                annotation_id,
+                image_path,
+                raw_class_id,
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+                confidence,
+                source,
+                review_status,
+            ))
+
+        now = datetime.now(timezone.utc).isoformat()
+        with connection:
+            if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
+                raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu nhãn.")
+            connection.execute("DELETE FROM annotations WHERE image_path = ?", (image_path,))
+            connection.executemany(
+                """INSERT INTO annotations(
+                    annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
+                    confidence, source, review_status
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                cleaned,
+            )
+            connection.execute("UPDATE images SET status = ? WHERE path = ?", (image_status, image_path))
+            connection.execute(
+                "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
+            )
+        return {"image_path": image_path, "annotation_count": len(cleaned), "status": image_status}
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Không lưu được nhãn vào dự án: {0}".format(error)) from error
+    finally:
+        connection.close()
 
 
 def load_project(path_value: str) -> Dict[str, Any]:

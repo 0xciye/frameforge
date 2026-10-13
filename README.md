@@ -1,8 +1,8 @@
 # FrameForge
 
-FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, huấn luyện YOLO11n và tiếp tục cải thiện model đã huấn luyện. Workspace hiện hỗ trợ nhập video/ảnh, preview media thật, lấy mẫu theo frame/giây, Exact Center Crop đúng pixel, lọc blur/dHash trên crop, crop letterbox/grid và lưu JPG/PNG cùng dự án SQLite `.ffproj`.
+FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, huấn luyện YOLO11n và tiếp tục cải thiện model đã huấn luyện. Workspace hiện hỗ trợ nhập video/ảnh, preview frame thật, lấy mẫu theo frame/giây, Exact Center Crop đúng pixel với khung crop phủ trên frame nguồn, lọc blur/dHash, crop letterbox/grid, gán nhãn thủ công và lưu dự án SQLite `.ffproj`.
 
-Huấn luyện YOLO11n, fine-tuning, inference, gán nhãn, quản lý dataset, benchmarking và export model là mục tiêu của sản phẩm nhưng **chưa triển khai**. Hiện ứng dụng chỉ đọc tensor/metadata của tệp ONNX bằng ONNX Runtime CPU; không tạo detection hay kết quả huấn luyện giả.
+Huấn luyện YOLO11n, fine-tuning, inference, quản lý dataset, benchmarking và export model là mục tiêu của sản phẩm nhưng **chưa triển khai**. Hiện ứng dụng chỉ đọc tensor/metadata của tệp ONNX bằng ONNX Runtime CPU; không tạo detection hay kết quả huấn luyện giả.
 
 ## Yêu cầu
 
@@ -53,4 +53,4 @@ pnpm tauri build
 
 ## Trạng thái
 
-Đã triển khai media inspection/preview, trích frame có progress và hủy, Exact Center Crop, lọc dHash/Laplacian trên vùng crop, crop letterbox/grid, lưu provenance crop trong SQLite `.ffproj` và kiểm tra metadata ONNX bằng CPU. Inference, biên tập annotation, export dataset, YOLO11n training/fine-tuning, benchmarking, đóng gói Python sidecar và xác nhận Windows vẫn còn ở roadmap.
+Đã triển khai media inspection/preview, trích frame có progress và hủy, Exact Center Crop, lọc dHash/Laplacian trên vùng crop, crop letterbox/grid, lưu provenance crop trong SQLite `.ffproj`, kiểm tra metadata ONNX bằng CPU và gán nhãn thủ công. Preview crop giữ frame được giải mã từ video, rồi vẽ lên đó vùng Exact Center Crop theo đúng tọa độ pixel và kích thước đã chọn; file crop thật xuất hiện trong gallery sau khi trích xuất. Màn chào bắt buộc kiểm tra engine đã được bỏ; app mở thẳng workspace và tự kiểm tra Python engine ở trạng thái nhỏ trên toolbar. Video đầu vào chủ yếu là Full HD (1920×1080); app đọc kích thước thực tế và giữ tọa độ nhãn theo pixel ảnh, không ép mọi nguồn về một độ phân giải. Inference, quản lý/xuất dataset YOLO, YOLO11n training/fine-tuning, benchmarking, đóng gói Python sidecar và xác nhận Windows vẫn còn ở roadmap.

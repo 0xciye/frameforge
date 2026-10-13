@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -14,7 +15,7 @@ sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
 from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame
-from frameforge.project import create_project, load_project, save_project
+from frameforge.project import create_project, load_project, save_annotations, save_project
 
 
 def create_video(path: Path, frames: list[np.ndarray], fps: float = 10.0) -> None:
@@ -140,6 +141,7 @@ def test_media_inspection_and_preview_read_real_image(tmp_path: Path):
     assert result["sources"][0]["kind"] == "image"
     assert (result["sources"][0]["width"], result["sources"][0]["height"]) == (64, 48)
     assert preview["data_url"].startswith("data:image/jpeg;base64,")
+    assert preview["image_fingerprint"] == hashlib.sha256(image_path.read_bytes()).hexdigest()
     assert (preview["width"], preview["height"]) == (64, 48)
 
     crop_preview = preview_center_crop(str(image_path), 0, 32, 24)
@@ -366,6 +368,110 @@ def test_sqlite_project_round_trips_settings_images_and_annotations(tmp_path: Pa
     assert reopened["images"][0]["sharpness_score"] == 82.5
     assert reopened["images"][0]["extraction_settings"] == {"crop_mode": "center"}
     assert reopened["class_names"] == ["person"]
+
+
+def _create_annotation_project(tmp_path: Path) -> tuple[Path, str]:
+    project_path = tmp_path / "labels.ffproj"
+    created = create_project(str(project_path), "Labels")
+    image_file = tmp_path / "frame.jpg"
+    image_file.write_bytes(b"fixture image bytes")
+    image_path = str(image_file)
+    save_project(str(project_path), {
+        "id": created["id"],
+        "name": "Labels",
+        "sources": [],
+        "settings": {},
+        "images": [{
+            "path": image_path,
+            "width": 1920,
+            "height": 1080,
+            "status": "ready",
+            "annotations": [],
+        }],
+        "class_names": ["head", "body"],
+    })
+    return project_path, image_path
+
+
+def test_new_project_starts_with_stable_head_and_body_classes(tmp_path: Path):
+    project_path = tmp_path / "defaults.ffproj"
+
+    create_project(str(project_path), "Defaults")
+
+    assert load_project(str(project_path))["class_names"] == ["head", "body"]
+
+
+def test_save_annotations_command_persists_pixel_boxes_and_review_state(tmp_path: Path):
+    project_path, image_path = _create_annotation_project(tmp_path)
+    request = {
+        "id": "save-label-1",
+        "command": "save_annotations",
+        "arguments": {
+            "path": str(project_path),
+            "image_path": image_path,
+            "annotations": [{
+                "id": "head-1",
+                "class_id": 0,
+                "x_min": 120.5,
+                "y_min": 84,
+                "x_max": 640,
+                "y_max": 420.25,
+                "confidence": None,
+                "source": "manual",
+                "review_status": "reviewed",
+            }],
+            "status": "reviewed",
+            "image_fingerprint": hashlib.sha256(Path(image_path).read_bytes()).hexdigest(),
+        },
+    }
+
+    response = frameforge_engine.handle_request(request)
+    reopened = load_project(str(project_path))
+    image = reopened["images"][0]
+
+    assert response["ok"] is True
+    assert response["data"]["annotation_count"] == 1
+    assert image["status"] == "reviewed"
+    assert image["annotations"][0]["class_id"] == 0
+    assert image["annotations"][0]["x_min"] == 120.5
+    assert image["annotations"][0]["y_max"] == 420.25
+    assert image["annotations"][0]["review_status"] == "reviewed"
+
+
+def test_save_annotations_rejects_invalid_boxes_without_replacing_saved_labels(tmp_path: Path):
+    project_path, image_path = _create_annotation_project(tmp_path)
+    saved = [{
+        "id": "saved-box",
+        "class_id": 0,
+        "x_min": 10,
+        "y_min": 20,
+        "x_max": 100,
+        "y_max": 120,
+        "source": "manual",
+        "review_status": "unreviewed",
+    }]
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+    save_annotations(str(project_path), image_path, saved, "ready", fingerprint)
+
+    for invalid in (
+        {**saved[0], "x_max": 10},
+        {**saved[0], "x_max": 1921},
+        {**saved[0], "class_id": 2},
+        {**saved[0], "x_min": float("nan")},
+    ):
+        with pytest.raises(ValueError):
+            save_annotations(str(project_path), image_path, [invalid], "ready", fingerprint)
+        reopened = load_project(str(project_path))
+        assert reopened["images"][0]["annotations"][0]["id"] == "saved-box"
+
+
+def test_save_annotations_detects_image_changes_after_preview(tmp_path: Path):
+    project_path, image_path = _create_annotation_project(tmp_path)
+    old_fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+    Path(image_path).write_bytes(b"replacement image bytes")
+
+    with pytest.raises(ValueError, match="đã thay đổi"):
+        save_annotations(str(project_path), image_path, [], "ready", old_fingerprint)
 
 
 def test_schema_v1_project_loads_and_migrates_on_save(tmp_path: Path):

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -12,7 +12,6 @@ import {
   ChevronsLeft,
   ChevronsRight,
   CircleHelp,
-  Crop,
   FileImage,
   FileVideo2,
   FolderOpen,
@@ -30,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 import "./App.css";
+import ManualLabeling, { type Annotation } from "./ManualLabeling";
 
 type MediaSource = {
   path: string;
@@ -55,7 +55,7 @@ type ProjectImage = {
   width: number;
   height: number;
   status: string;
-  annotations?: unknown[];
+  annotations?: Annotation[];
 };
 
 type ExtractionOptions = {
@@ -96,11 +96,6 @@ type FramePreview = {
 };
 
 type CropRect = { x: number; y: number; width: number; height: number };
-type CenterCropPreview = FramePreview & {
-  source_width: number;
-  source_height: number;
-  crop_rect: CropRect;
-};
 
 type EngineProgress = {
   source_index: number;
@@ -214,7 +209,7 @@ function App() {
     sources: [],
     settings: DEFAULT_OPTIONS,
     images: [],
-    class_names: [],
+    class_names: ["head", "body"],
   });
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -222,10 +217,6 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [frameIndex, setFrameIndex] = useState(0);
   const [preview, setPreview] = useState<FramePreview | null>(null);
-  const [cropPreview, setCropPreview] = useState<CenterCropPreview | null>(null);
-  const [showCropPreview, setShowCropPreview] = useState(false);
-  const [cropPreviewLoading, setCropPreviewLoading] = useState(false);
-  const [cropPreviewError, setCropPreviewError] = useState<string | null>(null);
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -242,6 +233,8 @@ function App() {
   const [dropActive, setDropActive] = useState(false);
   const [activeTab, setActiveTab] = useState<"extract" | "label" | "export">("extract");
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
+  const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const annotationSaveFailed = useRef(false);
   const previewSequence = useRef(0);
   const activeExtractionId = useRef<string | null>(null);
   const progressSubscription = useRef<Promise<void>>(Promise.resolve());
@@ -269,7 +262,6 @@ function App() {
       ? frameIndex / selectedSource.fps
       : null;
   const duration = selectedSource?.duration_seconds ?? null;
-  const displayPreview = showCropPreview ? cropPreview : preview;
   const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
   const cropSizeValid = Number.isInteger(options.output_width) && Number.isInteger(options.output_height)
     && options.output_width >= minimumOutputSize && options.output_width <= 4096
@@ -284,16 +276,59 @@ function App() {
       }
     : null;
   const previewFrameBox = useMemo(() => {
-    if (!displayPreview || !previewStageSize.width || !previewStageSize.height) return null;
-    const scale = Math.min(1, previewStageSize.width / displayPreview.width, previewStageSize.height / displayPreview.height);
-    return { width: displayPreview.width * scale, height: displayPreview.height * scale };
-  }, [displayPreview, previewStageSize]);
+    if (!preview || !previewStageSize.width || !previewStageSize.height) return null;
+    const scale = Math.min(1, previewStageSize.width / preview.width, previewStageSize.height / preview.height);
+    return { width: preview.width * scale, height: preview.height * scale };
+  }, [preview, previewStageSize]);
 
   async function callEngine<T>(command: string, args: Record<string, unknown> = {}) {
     return invoke<T>("engine_request", {
       request: { id: makeRequestId(), command, arguments: args },
     });
   }
+
+  function serializeProjectWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = projectWriteQueue.current.then(operation, operation);
+    projectWriteQueue.current = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+
+  const loadLabelPreview = useCallback((path: string) => (
+    callEngine<{ data_url: string; width: number; height: number; image_fingerprint?: string }>(
+      "preview_frame",
+      { path, frame_index: 0 },
+    )
+  ), []);
+
+  const saveLabelImage = useCallback(async (
+    imagePath: string,
+    annotations: Annotation[],
+    status: "ready" | "reviewed",
+    fingerprint: string,
+  ) => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi chỉnh sửa nhãn.");
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === imagePath
+        ? { ...image, annotations: annotations.map((annotation) => ({ ...annotation })), status }
+        : image),
+    }));
+    try {
+      await serializeProjectWrite(() => callEngine("save_annotations", {
+        path,
+        image_path: imagePath,
+        annotations,
+        status,
+        image_fingerprint: fingerprint,
+      }));
+      annotationSaveFailed.current = false;
+    } catch (reason) {
+      annotationSaveFailed.current = true;
+      setDirty(true);
+      throw reason;
+    }
+  }, [projectPath]);
 
   useEffect(() => {
     let alive = true;
@@ -376,56 +411,27 @@ function App() {
   useEffect(() => {
     if (!selectedSource) {
       setPreview(null);
-      setCropPreview(null);
       setPreviewError(null);
-      setCropPreviewError(null);
-      setCropPreviewLoading(false);
       return;
     }
     const sequence = ++previewSequence.current;
     const path = selectedSource.path;
     const index = selectedSource.kind === "image" ? 0 : frameIndex;
     setPreviewError(null);
-    setCropPreviewError(null);
-    const shouldPreviewCrop = showCropPreview && options.crop_mode === "center" && cropSizeValid;
-    setCropPreview(null);
-    setCropPreviewLoading(shouldPreviewCrop);
     const timer = window.setTimeout(() => {
-      if (!showCropPreview) {
-        void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
-          .then((result) => {
-            if (sequence === previewSequence.current) setPreview(result);
-          })
-          .catch((reason) => {
-            if (sequence === previewSequence.current) {
-              setPreview(null);
-              setPreviewError(String(reason));
-            }
-          });
-      }
-      if (showCropPreview && options.crop_mode === "center" && cropSizeValid) {
-        void callEngine<CenterCropPreview>("preview_center_crop", {
-          path,
-          frame_index: index,
-          width: options.output_width,
-          height: options.output_height,
+      void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
+        .then((result) => {
+          if (sequence === previewSequence.current) setPreview(result);
         })
-          .then((result) => {
-            if (sequence === previewSequence.current) setCropPreview(result);
-          })
-          .catch((reason) => {
-            if (sequence === previewSequence.current) {
-              setCropPreview(null);
-              setCropPreviewError(String(reason));
-            }
-          })
-          .finally(() => {
-            if (sequence === previewSequence.current) setCropPreviewLoading(false);
-          });
-      }
+        .catch((reason) => {
+          if (sequence === previewSequence.current) {
+            setPreview(null);
+            setPreviewError(String(reason));
+          }
+        });
     }, 90);
     return () => window.clearTimeout(timer);
-  }, [selectedSource?.path, selectedSource?.kind, frameIndex, showCropPreview, options.crop_mode, options.output_width, options.output_height]);
+  }, [selectedSource?.path, selectedSource?.kind, frameIndex]);
 
   useEffect(() => {
     if (!playing || !selectedSource || selectedSource.kind !== "video") return;
@@ -439,7 +445,6 @@ function App() {
   }, [playing, selectedSource?.path, selectedSource?.fps, selectedSource?.kind, sourceFrameCount, frameIndex]);
 
   function updateOptions(patch: Partial<ExtractionOptions>) {
-    if (patch.crop_mode && patch.crop_mode !== "center") setShowCropPreview(false);
     setOptions((current) => ({ ...current, ...patch }));
     setProject((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
     setDirty(true);
@@ -602,7 +607,7 @@ function App() {
         sources: [],
         settings: DEFAULT_OPTIONS,
         images: [],
-        class_names: [],
+        class_names: ["head", "body"],
       };
       setProject(empty);
       setProjectPath(path);
@@ -645,7 +650,11 @@ function App() {
     }
   }
 
-  async function saveProject() {
+  async function saveProject(): Promise<boolean> {
+    if (annotationSaveFailed.current) {
+      setError("Một số nhãn chưa được tự lưu. Quay lại Gán nhãn, tải lại ảnh và thử lưu nhãn trước.");
+      return false;
+    }
     try {
       let path = projectPath;
       if (!path) {
@@ -655,18 +664,28 @@ function App() {
           filters: [{ name: "Dự án FrameForge", extensions: ["ffproj"] }],
         });
       }
-      if (!path) return;
-      const saved = await callEngine<{ id: string; name: string; modified_at: string }>("save_project", {
+      if (!path) return false;
+      const saved = await serializeProjectWrite(() => callEngine<{ id: string; name: string; modified_at: string }>("save_project", {
         path,
         project: { ...project, settings: options },
-      });
+      }));
       setProject((current) => ({ ...current, id: saved.id, name: saved.name }));
       setProjectPath(path);
       setDirty(false);
       setError(null);
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     }
+  }
+
+  async function openLabelWorkspace() {
+    setError(null);
+    if (project.images.length > 0 && (!projectPath || dirty)) {
+      if (!(await saveProject())) return;
+    }
+    setActiveTab("label");
   }
 
   async function inspectModel() {
@@ -866,8 +885,8 @@ function App() {
         <button className={activeTab === "extract" ? "workflow-tab active" : "workflow-tab"} onClick={() => setActiveTab("extract")} type="button">
           <Scissors size={15} /><span>Trích xuất</span>
         </button>
-        <button className="workflow-tab unavailable" type="button" disabled title="Cần hoàn tất inference và trình sửa nhãn">
-          <Settings2 size={15} /><span>Gán nhãn</span><small>Sắp có</small>
+        <button className={activeTab === "label" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openLabelWorkspace()}>
+          <Settings2 size={15} /><span>Gán nhãn</span>
         </button>
         <button className="workflow-tab unavailable" type="button" disabled title="Cần hoàn tất trình gán nhãn">
           <HardDrive size={15} /><span>Xuất dữ liệu</span><small>Sắp có</small>
@@ -883,6 +902,14 @@ function App() {
         </div>
       ) : null}
 
+      {activeTab === "label" ? (
+        <ManualLabeling
+          images={project.images}
+          classNames={project.class_names}
+          loadPreview={loadLabelPreview}
+          saveImage={saveLabelImage}
+        />
+      ) : (
       <section
         className={`workspace-layout ${dropActive ? "drop-active" : ""}`}
         aria-label="Không gian trích xuất frame"
@@ -950,32 +977,19 @@ function App() {
             </div>
             <div className="preview-tools">
               <span className="preview-resolution">
-                {displayPreview ? `${displayPreview.width} × ${displayPreview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
+                {preview ? `${preview.width} × ${preview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
               </span>
-              {options.crop_mode === "center" && <button
-                type="button"
-                className="preview-mode-button"
-                aria-pressed={showCropPreview}
-                disabled={!preview || (!showCropPreview && !cropFitsPreview) || !selectedSource}
-                title={showCropPreview ? "Trở lại khung nguồn" : cropFitsPreview ? "Xem ảnh crop thực tế từ frame hiện tại" : "Kích thước crop phải vừa với frame nguồn"}
-                onClick={() => {
-                  setPlaying(false);
-                  setShowCropPreview((current) => !current);
-                }}
-              >
-                <Crop size={13} aria-hidden="true" />{showCropPreview ? "Xem nguồn" : "Xem crop"}
-              </button>}
             </div>
           </div>
           <div className="preview-stage" ref={previewStageRef}>
-            {displayPreview && previewFrameBox ? (
+            {preview && previewFrameBox ? (
               <div className="preview-frame" style={{ width: previewFrameBox.width, height: previewFrameBox.height }}>
                 <img
                   className="preview-image"
-                  src={displayPreview.data_url}
-                  alt={showCropPreview ? `Crop ${displayPreview.width} × ${displayPreview.height} từ ${selectedSource?.name ?? "nguồn"}` : `Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`}
+                  src={preview.data_url}
+                  alt={`Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`}
                 />
-                {!showCropPreview && options.crop_mode === "center" && cropRect && preview && <div
+                {options.crop_mode === "center" && cropRect && <div
                   className={`crop-overlay${cropFitsPreview ? "" : " invalid"}`}
                   style={{
                     left: `${cropRect.x / preview.width * 100}%`,
@@ -984,10 +998,8 @@ function App() {
                     height: `${cropRect.height / preview.height * 100}%`,
                   }}
                   aria-hidden="true"
-                ><span>Khóa · {options.output_width} × {options.output_height}</span></div>}
+                ><span>Vùng crop · {options.output_width} × {options.output_height} px</span></div>}
               </div>
-            ) : showCropPreview && cropPreviewLoading ? (
-              <div className="preview-empty"><LoaderCircle className="spin" size={25} /><p>Đang tạo preview crop…</p><small>Frame gốc không bị thay đổi.</small></div>
             ) : previewError ? (
               <div className="preview-empty preview-error"><AlertCircle size={26} /><p>Không tải được frame</p><small>{previewError}</small></div>
             ) : (
@@ -998,8 +1010,6 @@ function App() {
                 {!selectedSource && <button type="button" className="primary-button" onClick={() => void chooseMedia(false)}><Plus size={15} /> Thêm media</button>}
               </div>
             )}
-            {showCropPreview && cropPreviewLoading && <div className="crop-preview-loading" role="status"><LoaderCircle className="spin" size={13} />Đang cập nhật crop…</div>}
-            {showCropPreview && cropPreviewError && <div className="crop-preview-error" role="status"><AlertCircle size={14} />{cropPreviewError}</div>}
           </div>
           <div className="player-controls">
             <div className="transport-controls">
@@ -1148,6 +1158,7 @@ function App() {
           </div>
         </section>
       </section>
+      )}
 
       <footer className="statusbar">
         <div className="status-left">
@@ -1159,7 +1170,7 @@ function App() {
         <div className="status-right">
           <span>{outputDirectory || "Đầu ra chưa chọn"}</span>
           <span className="status-separator">/</span>
-          <span>FrameForge · Trích xuất</span>
+          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : "Trích xuất"}</span>
         </div>
       </footer>
     </main>

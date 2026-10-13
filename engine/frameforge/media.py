@@ -140,7 +140,13 @@ def _read_frame(path: Path, frame_index: int) -> np.ndarray:
 
 
 def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -> Dict[str, Any]:
-    frame = _read_frame(Path(path_value).expanduser().resolve(strict=True), frame_index)
+    source_path = Path(path_value).expanduser().resolve(strict=True)
+    is_image = source_path.suffix.lower() in IMAGE_EXTENSIONS
+    fingerprint_before = hashlib.sha256(source_path.read_bytes()).hexdigest() if is_image else None
+    frame = _read_frame(source_path, frame_index)
+    image_fingerprint = hashlib.sha256(source_path.read_bytes()).hexdigest() if is_image else None
+    if fingerprint_before != image_fingerprint:
+        raise ValueError("Ảnh đang được thay đổi; hãy mở preview lại sau khi cập nhật xong.")
     source_height, source_width = frame.shape[:2]
     scale = min(1.0, max_edge / max(source_width, source_height))
     if scale < 1:
@@ -149,12 +155,15 @@ def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -
     if not ok:
         raise ValueError("Không tạo được ảnh preview.")
     data_url = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
-    return {
+    result = {
         "data_url": data_url,
         "width": source_width,
         "height": source_height,
         "frame_index": max(0, int(frame_index)),
     }
+    if image_fingerprint is not None:
+        result["image_fingerprint"] = image_fingerprint
+    return result
 
 
 def preview_center_crop(
