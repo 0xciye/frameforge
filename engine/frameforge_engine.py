@@ -8,6 +8,7 @@ import platform
 import sys
 from typing import Any, Callable, Dict, Optional
 
+from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, save_annotations, save_project
 
@@ -38,6 +39,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "preview_center_crop",
                     "extract_frames",
                     "save_annotations",
+                    "dataset_validation",
+                    "yolo_export",
                     "project_persistence",
                     "model_inspection",
                 ],
@@ -85,6 +88,27 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments["status"],
                 arguments["image_fingerprint"],
             )
+        elif command == "validate_dataset":
+            result = validate_dataset(
+                arguments["path"],
+                arguments.get("split_mode", "source"),
+                arguments.get("train_ratio", 0.8),
+                arguments.get("val_ratio", 0.1),
+                arguments.get("test_ratio", 0.1),
+                arguments.get("seed", 42),
+                arguments.get("segment_seconds", 30),
+            )
+        elif command == "export_yolo_dataset":
+            result = export_yolo_dataset(
+                arguments["path"],
+                arguments["output_dir"],
+                arguments.get("split_mode", "source"),
+                arguments.get("train_ratio", 0.8),
+                arguments.get("val_ratio", 0.1),
+                arguments.get("test_ratio", 0.1),
+                arguments.get("seed", 42),
+                arguments.get("segment_seconds", 30),
+            )
         elif command == "load_project":
             result = load_project(arguments["path"])
         else:
@@ -93,7 +117,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, load_project.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:

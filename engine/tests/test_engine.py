@@ -9,12 +9,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
 from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame
+from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.project import create_project, load_project, save_annotations, save_project
 
 
@@ -33,6 +35,67 @@ def distinct_frame(index: int) -> np.ndarray:
     cv2.rectangle(frame, (index * 5, 8), (min(index * 5 + 18, 63), 38), (80 + index * 12, 190, 240), -1)
     cv2.putText(frame, str(index), (2, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     return frame
+
+
+def create_dataset_project(tmp_path: Path, invalid_class: bool = False) -> tuple[Path, dict[str, Path]]:
+    image_root = tmp_path / "images"
+    source_a = image_root / "source-a"
+    source_b = image_root / "source-b"
+    source_a.mkdir(parents=True)
+    source_b.mkdir(parents=True)
+    image_paths = {
+        "a_positive": source_a / "same.png",
+        "a_negative": source_a / "negative.png",
+        "b_positive": source_b / "same.png",
+        "b_candidate": source_b / "candidate.png",
+    }
+    for index, path in enumerate(image_paths.values()):
+        frame = np.full((48, 64, 3), 40 + index * 35, dtype=np.uint8)
+        cv2.imwrite(str(path), frame)
+
+    project_path = tmp_path / "dataset.ffproj"
+    project = {
+        "id": "dataset-project-id",
+        "name": "Fixture dataset",
+        "sources": [
+            {"path": str(tmp_path / "source-a.mp4"), "kind": "video", "fps": 10.0},
+            {"path": str(tmp_path / "source-b.mp4"), "kind": "video", "fps": 10.0},
+        ],
+        "settings": {"crop_mode": "center", "output_width": 320, "output_height": 320},
+        "class_names": ["head", "body"],
+        "images": [
+            {
+                "path": str(image_paths["a_positive"]), "source_path": str(tmp_path / "source-a.mp4"),
+                "source_id": "source-a", "frame_index": 10, "timestamp_seconds": 1.0,
+                "width": 64, "height": 48, "status": "ready",
+                "annotations": [{
+                    "id": "a-box", "class_id": 99 if invalid_class else 0,
+                    "x_min": 8, "y_min": 4, "x_max": 24, "y_max": 20,
+                }],
+            },
+            {
+                "path": str(image_paths["a_negative"]), "source_path": str(tmp_path / "source-a.mp4"),
+                "source_id": "source-a", "frame_index": 20, "timestamp_seconds": 2.0,
+                "width": 64, "height": 48, "status": "reviewed", "annotations": [],
+            },
+            {
+                "path": str(image_paths["b_positive"]), "source_path": str(tmp_path / "source-b.mp4"),
+                "source_id": "source-b", "frame_index": 10, "timestamp_seconds": 1.0,
+                "width": 64, "height": 48, "status": "ready",
+                "annotations": [{
+                    "id": "b-box", "class_id": 1,
+                    "x_min": 16, "y_min": 12, "x_max": 48, "y_max": 36,
+                }],
+            },
+            {
+                "path": str(image_paths["b_candidate"]), "source_path": str(tmp_path / "source-b.mp4"),
+                "source_id": "source-b", "frame_index": 20, "timestamp_seconds": 2.0,
+                "width": 64, "height": 48, "status": "ready", "annotations": [],
+            },
+        ],
+    }
+    save_project(str(project_path), project)
+    return project_path, image_paths
 
 
 def test_recent_hash_index_matches_threshold_and_evicts_old_values():
@@ -580,3 +643,80 @@ def test_jsonl_extraction_streams_progress_before_final_reply(tmp_path: Path):
     assert replies[-1]["ok"] is True
     assert replies[-1]["data"]["exported_images"] == 3
     assert len(list(output_path.glob("*.jpg"))) == 3
+
+
+def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(tmp_path: Path):
+    project_path, _ = create_dataset_project(tmp_path)
+
+    report = validate_dataset(
+        str(project_path), "source", train_ratio=0.5, val_ratio=0.5, test_ratio=0, seed=23,
+    )
+
+    assert report["valid"] is True
+    assert report["image_count"] == 4
+    assert report["included_image_count"] == 3
+    assert report["positive_image_count"] == 2
+    assert report["reviewed_negative_count"] == 1
+    assert report["candidate_negative_excluded_count"] == 1
+    assert report["annotation_count"] == 2
+    assert report["split_counts"]["train"] > 0
+    assert report["split_counts"]["val"] > 0
+    assert report["split_counts"]["test"] == 0
+    assert any("chưa review" in warning for warning in report["warnings"])
+    assert report["duplicate_basename_groups"] == 1
+
+
+def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_path: Path):
+    project_path, image_paths = create_dataset_project(tmp_path)
+    output_root = tmp_path / "exports"
+    output_root.mkdir()
+
+    result = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23,
+    )
+    root = Path(result["path"])
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    data_config = yaml.safe_load((root / "data.yaml").read_text(encoding="utf-8"))
+
+    assert result["image_count"] == 3
+    assert data_config["train"] == "images/train"
+    assert data_config["val"] == "images/val"
+    assert data_config["names"] == {0: "head", 1: "body"}
+    assert len(manifest["images"]) == 3
+    assert all(
+        item["split"] == "train" for item in manifest["images"]
+        if item["source_id"] == "source-a"
+    ) or all(
+        item["split"] == "val" for item in manifest["images"]
+        if item["source_id"] == "source-a"
+    )
+    assert not any(item["source_image"] == str(image_paths["b_candidate"]) for item in manifest["images"])
+    positive = next(item for item in manifest["images"] if item["source_image"] == str(image_paths["a_positive"]))
+    label_text = (root / positive["exported_label"]).read_text(encoding="utf-8")
+    assert label_text == "0 0.25000000 0.25000000 0.25000000 0.33333333\n"
+    negative = next(item for item in manifest["images"] if item["source_image"] == str(image_paths["a_negative"]))
+    assert (root / negative["exported_label"]).read_text(encoding="utf-8") == ""
+    assert (root / positive["exported_image"]).read_bytes() == image_paths["a_positive"].read_bytes()
+
+    next_version = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23,
+    )
+    assert next_version["path"] != result["path"]
+    assert len(list(output_root.glob("frameforge_dataset_*"))) == 2
+
+
+def test_dataset_validation_blocks_invalid_class_ids_and_corrupt_images(tmp_path: Path):
+    invalid_class_project, _ = create_dataset_project(tmp_path / "invalid-class", invalid_class=True)
+    invalid_class_report = validate_dataset(
+        str(invalid_class_project), "source", train_ratio=0.5, val_ratio=0.5, test_ratio=0,
+    )
+    assert invalid_class_report["valid"] is False
+    assert any("Class ID" in error for error in invalid_class_report["errors"])
+
+    corrupt_project, corrupt_paths = create_dataset_project(tmp_path / "corrupt")
+    corrupt_paths["a_positive"].write_bytes(b"not an image")
+    corrupt_report = validate_dataset(
+        str(corrupt_project), "source", train_ratio=0.5, val_ratio=0.5, test_ratio=0,
+    )
+    assert corrupt_report["valid"] is False
+    assert any("hỏng hoặc không đọc được" in error for error in corrupt_report["errors"])

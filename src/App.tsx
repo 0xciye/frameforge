@@ -12,11 +12,12 @@ import {
   ChevronsLeft,
   ChevronsRight,
   CircleHelp,
+  Database,
+  Download,
   FileImage,
   FileVideo2,
   FolderOpen,
   FolderPlus,
-  HardDrive,
   ImagePlus,
   LoaderCircle,
   Pause,
@@ -29,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import "./App.css";
+import DatasetManager from "./DatasetManager";
 import ManualLabeling, { type Annotation } from "./ManualLabeling";
 
 type MediaSource = {
@@ -231,7 +233,7 @@ function App() {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [inspectingModel, setInspectingModel] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [activeTab, setActiveTab] = useState<"extract" | "label" | "export">("extract");
+  const [activeTab, setActiveTab] = useState<"extract" | "label" | "dataset">("extract");
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
   const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const annotationSaveFailed = useRef(false);
@@ -688,6 +690,14 @@ function App() {
     setActiveTab("label");
   }
 
+  async function openDatasetWorkspace() {
+    setError(null);
+    if (project.images.length > 0 && (!projectPath || dirty)) {
+      if (!(await saveProject())) return;
+    }
+    setActiveTab("dataset");
+  }
+
   async function inspectModel() {
     setError(null);
     try {
@@ -860,8 +870,8 @@ function App() {
           <button className="tool-button tool-button-disabled" type="button" disabled title="Suy luận chưa được triển khai">
             <Sparkles size={15} /><span>Auto label</span>
           </button>
-          <button className="tool-button tool-button-disabled" type="button" disabled title="Xuất YOLO sẽ có ở giai đoạn sau">
-            <Scissors size={15} /><span>Xuất YOLO</span>
+          <button className="tool-button" type="button" onClick={() => void openDatasetWorkspace()} disabled={engineStatus !== "ready"} title="Kiểm tra và xuất dataset YOLO">
+            <Download size={15} /><span>Xuất YOLO</span>
           </button>
         </div>
         <div className={`engine-badge engine-${engineStatus}`} title={engineStatus === "error" ? "Không kết nối được Python engine" : "Trạng thái Python engine"}>
@@ -888,8 +898,8 @@ function App() {
         <button className={activeTab === "label" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openLabelWorkspace()}>
           <Settings2 size={15} /><span>Gán nhãn</span>
         </button>
-        <button className="workflow-tab unavailable" type="button" disabled title="Cần hoàn tất trình gán nhãn">
-          <HardDrive size={15} /><span>Xuất dữ liệu</span><small>Sắp có</small>
+        <button className={activeTab === "dataset" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openDatasetWorkspace()}>
+          <Database size={15} /><span>Dataset</span>
         </button>
         <div className="tab-spacer" />
         <span className="workflow-hint"><CircleHelp size={13} /> Dữ liệu xử lý trên máy này</span>
@@ -909,6 +919,8 @@ function App() {
           loadPreview={loadLabelPreview}
           saveImage={saveLabelImage}
         />
+      ) : activeTab === "dataset" ? (
+        <DatasetManager projectPath={projectPath} imageCount={project.images.length} />
       ) : (
       <section
         className={`workspace-layout ${dropActive ? "drop-active" : ""}`}
@@ -1170,7 +1182,7 @@ function App() {
         <div className="status-right">
           <span>{outputDirectory || "Đầu ra chưa chọn"}</span>
           <span className="status-separator">/</span>
-          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : "Trích xuất"}</span>
+          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : "Trích xuất"}</span>
         </div>
       </footer>
     </main>

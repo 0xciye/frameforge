@@ -7,11 +7,17 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Bố cục
 
 - Thanh công cụ trên cùng: dự án mới/mở/lưu, kiểm tra ONNX và trạng thái engine.
-- Tabs quy trình: Trích xuất khả dụng; Gán nhãn và Xuất dữ liệu bị khóa đến khi có chức năng thật.
+- Tabs quy trình: Trích xuất, Gán nhãn và Dataset; các nút inference/training vẫn khóa đến khi có chức năng thật.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật, độ phân giải, điều khiển frame/timeline.
 - Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
 - Gallery ngang ở dưới: thumbnail của ảnh thật vừa trích; trạng thái tổng kết ở thanh cuối.
+
+## Dataset
+
+- Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
+- Ảnh trống chưa review không được export; negative đã review có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
+- Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
 
 Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa source/preview/settings và trên gallery kéo được bằng chuột hoặc phím mũi tên; kích thước lưu ở local storage. Ở cửa sổ hẹp hơn 1240px, panel co theo CSS trong khi nội dung settings/gallery cuộn độc lập. Cửa sổ Tauri khởi tạo ở 1440×960, tối thiểu 1024×700.
 

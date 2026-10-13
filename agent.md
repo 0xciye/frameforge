@@ -1,6 +1,6 @@
 # FrameForge agent notes
 
-FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. The extraction workspace, manual bounding-box labeling and ONNX metadata inspection are implemented. Inference, dataset export, training, benchmarking and model deployment remain unavailable until implemented and verified.
+FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. The extraction workspace, manual bounding-box labeling, dataset validation/grouped splits/YOLO export and ONNX metadata inspection are implemented. Inference, training, benchmarking and model deployment remain unavailable until implemented and verified.
 
 ## Read first
 
@@ -14,7 +14,8 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 - The current master product objective includes training/fine-tuning YOLO11n on labeled data; this supersedes older repo notes that prohibited training. Use PyTorch MPS on Apple Silicon when verified, report the actual device, and never fabricate training, detection or benchmark results.
 - Never fabricate media, ONNX metadata, detections or annotation results. Manual labels must come from user edits and remain independent of inference.
 - Manual labeling requires a saved `.ffproj` so annotations can autosave to SQLite. Class IDs are stable: Head = 0, Body = 1. Store and validate boxes in the original image's pixel coordinates.
-- Keep inference, YOLO dataset export, training, fine-tuning, benchmarking and deployment export unavailable until backed by working code.
+- Keep inference, training, fine-tuning, benchmarking and deployment export unavailable until backed by working code.
+- Dataset export includes only positive images or reviewed negatives, groups video/time segments and byte-identical images into the same split, preserves image pixels, and writes normalized YOLO labels plus an integrity/provenance manifest into a new version directory.
 - Open the app directly into the extraction workspace. Run engine health in the background and keep its status in the toolbar; do not show a blocking welcome/check-engine screen.
 - The user's source videos are primarily Full HD (1920×1080). Read actual media dimensions and preserve exact crop/annotation geometry for other resolutions too.
 - Exact Center Crop preview keeps the actual decoded source frame visible and overlays the crop rectangle using its exact source-pixel geometry; do not switch the preview to a cropped output image.

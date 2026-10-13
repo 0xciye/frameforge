@@ -392,11 +392,77 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .get("image_fingerprint")
                 .and_then(Value::as_str)
                 .ok_or("Thiếu fingerprint ảnh đã preview.")?;
-            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
                 return Err("Fingerprint ảnh không hợp lệ.".to_string());
             }
-            if !matches!(arguments.get("status").and_then(Value::as_str), Some("ready" | "reviewed")) {
+            if !matches!(
+                arguments.get("status").and_then(Value::as_str),
+                Some("ready" | "reviewed")
+            ) {
                 return Err("Trạng thái ảnh không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
+        "validate_dataset" | "export_yolo_dataset" => {
+            let project = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(project)?;
+            let mode = arguments
+                .get("split_mode")
+                .and_then(Value::as_str)
+                .unwrap_or("source");
+            if !["source", "segment"].contains(&mode) {
+                return Err("Cách chia dataset không hợp lệ.".to_string());
+            }
+            for key in ["train_ratio", "val_ratio", "test_ratio"] {
+                let ratio = arguments
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .unwrap_or(match key {
+                        "train_ratio" => 0.8,
+                        _ => 0.1,
+                    });
+                if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                    return Err("Tỷ lệ train/val/test phải từ 0 đến 1.".to_string());
+                }
+            }
+            let train = arguments
+                .get("train_ratio")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.8);
+            let val = arguments
+                .get("val_ratio")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.1);
+            let test = arguments
+                .get("test_ratio")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.1);
+            if train <= 0.0 || (train + val + test - 1.0).abs() > 1e-6 {
+                return Err("Tổng tỷ lệ phải bằng 100% và train phải lớn hơn 0%.".to_string());
+            }
+            let seed = arguments.get("seed").and_then(Value::as_u64).unwrap_or(42);
+            if seed > u32::MAX as u64 {
+                return Err("Seed phải nằm trong khoảng 0 đến 4294967295.".to_string());
+            }
+            let segment_seconds = arguments
+                .get("segment_seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(30.0);
+            if !segment_seconds.is_finite() || !(1.0..=3600.0).contains(&segment_seconds) {
+                return Err("Độ dài đoạn video phải từ 1 đến 3600 giây.".to_string());
+            }
+            if command == "export_yolo_dataset" {
+                let output = arguments
+                    .get("output_dir")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục export dataset.")?;
+                if !canonical_existing_path(output)?.is_dir() {
+                    return Err("Thư mục export dataset không hợp lệ.".to_string());
+                }
             }
             Ok(())
         }

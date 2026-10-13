@@ -12,13 +12,13 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Exact Center Crop cắt đúng vùng W×H từ tâm frame không resize/padding; preview giữ frame nguồn và phủ overlay vùng crop đúng pixel; full-frame letterbox và grid vẫn khả dụng.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
 - Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1 lên v2.
+- Gán nhãn box thủ công với class ổn định, review, undo/redo và autosave vào dự án đã lưu.
+- Kiểm tra dataset, loại ảnh trống chưa review, chia theo video/đoạn với chống rò rỉ ảnh trùng byte, và export YOLO vào thư mục phiên bản mới.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.
 
 ## Chưa khả dụng
 
 - Adapter YOLO và inference.
-- Canvas gán/sửa bounding box, review workflow, undo/redo.
-- Quản lý/kiểm tra dataset và export YOLO.
 - YOLO11n training trên MPS/CPU, hàng đợi resolution, checkpoint discovery và fine-tuning.
 - Benchmark/experiment tracking và export ONNX/TensorRT/OpenVINO.
 - Đóng gói Python engine thành sidecar standalone.

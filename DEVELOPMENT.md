@@ -13,7 +13,7 @@
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | Inference YOLO, confidence filtering | NOT_STARTED | Chưa có adapter/detection; không sinh kết quả giả |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset manager, chia tập, YOLO export | NOT_STARTED | Chưa có kiểm tra dataset, split hoặc exporter |
+| Dataset validation, grouped splits, YOLO export | TESTED_MACOS | Xác thực ảnh/box/class; loại negative chưa review; chia theo source/segment, giữ byte-identical cùng split; export versioned copy và manifest |
 | YOLO11n training trên MPS/CPU, multi-resolution | NOT_STARTED | Chưa cài PyTorch/Ultralytics; chưa có training job manager |
 | Checkpoint discovery, fine-tuning, resume | NOT_STARTED | Chưa có model registry hoặc checkpoint workflow |
 | Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có metrics/benchmark/export thật |
@@ -45,7 +45,7 @@ Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `v
 
 Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `preview_center_crop`, `extract_frames`, `create_project`, `save_project`, `save_annotations`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng, kích thước và đường dẫn trước khi chạy Python. `save_annotations` chỉ nhận ảnh thuộc `.ffproj` đã lưu, xác minh fingerprint SHA-256 của ảnh và kiểm tra box/class/trạng thái ở engine. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
+Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `preview_center_crop`, `extract_frames`, `create_project`, `save_project`, `save_annotations`, `validate_dataset`, `export_yolo_dataset`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng, kích thước và đường dẫn trước khi chạy Python. `save_annotations` chỉ nhận ảnh thuộc `.ffproj` đã lưu, xác minh fingerprint SHA-256 của ảnh và kiểm tra box/class/trạng thái ở engine. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
 
 Ví dụ:
 
@@ -66,16 +66,28 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - SQLite schema v2 thêm metadata crop; schema v1 được đọc và migrate cộng thêm cột khi người dùng save.
 - Annotation lưu tọa độ pixel ảnh gốc trong SQLite; fingerprint ngăn ghi nhãn lên file ảnh đã bị thay đổi kể từ lúc preview. Undo/redo, xóa và review đi qua cùng hàng đợi ghi dự án để giữ thứ tự autosave.
 - Dự án mới mặc định có class ổn định `head` (0) và `body` (1). Tab Gán nhãn dùng ảnh đã trích, không gọi inference.
+- Dataset validator đọc lại ảnh thật, kiểm tra kích thước so với project, class ID và box hữu hạn/còn trong biên. Positive được giữ; ảnh trống chỉ được giữ khi `status=reviewed`.
+- Split theo source gom toàn bộ frame/crop cùng video; split theo segment dùng timestamp hoặc frame/FPS. Ảnh có SHA-256 trùng nội dung luôn được gộp cùng nhóm split. Khi số nhóm độc lập ít hơn số split được bật, báo cảnh báo và chỉ gán các nhóm có sẵn.
+- YOLO export tạo thư mục phiên bản mới nguyên tử dưới thư mục người dùng đã chọn, sao chép ảnh gốc và xác minh SHA-256 sau khi sao chép; nhãn dùng `class x_center y_center width height` chuẩn hóa 8 chữ số thập phân. `manifest.json` lưu mapping class, split, fingerprint, hình học crop và provenance nguồn. Export không sửa project/ảnh nguồn.
 - Python engine được đóng gói cùng nguồn, nhưng runtime và dependency Python vẫn cần cài riêng khi chạy ứng dụng. Standalone sidecar packaging chưa làm.
 
 ## Kiểm chứng macOS
 
-- `pnpm test:engine`: 21 pytest engine trên Python 3.12; fixture ảnh/video, exact crop geometry (gồm crop 1×1), crop-level filters, project schema migration và JSON-lines.
-- `pnpm build`: TypeScript strict và Vite production build.
+- `pnpm test:engine`: 28 pytest engine trên Python 3.12; gồm crop geometry/filters, annotation persistence, dataset validation, split theo nguồn, YOLO labels và versioned export.
+- `pnpm build`: TypeScript strict và Vite production build; lần này thành công với 1.919 module.
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` và `cargo check --manifest-path src-tauri/Cargo.toml`: định dạng cùng biên dịch crate Tauri.
 - Exact crop overlay/canvas dùng kích thước preview đã đo để giữ alignment khi resize. Đã mở app bundle macOS và xác nhận startup vào thẳng workspace Trích xuất, không còn màn chào v0.1.0.
 - Bản app bundle trước đó ở `Đang kết nối` trong lúc Python khởi tạo; ở bundle mới UI chuyển sang `Engine sẵn sàng`. Health JSON-lines chạy trực tiếp trong terminal trả `status: ok`.
 - `pnpm tauri build --bundles app` build thành công. Lệnh mặc định `pnpm tauri build` cũng tạo `.app` nhưng lỗi ở bước tạo DMG (`bundle_dmg.sh`).
+
+### 2026-10-14 — Dataset validation và YOLO export
+
+- **Thay đổi:** Thêm tab Dataset để xác thực ảnh, nhãn, class, reviewed negative; chia train/val/test theo video hoặc đoạn thời gian; khóa ảnh trùng byte trong cùng split; xuất ảnh không resize, label YOLO, `data.yaml` và manifest vào thư mục phiên bản mới. Đưa `dataset.py` vào danh sách resource đóng gói của Tauri.
+- **Tài liệu:** Cập nhật README, AGENTS.md, agent.md, DEVELOPMENT.md, PRODUCT.md, DESIGN.md và CHANGELOG.md.
+- **Kiểm tra:** `pnpm test:engine` — 28 passed; `pnpm build` — thành công; `cargo fmt --check`, `cargo check` và `git diff --check` — thành công; `pnpm tauri build --bundles app` — app bundle macOS 4.17 MiB thành công. Đã chạy JSON-lines validate/export từ engine trong app bundle: 3 ảnh đủ điều kiện, 1 ảnh trống chưa review bị loại, split train 2 / val 1, xuất đủ ảnh, `data.yaml` và manifest. Giao diện FrameForge đang mở hiển thị frame video 1920×1080 cùng overlay crop vuông 320×320 ở tâm.
+- **Git:** Milestone đã commit local trên nhánh `feature/manual-labeling`; push GitHub còn chờ xác thực như trạng thái đã ghi trước đó.
+- **Giới hạn:** Dataset UI click-through chưa chạy trên bundle mới; kiểm chứng UI trong lượt này là build frontend, còn kiểm tra thực tế backend dùng module đã đóng gói. UI export cần dự án `.ffproj` đã lưu. Split theo nhóm có thể lệch tỷ lệ mục tiêu khi ít nhóm độc lập; exporter nêu cảnh báo. Windows chưa được kiểm thử.
+- **Bước tiếp:** YOLO11n training và quản lý checkpoint.
 
 ### 2026-10-14 — Preview Exact Center Crop
 
@@ -92,7 +104,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `node_modules/typescript/bin/tsc` và `node_modules/vite/bin/vite.js build` chạy bằng Node runtime đóng gói — thành công. `pnpm build` không chạy được khi Node không nằm trên PATH. Bộ engine 25 test đã qua ở lượt trước khi nối UI. Build lại Tauri `.app` đang chạy; chưa chạy UI end-to-end.
 - **Git:** `feature/manual-labeling`; thay đổi chưa commit. Push GitHub còn chờ xác thực.
 - **Giới hạn:** Chưa có YOLO inference, dataset manager/export, training, fine-tuning, benchmark hoặc deployment export. Windows tiếp tục `PENDING_WINDOWS_VALIDATION`.
-- **Bước tiếp:** Hoàn tất xác nhận app bundle hiện hành rồi làm dataset validation/split và YOLO export.
+- **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
 

@@ -30,7 +30,8 @@
       "../engine/frameforge_engine.py": "engine/frameforge_engine.py",
       "../engine/frameforge/__init__.py": "engine/frameforge/__init__.py",
       "../engine/frameforge/media.py": "engine/frameforge/media.py",
-      "../engine/frameforge/project.py": "engine/frameforge/project.py"
+      "../engine/frameforge/project.py": "engine/frameforge/project.py",
+      "../engine/frameforge/dataset.py": "engine/frameforge/dataset.py"
     },
     "icon": [
       "icons/32x32.png",
