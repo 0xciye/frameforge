@@ -7,7 +7,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Bố cục
 
 - Thanh công cụ trên cùng: dự án mới/mở/lưu, kiểm tra ONNX và trạng thái engine.
-- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Inference vẫn khóa đến khi có chức năng thật.
+- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Inference được gọi ngay trong tab Gán nhãn cho ảnh đang mở.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
 - Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
@@ -17,6 +17,8 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 
 - Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
 - Ảnh trống chưa review không được export; negative đã review có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
+- Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
+- Chọn checkpoint nội bộ đã xác minh và đúng class schema; inference chỉ áp dụng vào ảnh đang mở. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry.
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
 
 ## Huấn luyện

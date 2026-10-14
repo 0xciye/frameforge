@@ -710,6 +710,56 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        "save_ai_suggestions" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let image_path = arguments
+                .get("image_path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn ảnh.")?;
+            let image_path = validate_media_path(image_path, false)?;
+            let extension = image_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"].contains(&extension.as_str()) {
+                return Err("Chỉ lưu gợi ý cho tệp ảnh.".to_string());
+            }
+            let checkpoint = canonical_existing_path(
+                arguments
+                    .get("checkpoint")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu checkpoint inference.")?,
+            )?;
+            if !checkpoint.is_file()
+                || !checkpoint
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("pt"))
+            {
+                return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
+            }
+            if arguments
+                .get("predictions")
+                .and_then(Value::as_array)
+                .is_none_or(|predictions| predictions.len() > 300)
+            {
+                return Err("Danh sách gợi ý phải có tối đa 300 box.".to_string());
+            }
+            let fingerprint = arguments
+                .get("image_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu fingerprint ảnh đã preview.")?;
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("Fingerprint ảnh không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
         "validate_dataset" | "export_yolo_dataset" => {
             let project = arguments
                 .get("path")

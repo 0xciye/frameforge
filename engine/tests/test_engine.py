@@ -17,7 +17,8 @@ sys.path.insert(0, str(ENGINE_ROOT))
 import frameforge_engine  # noqa: E402
 from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
 from frameforge.dataset import export_yolo_dataset, validate_dataset
-from frameforge.project import create_project, load_project, save_annotations, save_project
+from frameforge.project import create_project, load_project, save_ai_suggestions, save_annotations, save_project
+from frameforge import training
 
 
 def create_video(path: Path, frames: list[np.ndarray], fps: float = 10.0) -> None:
@@ -588,6 +589,32 @@ def _create_annotation_project(tmp_path: Path) -> tuple[Path, str]:
     return project_path, image_path
 
 
+def _register_annotation_checkpoint(tmp_path: Path) -> Path:
+    output_dir = tmp_path / "output" / "frameforge-training" / "queue" / "run"
+    weights = output_dir / "weights"
+    weights.mkdir(parents=True)
+    checkpoint = weights / "best.pt"
+    checkpoint.write_bytes(b"verified checkpoint fixture")
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    training._persist_run({
+        "run_id": "run-annotation-fixture",
+        "source": "frameforge_training",
+        "checkpoint_trusted": True,
+        "queue_id": "queue-annotation-fixture",
+        "status": "completed",
+        "model": "YOLO11n",
+        "architecture": "yolo11n",
+        "task": "detect",
+        "class_names": ["head", "body"],
+        "output_dir": str(output_dir),
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": digest,
+        "requested_imgsz": 64,
+        "created_at": training._now(),
+    })
+    return checkpoint
+
+
 def test_new_project_starts_with_stable_head_and_body_classes(tmp_path: Path):
     project_path = tmp_path / "defaults.ffproj"
 
@@ -669,6 +696,66 @@ def test_save_annotations_detects_image_changes_after_preview(tmp_path: Path):
         save_annotations(str(project_path), image_path, [], "ready", old_fingerprint)
 
 
+def test_ai_suggestions_keep_provenance_and_can_be_retried_after_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+    checkpoint = _register_annotation_checkpoint(tmp_path)
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+    prediction = {"class_id": 0, "bbox_xyxy": [10, 20, 120, 140], "confidence": 0.8}
+
+    first = save_ai_suggestions(str(project_path), image_path, [prediction], fingerprint, str(checkpoint))
+    ai_box = first["annotations"][0]
+    assert ai_box["review_status"] == "needs_review"
+    assert ai_box["source_model_id"] == "run-annotation-fixture"
+    assert ai_box["checkpoint_sha256"] == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+    manual_box = {
+        "id": "manual-box", "class_id": 1, "x_min": 200, "y_min": 200,
+        "x_max": 300, "y_max": 300, "source": "manual", "review_status": "unreviewed",
+    }
+    saved = save_annotations(str(project_path), image_path, [manual_box], "ready", fingerprint)
+    assert {item["source"] for item in saved["annotations"]} == {"manual", "ai"}
+    reopened = load_project(str(project_path))["images"][0]["annotations"]
+    reopened_ai = next(item for item in reopened if item["source"] == "ai")
+    assert reopened_ai["source_model_id"] == "run-annotation-fixture"
+
+    with pytest.raises(ValueError, match="provenance"):
+        save_annotations(
+            str(project_path), image_path,
+            [manual_box, {**reopened_ai, "checkpoint_sha256": "b" * 64}],
+            "ready", fingerprint,
+        )
+
+    rejected = {**reopened_ai, "review_status": "rejected"}
+    save_annotations(str(project_path), image_path, [manual_box, rejected], "ready", fingerprint)
+    second = save_ai_suggestions(str(project_path), image_path, [prediction], fingerprint, str(checkpoint))
+    assert second["annotation_count"] == 1
+    reopened = load_project(str(project_path))["images"][0]["annotations"]
+    assert {item["review_status"] for item in reopened if item["source"] == "ai"} == {"rejected", "needs_review"}
+
+
+@pytest.mark.parametrize("prediction", [
+    {"class_id": 0, "bbox_xyxy": [True, 20, 120, 140], "confidence": 0.8},
+    {"class_id": 0, "bbox_xyxy": [10, 20, 120, 140], "confidence": True},
+    {"class_id": 0, "bbox_xyxy": ["10", 20, 120, 140], "confidence": 0.8},
+    {"class_id": 0, "bbox_xyxy": [10, 20, 120, 140], "confidence": "0.8"},
+])
+def test_ai_suggestions_reject_non_numeric_box_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prediction: dict,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+    checkpoint = _register_annotation_checkpoint(tmp_path)
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="phải là số"):
+        save_ai_suggestions(str(project_path), image_path, [prediction], fingerprint, str(checkpoint))
+
+    assert load_project(str(project_path))["images"][0]["annotations"] == []
+
+
 def test_schema_v1_project_loads_and_migrates_on_save(tmp_path: Path):
     project_path = tmp_path / "legacy.ffproj"
     connection = sqlite3.connect(project_path)
@@ -710,7 +797,7 @@ def test_schema_v1_project_loads_and_migrates_on_save(tmp_path: Path):
     connection = sqlite3.connect(project_path)
     version = connection.execute("SELECT value FROM project_meta WHERE key = 'schema_version'").fetchone()[0]
     connection.close()
-    assert version == "2"
+    assert version == "3"
 
 
 def test_save_project_preserves_an_unrelated_existing_file(tmp_path: Path):
@@ -796,6 +883,46 @@ def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(t
     assert report["split_counts"]["test"] == 0
     assert any("chưa review" in warning for warning in report["warnings"])
     assert report["duplicate_basename_groups"] == 1
+
+
+def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_path: Path):
+    project_path, image_paths = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    positive = next(item for item in project["images"] if item["path"] == str(image_paths["a_positive"]))
+    positive["annotations"].append({
+        "id": "reviewed-ai", "class_id": 1, "x_min": 32, "y_min": 8,
+        "x_max": 55, "y_max": 40, "confidence": 0.95, "source": "ai",
+        "review_status": "reviewed", "source_model_id": "run-fixture",
+        "checkpoint_sha256": "b" * 64,
+    })
+    image = next(item for item in project["images"] if item["path"] == str(image_paths["a_negative"]))
+    image["annotations"] = [{
+        "id": "pending-ai", "class_id": 0, "x_min": 4, "y_min": 4,
+        "x_max": 30, "y_max": 30, "confidence": 0.9, "source": "ai",
+        "review_status": "needs_review", "source_model_id": "run-fixture",
+        "checkpoint_sha256": "a" * 64,
+    }]
+    save_project(str(project_path), project)
+
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    assert report["valid"] is True
+    assert report["pending_suggestion_count"] == 1
+    assert report["reviewed_negative_count"] == 0
+    assert report["candidate_negative_excluded_count"] == 2
+    assert report["included_image_count"] == 2
+    assert report["annotation_count"] == 3
+
+    output_root = tmp_path / "exports"
+    output_root.mkdir()
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["summary"]["pending_suggestion_count"] == 1
+    assert all(item["source_image"] != str(image_paths["a_negative"]) for item in manifest["images"])
+    exported_positive = next(item for item in manifest["images"] if item["source_image"] == str(image_paths["a_positive"]))
+    ai_provenance = next(item for item in exported_positive["annotation_provenance"] if item["source"] == "ai")
+    assert ai_provenance["review_status"] == "reviewed"
+    assert ai_provenance["source_model_id"] == "run-fixture"
+    assert ai_provenance["checkpoint_sha256"] == "b" * 64
 
 
 def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_path: Path):

@@ -2,6 +2,8 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Nối inference vào tab Gán nhãn cho ảnh đang mở: chọn checkpoint YOLO11n nội bộ, lưu gợi ý AI kèm model ID/checkpoint SHA-256/confidence, duyệt/chỉnh sửa/loại; chỉ gợi ý đã duyệt vào YOLO export mặc định. Có thể chạy lại cùng checkpoint sau khi loại toàn bộ gợi ý cũ trên ảnh.
+- Nâng project SQLite lên schema v3 để lưu provenance annotation AI và migrate schema v1/v2 khi ghi; autosave giữ nguyên gợi ý AI, ảnh còn gợi ý chờ không được dùng làm negative.
 - Thêm engine YOLO11n inference theo batch cho ảnh crop; chỉ nạp checkpoint nội bộ đã xác minh, kiểm tra class schema và trả box pixel/confidence từ Ultralytics; hỗ trợ hủy giữa các batch.
 - Khóa fine-tune vào checkpoint YOLO11n detection nội bộ đã đăng ký, còn trong thư mục run và khớp SHA-256; từ chối checkpoint `.pt` bất kỳ hoặc được phát hiện từ nguồn ngoài.
 - Giới hạn đầu vào video tối đa 1920×1080; từ chối video lớn hơn ở import, preview và extraction, không tự scale; hiển thị lý do từ chối.

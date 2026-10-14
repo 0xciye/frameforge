@@ -218,6 +218,7 @@ def _analyze(
     reviewed_negative_count = 0
     positive_count = 0
     annotation_count = 0
+    pending_suggestion_count = 0
     missing_source_metadata = 0
 
     for image in images:
@@ -257,6 +258,8 @@ def _analyze(
             continue
         cleaned_annotations = []
         image_invalid = False
+        has_pending_ai = False
+        image_pending_ai_count = 0
         for annotation in annotations:
             if not isinstance(annotation, dict):
                 errors.append("Nhãn không đúng cấu trúc trong ảnh: {0}".format(image_path))
@@ -284,17 +287,68 @@ def _analyze(
                 errors.append("Box có diện tích bằng 0 hoặc vượt ảnh: {0}".format(image_path))
                 image_invalid = True
                 continue
+            source = annotation.get("source", "manual")
+            review_status = annotation.get("review_status", "unreviewed")
+            if source not in {"manual", "ai"}:
+                errors.append("Nguồn annotation không hợp lệ: {0}".format(image_path))
+                image_invalid = True
+                continue
+            if source == "manual" and review_status not in {"unreviewed", "reviewed"}:
+                errors.append("Trạng thái review của nhãn thủ công không hợp lệ: {0}".format(image_path))
+                image_invalid = True
+                continue
+            if source == "ai" and review_status not in {"needs_review", "reviewed", "rejected"}:
+                errors.append("Trạng thái review của gợi ý AI không hợp lệ: {0}".format(image_path))
+                image_invalid = True
+                continue
+            confidence = annotation.get("confidence")
+            if confidence is not None:
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError):
+                    errors.append("Confidence của annotation không hợp lệ: {0}".format(image_path))
+                    image_invalid = True
+                    continue
+                if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                    errors.append("Confidence của annotation không hợp lệ: {0}".format(image_path))
+                    image_invalid = True
+                    continue
+            source_model_id = annotation.get("source_model_id")
+            checkpoint_sha256 = annotation.get("checkpoint_sha256")
+            if source == "manual" and (source_model_id is not None or checkpoint_sha256 is not None):
+                errors.append("Nhãn thủ công không được mang provenance checkpoint: {0}".format(image_path))
+                image_invalid = True
+                continue
+            if source == "ai" and review_status == "reviewed" and (
+                not isinstance(source_model_id, str)
+                or not source_model_id
+                or not isinstance(checkpoint_sha256, str)
+                or len(checkpoint_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in checkpoint_sha256.casefold())
+            ):
+                errors.append("Gợi ý AI đã duyệt thiếu provenance checkpoint: {0}".format(image_path))
+                image_invalid = True
+                continue
+            if source == "ai" and review_status == "needs_review":
+                has_pending_ai = True
+                image_pending_ai_count += 1
+            if source == "ai" and review_status != "reviewed":
+                continue
             cleaned_annotations.append({
                 "class_id": class_id,
                 "x_min": x_min,
                 "y_min": y_min,
                 "x_max": x_max,
                 "y_max": y_max,
-                "source": annotation.get("source", "manual"),
-                "review_status": annotation.get("review_status", "unreviewed"),
+                "source": source,
+                "review_status": review_status,
+                "confidence": confidence,
+                "source_model_id": source_model_id,
+                "checkpoint_sha256": checkpoint_sha256,
             })
         if image_invalid:
             continue
+        pending_suggestion_count += image_pending_ai_count
 
         status = image.get("status", "ready")
         if status not in {"ready", "reviewed"}:
@@ -305,7 +359,7 @@ def _analyze(
             annotation_count += len(cleaned_annotations)
             for annotation in cleaned_annotations:
                 class_counts[annotation["class_id"]] += 1
-        elif status == "reviewed":
+        elif status == "reviewed" and not has_pending_ai:
             reviewed_negative_count += 1
         else:
             candidate_negative_count += 1
@@ -347,6 +401,10 @@ def _analyze(
     if candidate_negative_count:
         warnings.append(
             "Đã loại {0} ảnh trống chưa review; ảnh không có box chỉ được export khi trạng thái là Reviewed Negative.".format(candidate_negative_count)
+        )
+    if pending_suggestion_count:
+        warnings.append(
+            "Đã loại {0} gợi ý AI chưa duyệt khỏi nhãn YOLO mặc định; ảnh chỉ có gợi ý đang chờ duyệt không được dùng làm negative.".format(pending_suggestion_count)
         )
     if missing_source_metadata:
         warnings.append(
@@ -413,6 +471,7 @@ def _analyze(
         "reviewed_negative_count": reviewed_negative_count,
         "candidate_negative_excluded_count": candidate_negative_count,
         "annotation_count": annotation_count,
+        "pending_suggestion_count": pending_suggestion_count,
         "class_distribution": class_distribution,
         "duplicate_basename_groups": len(duplicate_basename_groups),
         "exact_duplicate_count": exact_duplicate_count,
@@ -534,6 +593,16 @@ def export_yolo_dataset(
                 "status": sample["status"],
                 "split": split,
                 "annotation_count": len(sample["annotations"]),
+                "annotation_provenance": [
+                    {
+                        "source": annotation["source"],
+                        "review_status": annotation["review_status"],
+                        "confidence": annotation["confidence"],
+                        "source_model_id": annotation["source_model_id"],
+                        "checkpoint_sha256": annotation["checkpoint_sha256"],
+                    }
+                    for annotation in sample["annotations"]
+                ],
             })
 
         names = {index: name for index, name in enumerate(project["class_names"])}
@@ -570,7 +639,7 @@ def export_yolo_dataset(
                 for key in (
                     "image_count", "included_image_count", "positive_image_count",
                     "reviewed_negative_count", "candidate_negative_excluded_count",
-                    "annotation_count", "class_distribution", "exact_duplicate_count",
+                    "annotation_count", "pending_suggestion_count", "class_distribution", "exact_duplicate_count",
                 )
             },
             "warnings": summary["warnings"],

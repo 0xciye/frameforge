@@ -180,6 +180,9 @@ def predict_crops(
             )
         except Exception as error:
             raise ValueError("YOLO inference thất bại: {0}".format(error)) from error
+        if cancel_path and cancel_path.exists():
+            cancelled = True
+            break
         if not isinstance(predictions, (list, tuple)) or len(predictions) != len(batch_paths):
             raise ValueError("Ultralytics trả về số kết quả không khớp số ảnh đầu vào.")
 

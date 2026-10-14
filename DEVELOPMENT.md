@@ -9,12 +9,12 @@
 | Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; video tối đa 1920×1080, nguồn lớn hơn bị từ chối; seek bằng tác vụ nền |
 | Exact Center Crop, preview overlay | TESTED_MACOS | Preview dùng frame nguồn tối đa FHD và vẽ khung cam liền nét 320×320 tại tọa độ nguồn x=800, y=380 trên fixture 1920×1080 |
 | Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên vùng crop nguồn; progress/hủy |
-| Dự án SQLite `.ffproj` | TESTED_MACOS | Create/save/load; schema v1 nâng cấp lên v2 khi save; giữ provenance crop |
+| Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2 migrate lên v3 khi ghi; annotation AI lưu model ID và checkpoint SHA-256; autosave bảo toàn provenance |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | YOLO11n inference adapter | TESTED_MACOS | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive; smoke một ảnh tổng hợp trên MPS |
-| Auto-label pipeline, review UI | NOT_STARTED | Inference chưa ghi provisional annotation hoặc candidate negative vào dự án và chưa nối giao diện review |
+| Auto-label ảnh hiện tại, review UI | IMPLEMENTED_UNVERIFIED | Engine persistence/review đã qua test; UI chọn checkpoint nội bộ khớp class, lưu gợi ý `needs_review`, duyệt/chỉnh sửa/loại; chưa click-through vì registry máy này không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export | TESTED_MACOS | Xác thực ảnh/box/class; loại negative chưa review; chia theo source/segment, giữ byte-identical cùng split; export versioned copy và manifest |
+| Dataset validation, grouped splits, YOLO export | TESTED_ENGINE | Export loại AI pending/rejected, loại ảnh chỉ còn pending khỏi cả reviewed-negative và ghi provenance box AI đã duyệt; 57 engine tests pass |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
 | Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro; checkpoint được lưu/đăng ký; metrics fixture không đại diện đánh giá model. |
@@ -24,7 +24,7 @@
 | Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có công cụ benchmark model trong app; phép đo hiệu năng xử lý media một lần được ghi bên dưới |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự tiếp theo: nối inference với project và auto-label/review → dataset lineage/replay → đánh giá model → benchmark/so sánh → deployment export → resume training → session recovery UI → Windows validation. Video đầu vào chỉ được nhận tối đa FHD (1920×1080); nguồn vượt giới hạn bị từ chối, không scale.
+Thứ tự tiếp theo: inference hàng loạt cho project → dataset lineage/replay → đánh giá model → benchmark/so sánh → deployment export → resume training → session recovery UI → Windows validation. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale.
 
 ## Công cụ và cài đặt
 
@@ -50,7 +50,7 @@ Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `v
 
 Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Các command được allowlist gồm health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue và predict_crops. Rust kiểm tra command, phần mở rộng, kích thước và đường dẫn trước khi gọi Python. Train có thể dừng tại ranh giới epoch bằng cancel marker; extraction, discovery và inference hủy theo lô bằng marker.
+Các command được allowlist gồm health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, validate_dataset, export_yolo_dataset, load_project, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue và predict_crops. Rust kiểm tra command, phần mở rộng, kích thước và đường dẫn trước khi gọi Python. Train có thể dừng tại ranh giới epoch bằng cancel marker; extraction, discovery và inference hủy theo lô bằng marker.
 
 Ví dụ:
 
@@ -69,11 +69,12 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Center crop dùng `floor((frame - crop) / 2)` và half-open slicing; crop vượt frame trả lỗi rõ ràng. Full-frame letterbox và grid tiếp tục resize/padding theo mode riêng.
 - Blur/Laplacian và dHash đo source crop trước output resize/padding. `candidate_crops`, `blurry_crops` và `duplicate_crops` là số liệu crop-level; `candidate_frames` giữ nghĩa frame-level.
 - Mỗi ảnh lưu source identity (SHA-256 từ path/size/mtime), frame/timestamp, crop rectangle, sharpness score và extraction settings. Đây là identity fingerprint, không phải content hash.
-- SQLite schema v2 thêm metadata crop; schema v1 được đọc và migrate cộng thêm cột khi người dùng save.
+- SQLite schema v3 thêm provenance model/checkpoint cho annotation AI; schema v1/v2 được đọc và migrate khi người dùng ghi. Metadata crop từ schema v2 vẫn được giữ.
 - Annotation lưu tọa độ pixel ảnh gốc trong SQLite; fingerprint ngăn ghi nhãn lên file ảnh đã bị thay đổi kể từ lúc preview. Undo/redo, xóa và review đi qua cùng hàng đợi ghi dự án để giữ thứ tự autosave.
-- Dự án mới mặc định có class ổn định `head` (0) và `body` (1). Tab Gán nhãn dùng ảnh đã trích, không gọi inference.
+- Dự án mới mặc định có class ổn định `head` (0) và `body` (1). Tab Gán nhãn gọi inference trên ảnh đang mở; thao tác cần project đã lưu.
 - `predict_crops` chỉ dùng checkpoint YOLO11n nội bộ đã đăng ký, còn khớp SHA-256 và có class schema khớp với model. Nó trả box `xyxy` theo pixel trên ảnh gốc; NMS do Ultralytics thực hiện và confidence cuối được lọc theo `score >= threshold`.
-- Dataset validator đọc lại ảnh thật, kiểm tra kích thước so với project, class ID và box hữu hạn/còn trong biên. Positive được giữ; ảnh trống chỉ được giữ khi `status=reviewed`.
+- `save_ai_suggestions` xác minh lại checkpoint, class schema project và fingerprint ảnh; gợi ý được lưu ở `needs_review` với model ID/checkpoint SHA-256/confidence. Autosave giữ annotation AI và provenance.
+- Dataset validator đọc lại ảnh thật, kiểm tra kích thước so với project, class ID và box hữu hạn/còn trong biên. Chỉ box thủ công và AI `reviewed` được export; pending/rejected bị loại, ảnh chỉ còn pending không trở thành negative dù có trạng thái reviewed.
 - Split theo source gom toàn bộ frame/crop cùng video; split theo segment dùng timestamp hoặc frame/FPS. Ảnh có SHA-256 trùng nội dung luôn được gộp cùng nhóm split. Khi số nhóm độc lập ít hơn số split được bật, báo cảnh báo và chỉ gán các nhóm có sẵn.
 - YOLO export tạo thư mục phiên bản mới nguyên tử dưới thư mục người dùng đã chọn, sao chép ảnh gốc và xác minh SHA-256 sau khi sao chép; nhãn dùng `class x_center y_center width height` chuẩn hóa 8 chữ số thập phân. `manifest.json` lưu mapping class, split, fingerprint, hình học crop và provenance nguồn. Export không sửa project/ảnh nguồn.
 - Smart Folder Discovery dùng `yaml.safe_load`, chỉ quét trong root được chọn, bỏ symlink, giới hạn depth/files/metadata/CSV rows, không đọc pixel hoặc nội dung checkpoint. YAML split/data trỏ ra ngoài root bị chặn; ngoại lệ quyền truy cập tạo kết quả partial.
@@ -134,6 +135,17 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
+
+### 2026-10-14 — Nối inference vào gán nhãn
+
+- **Thay đổi:** Tab Gán nhãn chọn checkpoint nội bộ đã xác minh và chạy YOLO trên ảnh đang mở. Gợi ý được lưu vào SQLite schema v3 với model ID, checkpoint SHA-256, confidence và trạng thái `needs_review`; duyệt, chỉnh sửa hoặc loại từng box; autosave giữ provenance và các gợi ý AI. Chạy lại cùng checkpoint trên cùng ảnh được mở sau khi loại hết gợi ý trước đó. Engine từ chối box/confidence dạng chuỗi hoặc boolean.
+- **Dataset:** Export YOLO bỏ box AI chưa duyệt/bị loại; ảnh chỉ còn gợi ý AI chờ xử lý không được tính là negative. Manifest ghi provenance box được duyệt. Video đầu vào vẫn tối đa FHD 1920×1080; video lớn hơn bị từ chối, không scale.
+- **Tệp:** `engine/frameforge/project.py`, `engine/frameforge/dataset.py`, `engine/tests/test_engine.py`, `src/ManualLabeling.tsx` và tài liệu roadmap/sản phẩm.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 57 passed; TypeScript `tsc` và Vite production build — thành công; `cargo fmt --check` và `cargo check` — thành công (dùng Rust toolchain tuyệt đối vì shell không có `cargo`/`rustc` trên PATH); `git diff --check` — thành công. `pnpm tauri build --bundles app` — app macOS 4.33 MiB; JSON-lines health từ engine đã đóng gói trả `status: ok`.
+- **Chưa xác minh:** UI inference chưa click-through với checkpoint thật vì training registry hiện không có checkpoint dùng được. Windows chưa được build/kiểm thử.
+- **Benchmark giới hạn:** Phép đo video FHD tổng hợp dài một giờ trước đó đạt 3.600 crop trong 132,27 giây, RSS lấy mẫu tối đa 807,3 MiB. Đây là một lượt extraction, không phải soak test nhiều giờ; không đại diện mọi codec.
+- **Git:** Local commit theo Conventional Commits trên `feature/manual-labeling`; hash được ghi trong Git history. Lần push trước thiếu GitHub HTTPS credential.
+- **Bước tiếp:** Nối inference hàng loạt cho các ảnh của project, nạp model một lần mỗi lượt và giữ review từng box.
 
 ### 2026-10-14 — YOLO11n inference engine
 

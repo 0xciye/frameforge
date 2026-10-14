@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger resumes the existing branch `feature/manual-labeling` at `f37db50`. The inherited working-tree changes are part of the active work and must be preserved. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
+This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`; the current implementation and verification are recorded in `DEVELOPMENT.md`. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
 
 ## COMPLETED_VERIFIED
 
@@ -11,16 +11,16 @@ This ledger resumes the existing branch `feature/manual-labeling` at `f37db50`. 
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
 - Fine-tune accepts only a registered FrameForge YOLO11n detection checkpoint in its run directory with matching file, JSON and SQLite SHA-256. Unregistered and discovered external `.pt` files are rejected before model load.
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
-- Verification: `pytest engine/tests -q` — 51 passed; `pnpm build` — passed; `cargo fmt --check` — passed; `cargo check` — passed. A real one-epoch synthetic YOLO11n run produced a registered checkpoint and inference completed on one synthetic crop via MPS; this is pipeline smoke coverage, not model-quality evidence.
+- Verification before the current changes: `pytest engine/tests -q` — 51 passed; frontend and Rust checks passed. Current verification is 57 engine tests, TypeScript/Vite production build, Rust format/check, a 4.33 MiB macOS app bundle, and bundled-engine JSON-lines health; results are recorded in `DEVELOPMENT.md`.
 - `pnpm tauri build --bundles app` produced a 4.30 MiB macOS app; JSON-lines health from its bundled engine returned `status: ok` and listed `yolo11n_inference`.
 - Commit `85dc842` records the inherited FHD/training/discovery implementation plus checkpoint-trust recovery. GitHub push failed because no HTTPS username credential was available.
 
 ## IMPLEMENTED_UNVERIFIED
 
 - Training and Smart Folder Discovery screens compile in the production frontend build, but their complete click-through workflow has not been repeated on a fresh app bundle in this audit.
-- The inference engine command is implemented and smoke-tested; it is not connected to a user-facing model-selection/auto-label/review flow.
+- Per-image inference is connected to the labeling UI. Its persistence and export rules are covered by engine tests; the workflow has not been click-through-tested with a real checkpoint because the local registry has no usable model.
+- Default YOLO export filters pending/rejected AI annotations and prevents pending-only images from being exported as reviewed negatives; engine tests cover exclusion and provenance for reviewed AI boxes.
 - MPS training smoke is documented as one real YOLO11n epoch on a small synthetic dataset. It verifies the training pipeline, not model quality or sustained training stability.
-- Auto-label result persistence and review state are not yet exercised because their project workflow is not implemented.
 
 ## PARTIALLY_COMPLETED
 
@@ -36,7 +36,7 @@ This ledger resumes the existing branch `feature/manual-labeling` at `f37db50`. 
 
 ## NOT_IMPLEMENTED
 
-- Auto-labeling on extracted crops, candidate negatives, source-model/confidence provenance, provisional annotation states, and review/bulk-review workflow. The underlying inference engine is verified, but is not connected to project persistence or UI.
+- Bulk auto-labeling across project images and automatic candidate-negative decisions remain unimplemented; the current UI runs inference on the image that is open.
 - Guided workspace, contextual next actions, full workflow status, active-learning suggestions, and model quality dashboard.
 - Fixed validation/test evaluation, minimum quality targets, model-generation comparison, Champion/Challenger promotion and rollback.
 - Training resume, historical-data replay strategy, dataset version lineage, and frozen human-reviewed test set.
@@ -51,11 +51,10 @@ This ledger resumes the existing branch `feature/manual-labeling` at `f37db50`. 
 
 ## Dependencies and next work
 
-1. **Next:** connect `predict_crops` to extraction output and the saved project; add AI suggestion annotations with model/checkpoint/confidence provenance and a Needs Review state, preserving manual/reviewed edits.
-2. Add review and candidate-negative handling. Only reviewed/approved examples may enter the default training export.
-3. Add immutable dataset lineage and replay/frozen-test policies before iterative fine-tuning and quality comparisons.
-4. Implement fixed-set evaluation and Champion/Challenger policy before model promotion or release targets.
-5. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
-6. Complete session restoration and Windows validation as independent platform/workflow tracks.
+1. **Next:** add project-wide batch inference and candidate-negative review without reloading the model per image.
+2. Add immutable dataset lineage and replay/frozen-test policies before iterative fine-tuning and quality comparisons.
+3. Implement fixed-set evaluation and Champion/Challenger policy before model promotion or release targets.
+4. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
+5. Complete session restoration and Windows validation as independent platform/workflow tracks.
 
 Update this file and `README.md`, `AGENTS.md`, `agent.md`, and `DEVELOPMENT.md` after each completed task; update product/design notes and `CHANGELOG.md` when applicable. Do not clear inherited working-tree changes.

@@ -320,7 +320,7 @@ function App() {
     annotations: Annotation[],
     status: "ready" | "reviewed",
     fingerprint: string,
-  ) => {
+  ): Promise<Annotation[]> => {
     const path = projectPath;
     if (!path) throw new Error("Hãy lưu dự án trước khi chỉnh sửa nhãn.");
     setProject((current) => ({
@@ -330,19 +330,50 @@ function App() {
         : image),
     }));
     try {
-      await serializeProjectWrite(() => callEngine("save_annotations", {
+      const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[] }>("save_annotations", {
         path,
         image_path: imagePath,
         annotations,
         status,
         image_fingerprint: fingerprint,
       }));
+      setProject((current) => ({
+        ...current,
+        images: current.images.map((image) => image.path === imagePath
+          ? { ...image, annotations: saved.annotations, status }
+          : image),
+      }));
       annotationSaveFailed.current = false;
+      return saved.annotations;
     } catch (reason) {
       annotationSaveFailed.current = true;
       setDirty(true);
       throw reason;
     }
+  }, [projectPath]);
+
+  const saveLabelSuggestions = useCallback(async (
+    imagePath: string,
+    predictions: { class_id: number; confidence: number; bbox_xyxy: number[] }[],
+    checkpoint: string,
+    fingerprint: string,
+  ): Promise<Annotation[]> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi tạo gợi ý AI.");
+    const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[] }>("save_ai_suggestions", {
+      path,
+      image_path: imagePath,
+      predictions,
+      checkpoint,
+      image_fingerprint: fingerprint,
+    }));
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === imagePath
+        ? { ...image, annotations: [...(image.annotations ?? []), ...saved.annotations] }
+        : image),
+    }));
+    return saved.annotations;
   }, [projectPath]);
 
   useEffect(() => {
@@ -940,6 +971,7 @@ function App() {
           classNames={project.class_names}
           loadPreview={loadLabelPreview}
           saveImage={saveLabelImage}
+          saveSuggestions={saveLabelSuggestions}
         />
       ) : activeTab === "dataset" ? (
         <DatasetManager projectPath={projectPath} imageCount={project.images.length} onUseDiscoveredDataset={useDiscoveredDataset} />

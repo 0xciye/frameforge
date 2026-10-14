@@ -11,18 +11,19 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian.
 - Exact Center Crop cắt đúng vùng W×H từ tâm frame nguồn, không resize/padding vùng crop; preview phủ overlay đúng pixel. Video lớn hơn 1920×1080 bị từ chối. Full-frame letterbox và grid vẫn khả dụng; kích thước crop/output tối đa 1920×1080.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
-- Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1 lên v2.
+- Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1/v2 lên v3.
 - Gán nhãn box thủ công với class ổn định, review, undo/redo và autosave vào dự án đã lưu.
 - Kiểm tra dataset, loại ảnh trống chưa review, chia theo video/đoạn với chống rò rỉ ảnh trùng byte, và export YOLO vào thư mục phiên bản mới.
 - Quét thư mục dự án ở chế độ chỉ đọc để tìm dataset YOLO, run Ultralytics, metric CSV, checkpoint, model export và project FrameForge; giới hạn độ sâu/số file, bỏ symlink, báo progress và hỗ trợ hủy.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.
 - Huấn luyện YOLO11n trên CPU hoặc backend GPU mà PyTorch báo khả dụng; kiểm tra dataset trước train, queue nhiều imgsz độc lập, theo dõi progress/metrics thật, dừng tại ranh giới epoch và lưu registry/checkpoint. Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký và checksum còn khớp.
-- Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Kết quả chưa được lưu thành nhãn dự án hoặc đưa ra giao diện.
+- Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Tab Gán nhãn chạy inference trên ảnh đang mở bằng checkpoint nội bộ đã xác minh; lưu gợi ý AI cùng model ID, SHA-256 checkpoint và confidence vào project ở trạng thái `needs_review`. Người dùng có thể duyệt, chỉnh sửa hoặc loại box; nhãn thủ công và AI đã duyệt được giữ nguyên.
+- Dataset export chỉ đưa box thủ công và gợi ý AI đã duyệt vào YOLO labels. Gợi ý đang chờ/bị loại không được export; ảnh chỉ còn gợi ý đang chờ không được tính thành negative đã review.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài giữ trạng thái chưa xác minh và không được đưa vào lựa chọn fine-tune.
 
 ## Chưa khả dụng
 
-- Auto-label pipeline/UI: lưu nhãn đề xuất, provenance, candidate negatives, review/edit/accept/reject và giữ nguyên nhãn thủ công.
+- Inference hàng loạt cho toàn bộ ảnh trong project; hiện UI chạy ảnh đang mở.
 - Xác minh an toàn/khả năng tương thích và nạp checkpoint `.pt` từ nguồn ngoài.
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
 - Resume training sau khi tiến trình bị gián đoạn.

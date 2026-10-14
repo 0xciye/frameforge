@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_CLASS_NAMES = ("head", "body")
 
 
@@ -68,7 +68,9 @@ def _initialize(connection: sqlite3.Connection) -> None:
             y_max REAL NOT NULL,
             confidence REAL,
             source TEXT NOT NULL,
-            review_status TEXT NOT NULL
+            review_status TEXT NOT NULL,
+            source_model_id TEXT,
+            checkpoint_sha256 TEXT
         );
         """
     )
@@ -83,18 +85,24 @@ def _migrate(connection: sqlite3.Connection) -> None:
     version = int(row[0]) if row else 0
     if version == SCHEMA_VERSION:
         return
-    if version != 1:
+    if version not in {1, 2}:
         raise ValueError("Phiên bản cấu trúc dự án không được hỗ trợ.")
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(images)")}
-    for name, definition in (
-        ("source_id", "TEXT"),
-        ("timestamp_seconds", "REAL"),
-        ("crop_rect_json", "TEXT"),
-        ("sharpness_score", "REAL"),
-        ("extraction_settings_json", "TEXT"),
-    ):
+    if version == 1:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(images)")}
+        for name, definition in (
+            ("source_id", "TEXT"),
+            ("timestamp_seconds", "REAL"),
+            ("crop_rect_json", "TEXT"),
+            ("sharpness_score", "REAL"),
+            ("extraction_settings_json", "TEXT"),
+        ):
+            if name not in columns:
+                connection.execute("ALTER TABLE images ADD COLUMN {0} {1}".format(name, definition))
+        connection.execute("UPDATE project_meta SET value = '2' WHERE key = 'schema_version'")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(annotations)")}
+    for name in ("source_model_id", "checkpoint_sha256"):
         if name not in columns:
-            connection.execute("ALTER TABLE images ADD COLUMN {0} {1}".format(name, definition))
+            connection.execute("ALTER TABLE annotations ADD COLUMN {0} TEXT".format(name))
     connection.execute(
         "INSERT OR REPLACE INTO project_meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -162,8 +170,8 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
                 connection.execute(
                     """INSERT INTO annotations(
                         annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
-                        confidence, source, review_status
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        confidence, source, review_status, source_model_id, checkpoint_sha256
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(annotation.get("id") or uuid.uuid4()),
                         str(image["path"]),
@@ -175,6 +183,8 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
                         annotation.get("confidence"),
                         str(annotation.get("source", "manual")),
                         str(annotation.get("review_status", "unreviewed")),
+                        annotation.get("source_model_id"),
+                        annotation.get("checkpoint_sha256"),
                     ),
                 )
 
@@ -230,7 +240,7 @@ def _is_frameforge_project(path: Path) -> bool:
             return False
         meta = {row[0]: row[1] for row in connection.execute("SELECT key, value FROM project_meta")}
         return (
-            meta.get("schema_version") in {"1", str(SCHEMA_VERSION)}
+            meta.get("schema_version") in {"1", "2", str(SCHEMA_VERSION)}
             and bool(meta.get("project_id"))
             and bool(meta.get("name"))
             and meta.get("application") == "FrameForge"
@@ -304,7 +314,9 @@ def save_annotations(
     image_file = Path(image_path).expanduser()
     if not image_file.is_file():
         raise ValueError("Không tìm thấy ảnh để lưu nhãn.")
-    if not isinstance(image_fingerprint, str) or len(image_fingerprint) != 64:
+    if not isinstance(image_fingerprint, str) or len(image_fingerprint) != 64 or any(
+        character not in "0123456789abcdef" for character in image_fingerprint.casefold()
+    ):
         raise ValueError("Thiếu fingerprint ảnh đã preview.")
     if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
         raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu nhãn.")
@@ -327,6 +339,10 @@ def save_annotations(
         if width <= 0 or height <= 0:
             raise ValueError("Kích thước ảnh trong dự án không hợp lệ.")
         class_ids = {row["class_id"] for row in connection.execute("SELECT class_id FROM classes")}
+        existing_rows = {
+            row["annotation_id"]: row
+            for row in connection.execute("SELECT * FROM annotations WHERE image_path = ?", (image_path,))
+        }
 
         cleaned = []
         annotation_ids = set()
@@ -358,8 +374,6 @@ def save_annotations(
 
             source = annotation.get("source", "manual")
             review_status = annotation.get("review_status", "unreviewed")
-            if source != "manual" or review_status not in {"unreviewed", "reviewed"}:
-                raise ValueError("Nguồn hoặc trạng thái review của nhãn không hợp lệ.")
             confidence = annotation.get("confidence")
             if confidence is not None:
                 try:
@@ -368,18 +382,61 @@ def save_annotations(
                     raise ValueError("Confidence phải nằm trong khoảng 0 đến 1.") from error
                 if not math.isfinite(confidence) or not 0 <= confidence <= 1:
                     raise ValueError("Confidence phải nằm trong khoảng 0 đến 1.")
-            cleaned.append((
-                annotation_id,
-                image_path,
-                raw_class_id,
-                x_min,
-                y_min,
-                x_max,
-                y_max,
-                confidence,
-                source,
-                review_status,
-            ))
+            source_model_id = annotation.get("source_model_id")
+            checkpoint_sha256 = annotation.get("checkpoint_sha256")
+            if source == "manual":
+                if review_status not in {"unreviewed", "reviewed"} or source_model_id is not None or checkpoint_sha256 is not None:
+                    raise ValueError("Nguồn hoặc trạng thái review của nhãn thủ công không hợp lệ.")
+                previous = existing_rows.get(annotation_id)
+                if previous is not None and previous["source"] == "ai":
+                    raise ValueError("Không thể đổi nguồn của nhãn AI thành nhãn thủ công.")
+            elif source == "ai":
+                if review_status not in {"needs_review", "reviewed", "rejected"}:
+                    raise ValueError("Trạng thái review của gợi ý AI không hợp lệ.")
+                previous = existing_rows.get(annotation_id)
+                if previous is None or previous["source"] != "ai":
+                    raise ValueError("Gợi ý AI mới chỉ được ghi qua luồng lưu inference đã xác minh.")
+                if (
+                    source_model_id != previous["source_model_id"]
+                    or checkpoint_sha256 != previous["checkpoint_sha256"]
+                ):
+                    raise ValueError("Không thể thay đổi provenance của gợi ý AI.")
+                old_confidence = previous["confidence"]
+                if (old_confidence is None) != (confidence is None) or (
+                    old_confidence is not None and float(old_confidence) != confidence
+                ):
+                    raise ValueError("Không thể thay đổi confidence gốc của gợi ý AI.")
+            else:
+                raise ValueError("Nguồn hoặc trạng thái review của nhãn không hợp lệ.")
+            cleaned.append({
+                "id": annotation_id,
+                "class_id": raw_class_id,
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+                "confidence": confidence,
+                "source": source,
+                "review_status": review_status,
+                "source_model_id": source_model_id,
+                "checkpoint_sha256": checkpoint_sha256,
+            })
+
+        for annotation_id, row in existing_rows.items():
+            if row["source"] == "ai" and annotation_id not in annotation_ids:
+                cleaned.append({
+                    "id": annotation_id,
+                    "class_id": row["class_id"],
+                    "x_min": row["x_min"],
+                    "y_min": row["y_min"],
+                    "x_max": row["x_max"],
+                    "y_max": row["y_max"],
+                    "confidence": row["confidence"],
+                    "source": row["source"],
+                    "review_status": row["review_status"],
+                    "source_model_id": row["source_model_id"],
+                    "checkpoint_sha256": row["checkpoint_sha256"],
+                })
 
         now = datetime.now(timezone.utc).isoformat()
         with connection:
@@ -389,17 +446,194 @@ def save_annotations(
             connection.executemany(
                 """INSERT INTO annotations(
                     annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
-                    confidence, source, review_status
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                cleaned,
+                    confidence, source, review_status, source_model_id, checkpoint_sha256
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(
+                    annotation["id"], image_path, annotation["class_id"], annotation["x_min"],
+                    annotation["y_min"], annotation["x_max"], annotation["y_max"],
+                    annotation["confidence"], annotation["source"], annotation["review_status"],
+                    annotation["source_model_id"], annotation["checkpoint_sha256"],
+                ) for annotation in cleaned],
             )
             connection.execute("UPDATE images SET status = ? WHERE path = ?", (image_status, image_path))
             connection.execute(
                 "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
             )
-        return {"image_path": image_path, "annotation_count": len(cleaned), "status": image_status}
+        return {
+            "image_path": image_path,
+            "annotation_count": len(cleaned),
+            "status": image_status,
+            "annotations": cleaned,
+        }
     except sqlite3.DatabaseError as error:
         raise ValueError("Không lưu được nhãn vào dự án: {0}".format(error)) from error
+    finally:
+        connection.close()
+
+
+def save_ai_suggestions(
+    path_value: str,
+    image_path: str,
+    predictions: Any,
+    image_fingerprint: str,
+    checkpoint_value: str,
+) -> Dict[str, Any]:
+    """Persist detections from a currently verified internal checkpoint as reviewable suggestions."""
+    if not isinstance(predictions, list) or len(predictions) > 300:
+        raise ValueError("Danh sách gợi ý phải có tối đa 300 box.")
+    if not isinstance(image_fingerprint, str) or len(image_fingerprint) != 64 or any(
+        character not in "0123456789abcdef" for character in image_fingerprint.casefold()
+    ):
+        raise ValueError("Fingerprint ảnh không hợp lệ.")
+    if not isinstance(checkpoint_value, str) or not checkpoint_value:
+        raise ValueError("Inference chỉ nhận checkpoint YOLO11n nội bộ đã xác minh.")
+    try:
+        checkpoint = Path(checkpoint_value).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("Checkpoint không còn được xác minh hoặc checksum đã thay đổi.") from error
+    if not checkpoint.is_file() or checkpoint.suffix.casefold() != ".pt":
+        raise ValueError("Inference chỉ nhận checkpoint YOLO11n nội bộ đã xác minh.")
+    from frameforge.training import verified_checkpoint_record
+
+    record = verified_checkpoint_record(checkpoint)
+    if record is None:
+        raise ValueError("Checkpoint không còn được xác minh hoặc checksum đã thay đổi.")
+    source_model_id = record.get("run_id")
+    checkpoint_sha256 = record.get("checkpoint_sha256")
+    if (
+        not isinstance(source_model_id, str)
+        or not source_model_id
+        or not isinstance(checkpoint_sha256, str)
+        or len(checkpoint_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in checkpoint_sha256.casefold())
+    ):
+        raise ValueError("Registry checkpoint thiếu provenance cần lưu.")
+
+    raw_names = record.get("class_names")
+    if isinstance(raw_names, dict):
+        try:
+            ordered_names = sorted(raw_names.items(), key=lambda item: int(item[0]))
+            if [int(key) for key, _ in ordered_names] != list(range(len(ordered_names))):
+                raise ValueError("Schema class trong registry không hợp lệ.")
+            class_names = [name for _, name in ordered_names]
+        except (TypeError, ValueError):
+            raise ValueError("Schema class trong registry không hợp lệ.")
+    elif isinstance(raw_names, (list, tuple)):
+        class_names = list(raw_names)
+    else:
+        raise ValueError("Checkpoint thiếu schema class hợp lệ trong registry.")
+    if not class_names or any(not isinstance(name, str) or not name.strip() for name in class_names):
+        raise ValueError("Schema class trong registry không hợp lệ.")
+
+    path = Path(path_value).expanduser().resolve(strict=True)
+    if path.suffix.lower() != ".ffproj" or not path.is_file():
+        raise ValueError("Hãy chọn một tệp dự án FrameForge .ffproj.")
+    image_file = Path(image_path).expanduser()
+    if not image_file.is_file():
+        raise ValueError("Không tìm thấy ảnh để lưu gợi ý.")
+    if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
+        raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu gợi ý.")
+    try:
+        valid_project = _is_frameforge_project(path)
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Tệp đã tồn tại nhưng không phải là dự án FrameForge hợp lệ.") from error
+    if not valid_project:
+        raise ValueError("Tệp đã tồn tại nhưng không phải là dự án FrameForge hợp lệ.")
+
+    connection = _connect(path)
+    try:
+        _migrate(connection)
+        image = connection.execute("SELECT width, height FROM images WHERE path = ?", (image_path,)).fetchone()
+        if image is None:
+            raise ValueError("Ảnh không thuộc dự án hiện tại.")
+        project_class_names = [row[0] for row in connection.execute("SELECT name FROM classes ORDER BY class_id")]
+        if class_names != project_class_names:
+            raise ValueError("Class schema của checkpoint không khớp với dự án.")
+        if connection.execute(
+            "SELECT 1 FROM annotations WHERE image_path = ? AND source = 'ai' AND review_status != 'rejected' AND source_model_id = ? AND checkpoint_sha256 = ? LIMIT 1",
+            (image_path, source_model_id, checkpoint_sha256),
+        ).fetchone():
+            raise ValueError("Ảnh này đã có gợi ý chưa bị loại từ checkpoint đang chọn.")
+
+        width, height = int(image["width"]), int(image["height"])
+        cleaned = []
+        for prediction in predictions:
+            if not isinstance(prediction, dict):
+                raise ValueError("Mỗi gợi ý phải là một object hợp lệ.")
+            class_id = prediction.get("class_id")
+            if isinstance(class_id, bool) or not isinstance(class_id, int) or not 0 <= class_id < len(class_names):
+                raise ValueError("Gợi ý tham chiếu class ID không hợp lệ.")
+            coordinates = prediction.get("bbox_xyxy")
+            if not isinstance(coordinates, (list, tuple)) or len(coordinates) != 4:
+                raise ValueError("Bounding box inference không hợp lệ.")
+            confidence_value = prediction.get("confidence")
+            numeric_values = [*coordinates, confidence_value]
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in numeric_values
+            ):
+                raise ValueError("Box và confidence inference phải là số.")
+            try:
+                x_min, y_min, x_max, y_max = (float(value) for value in coordinates)
+                confidence = float(confidence_value)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Box hoặc confidence inference không hợp lệ.") from error
+            if not all(math.isfinite(value) for value in (x_min, y_min, x_max, y_max, confidence)):
+                raise ValueError("Box và confidence inference phải là số hữu hạn.")
+            if not (0 <= x_min < x_max <= width and 0 <= y_min < y_max <= height):
+                raise ValueError("Box inference phải nằm trong pixel bounds của ảnh.")
+            if not 0 <= confidence <= 1:
+                raise ValueError("Confidence inference phải nằm trong khoảng 0 đến 1.")
+            cleaned.append({
+                "id": str(uuid.uuid4()),
+                "class_id": class_id,
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+                "confidence": confidence,
+                "source": "ai",
+                "review_status": "needs_review",
+                "source_model_id": source_model_id,
+                "checkpoint_sha256": checkpoint_sha256,
+            })
+
+        if not cleaned:
+            return {
+                "image_path": image_path,
+                "annotation_count": 0,
+                "annotations": [],
+                "source_model_id": source_model_id,
+                "checkpoint_sha256": checkpoint_sha256,
+            }
+        now = datetime.now(timezone.utc).isoformat()
+        with connection:
+            if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
+                raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu gợi ý.")
+            connection.executemany(
+                """INSERT INTO annotations(
+                    annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
+                    confidence, source, review_status, source_model_id, checkpoint_sha256
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(
+                    annotation["id"], image_path, annotation["class_id"], annotation["x_min"],
+                    annotation["y_min"], annotation["x_max"], annotation["y_max"],
+                    annotation["confidence"], annotation["source"], annotation["review_status"],
+                    annotation["source_model_id"], annotation["checkpoint_sha256"],
+                ) for annotation in cleaned],
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
+            )
+        return {
+            "image_path": image_path,
+            "annotation_count": len(cleaned),
+            "annotations": cleaned,
+            "source_model_id": source_model_id,
+            "checkpoint_sha256": checkpoint_sha256,
+        }
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Không lưu được gợi ý AI vào dự án: {0}".format(error)) from error
     finally:
         connection.close()
 
@@ -424,13 +658,20 @@ def load_project(path_value: str) -> Dict[str, Any]:
         settings = {row["key"]: json.loads(row["value_json"]) for row in connection.execute("SELECT key, value_json FROM project_settings")}
         annotations = {}
         for row in connection.execute("SELECT * FROM annotations"):
-            annotations.setdefault(row["image_path"], []).append({
+            annotation = {
                 "id": row["annotation_id"], "class_id": row["class_id"],
                 "x_min": row["x_min"], "y_min": row["y_min"],
                 "x_max": row["x_max"], "y_max": row["y_max"],
                 "confidence": row["confidence"], "source": row["source"],
                 "review_status": row["review_status"],
-            })
+            }
+            keys = row.keys()
+            for field in ("source_model_id", "checkpoint_sha256"):
+                if field in keys:
+                    annotation[field] = row[field]
+            if annotation["source"] == "ai" and annotation["review_status"] == "unreviewed":
+                annotation["review_status"] = "needs_review"
+            annotations.setdefault(row["image_path"], []).append(annotation)
         images = []
         for row in connection.execute("SELECT * FROM images"):
             keys = row.keys()

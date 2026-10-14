@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
   ArrowRight,
+  Ban,
   Check,
   CheckCircle2,
   FileImage,
@@ -9,9 +12,12 @@ import {
   LoaderCircle,
   Maximize2,
   MousePointer2,
+  RefreshCw,
   Redo2,
+  Sparkles,
   Trash2,
   Undo2,
+  X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -25,8 +31,10 @@ export type Annotation = {
   x_max: number;
   y_max: number;
   confidence: number | null;
-  source: string;
-  review_status: "unreviewed" | "reviewed";
+  source: "manual" | "ai";
+  review_status: "unreviewed" | "needs_review" | "reviewed" | "rejected";
+  source_model_id?: string | null;
+  checkpoint_sha256?: string | null;
 };
 
 type LabelImage = {
@@ -44,8 +52,21 @@ type LabelPreview = {
   image_fingerprint?: string;
 };
 
-type SaveImage = (path: string, annotations: Annotation[], status: "ready" | "reviewed", fingerprint: string) => Promise<void>;
+type SaveImage = (path: string, annotations: Annotation[], status: "ready" | "reviewed", fingerprint: string) => Promise<Annotation[]>;
 type LoadPreview = (path: string) => Promise<LabelPreview>;
+type RegisteredModel = {
+  run_id: string;
+  checkpoint_path?: string | null;
+  checkpoint_usable?: boolean;
+  checkpoint_sha256?: string | null;
+  class_names?: string[];
+  effective_imgsz?: number;
+  requested_imgsz?: number;
+};
+type Prediction = { class_id: number; confidence: number; bbox_xyxy: number[] };
+type InferenceProgress = { stage: string; completed_images?: number; total_images?: number };
+type InferenceResult = { status: string; results: { predictions: Prediction[] }[] };
+type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string) => Promise<Annotation[]>;
 type Point = { x: number; y: number };
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 type Tool = { kind: "draw"; classId: number } | { kind: "select" } | { kind: "pan" };
@@ -63,7 +84,16 @@ type Props = {
   classNames: string[];
   loadPreview: LoadPreview;
   saveImage: SaveImage;
+  saveSuggestions: SaveSuggestions;
 };
+
+function requestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `label-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function engineRequest<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  return invoke<T>("engine_request", { request: { id: requestId(), command, arguments: args } });
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -108,8 +138,8 @@ function resizeBox(box: Annotation, handle: ResizeHandle, point: Point, width: n
   return next;
 }
 
-export default function ManualLabeling({ images, classNames, loadPreview, saveImage }: Props) {
-  const classes = classNames.length ? classNames : ["head", "body"];
+export default function ManualLabeling({ images, classNames, loadPreview, saveImage, saveSuggestions }: Props) {
+  const classes = useMemo(() => classNames.length ? classNames : ["head", "body"], [classNames]);
   const [activePath, setActivePath] = useState(images[0]?.path ?? "");
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>({ kind: "select" });
@@ -121,18 +151,43 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [gesture, setGesture] = useState<Gesture | null>(null);
   const [saveStates, setSaveStates] = useState<Record<string, SaveState>>({});
+  const [models, setModels] = useState<RegisteredModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [inferenceBusy, setInferenceBusy] = useState(false);
+  const [inferenceCancelling, setInferenceCancelling] = useState(false);
+  const [inferenceProgress, setInferenceProgress] = useState<InferenceProgress | null>(null);
+  const [inferenceMessage, setInferenceMessage] = useState<string | null>(null);
+  const [inferenceError, setInferenceError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
   const previewSequence = useRef(0);
+  const activeInferenceId = useRef<string | null>(null);
   const histories = useRef(new Map<string, History>());
   const saveRevisions = useRef(new Map<string, number>());
+  const usableModels = useMemo(() => models.filter((model) => (
+    model.checkpoint_usable
+    && typeof model.checkpoint_path === "string"
+    && model.class_names?.length === classes.length
+    && model.class_names.every((name, index) => name === classes[index])
+  )), [models, classes]);
+  const selectedModel = usableModels.find((model) => model.run_id === selectedModelId) ?? null;
   const image = images.find((item) => item.path === activePath) ?? images[0] ?? null;
   const annotations = image?.annotations ?? [];
+  const activeAnnotations = useMemo(() => annotations.filter((item) => item.review_status !== "rejected"), [annotations]);
+  const pendingSuggestions = annotations.filter((item) => item.source === "ai" && item.review_status === "needs_review");
   const imageIndex = image ? images.findIndex((item) => item.path === image.path) : -1;
-  const selectedAnnotation = annotations.find((item) => item.id === selectedAnnotationId) ?? null;
+  const selectedAnnotation = activeAnnotations.find((item) => item.id === selectedAnnotationId) ?? null;
+  const alreadySuggestedByModel = Boolean(image && selectedModel && annotations.some((item) => (
+    item.source === "ai"
+    && item.review_status !== "rejected"
+    && item.source_model_id === selectedModel.run_id
+    && item.checkpoint_sha256 === selectedModel.checkpoint_sha256
+  )));
   const saveState = image ? saveStates[image.path] ?? { status: "saved" as const } : { status: "saved" as const };
   const sizeMismatch = Boolean(preview && image && (preview.width !== image.width || preview.height !== image.height));
-  const canEdit = Boolean(image && preview && preview.image_fingerprint && !sizeMismatch);
+  const canEdit = Boolean(image && preview && preview.image_fingerprint && !sizeMismatch && !inferenceBusy);
   const fitSize = useMemo(() => {
     if (!preview || !stageSize.width || !stageSize.height) return null;
     const scale = Math.min(stageSize.width / preview.width, stageSize.height / preview.height);
@@ -140,6 +195,26 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   }, [preview, stageSize, zoom]);
   const handleSize = fitSize ? 10 / fitSize.scale : 12;
   const strokeWidth = fitSize ? 2 / fitSize.scale : 2;
+
+  const refreshModels = useCallback(async () => {
+    setModelsLoading(true);
+    setModelError(null);
+    try {
+      const result = await engineRequest<{ runs: RegisteredModel[] }>("list_training_runs");
+      setModels(result.runs ?? []);
+    } catch (reason) {
+      setModelError(String(reason));
+    } finally {
+      setModelsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refreshModels(); }, [refreshModels]);
+
+  useEffect(() => {
+    if (usableModels.some((model) => model.run_id === selectedModelId)) return;
+    setSelectedModelId(usableModels[0]?.run_id ?? "");
+  }, [usableModels, selectedModelId]);
 
   useEffect(() => {
     if (images.some((item) => item.path === activePath)) return;
@@ -181,6 +256,14 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     };
   }, [image?.path, loadPreview]);
 
+  useEffect(() => () => {
+    const id = activeInferenceId.current;
+    if (id) {
+      activeInferenceId.current = null;
+      void invoke<boolean>("cancel_engine_request", { requestId: id }).catch(() => undefined);
+    }
+  }, []);
+
   function setCurrentGesture(next: Gesture | null) {
     gestureRef.current = next;
     setGesture(next);
@@ -203,6 +286,61 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     });
   }
 
+  async function startInference() {
+    if (!image || !preview?.image_fingerprint || !selectedModel?.checkpoint_path || inferenceBusy) return;
+    setInferenceBusy(true);
+    setInferenceCancelling(false);
+    setInferenceProgress(null);
+    setInferenceMessage(null);
+    setInferenceError(null);
+    const id = requestId();
+    activeInferenceId.current = id;
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = await listen<{ id: string; progress: InferenceProgress }>("engine-progress", (event) => {
+        if (event.payload.id === id) setInferenceProgress(event.payload.progress);
+      });
+      const result = await invoke<InferenceResult>("engine_request", {
+        request: {
+          id,
+          command: "predict_crops",
+          arguments: { checkpoint: selectedModel.checkpoint_path, images: [image.path], confidence_threshold: 0.25 },
+        },
+      });
+      if (activeInferenceId.current !== id) return;
+      if (result.status === "cancelled") {
+        setInferenceMessage("Đã dừng inference; không lưu gợi ý.");
+        return;
+      }
+      const predictions = result.results[0]?.predictions ?? [];
+      if (!predictions.length) {
+        setInferenceMessage("Không có box đạt confidence từ 0,25 trở lên.");
+        return;
+      }
+      const saved = await saveSuggestions(image.path, predictions, selectedModel.checkpoint_path, preview.image_fingerprint);
+      setInferenceMessage(`Đã lưu ${saved.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`);
+    } catch (reason) {
+      setInferenceError(String(reason));
+    } finally {
+      dispose?.();
+      activeInferenceId.current = null;
+      setInferenceBusy(false);
+      setInferenceCancelling(false);
+    }
+  }
+
+  async function cancelInference() {
+    const id = activeInferenceId.current;
+    if (!id || inferenceCancelling) return;
+    setInferenceCancelling(true);
+    try {
+      await invoke<boolean>("cancel_engine_request", { requestId: id });
+    } catch (reason) {
+      setInferenceError(String(reason));
+      setInferenceCancelling(false);
+    }
+  }
+
   function commit(nextAnnotations: Annotation[], status: "ready" | "reviewed" = "ready") {
     if (!image || !canEdit || !preview) return;
     const history = histories.current.get(image.path) ?? { past: [], future: [] };
@@ -210,10 +348,36 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     if (history.past.length > 100) history.past.shift();
     history.future = [];
     histories.current.set(image.path, history);
-    const next = nextAnnotations.map((annotation) => ({
-      ...annotation,
-      review_status: status === "reviewed" ? "reviewed" as const : "unreviewed" as const,
-    }));
+    const previousById = new Map(annotations.map((annotation) => [annotation.id, annotation]));
+    const next = nextAnnotations.map((annotation) => {
+      const previous = previousById.get(annotation.id);
+      if (!previous) {
+        return {
+          ...annotation,
+          source: "manual" as const,
+          confidence: null,
+          review_status: status === "reviewed" ? "reviewed" as const : "unreviewed" as const,
+          source_model_id: null,
+          checkpoint_sha256: null,
+        };
+      }
+      const changed = previous.class_id !== annotation.class_id
+        || previous.x_min !== annotation.x_min || previous.y_min !== annotation.y_min
+        || previous.x_max !== annotation.x_max || previous.y_max !== annotation.y_max;
+      let reviewStatus = annotation.review_status;
+      if (status === "reviewed" && previous.source === "manual") reviewStatus = "reviewed";
+      else if (changed && previous.source === "ai" && previous.review_status === "needs_review") reviewStatus = "reviewed";
+      else if (changed && previous.source === "manual") reviewStatus = "unreviewed";
+      else if (reviewStatus === previous.review_status) reviewStatus = previous.review_status;
+      return {
+        ...annotation,
+        source: previous.source,
+        confidence: previous.confidence,
+        source_model_id: previous.source_model_id,
+        checkpoint_sha256: previous.checkpoint_sha256,
+        review_status: reviewStatus,
+      };
+    });
     persist(image.path, next, status, preview.image_fingerprint);
   }
 
@@ -239,11 +403,14 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
 
   function deleteSelected() {
     if (!selectedAnnotation) return;
-    commit(annotations.filter((annotation) => annotation.id !== selectedAnnotation.id));
+    commit(selectedAnnotation.source === "ai"
+      ? annotations.map((annotation) => annotation.id === selectedAnnotation.id ? { ...annotation, review_status: "rejected" } : annotation)
+      : annotations.filter((annotation) => annotation.id !== selectedAnnotation.id));
     setSelectedAnnotationId(null);
   }
 
   function selectImage(path: string) {
+    if (inferenceBusy) return;
     setActivePath(path);
     setSelectedAnnotationId(null);
     setZoom(1);
@@ -386,7 +553,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   }
 
   function markReviewed() {
-    if (!image || !canEdit) return;
+    if (!image || !canEdit || (image.status !== "reviewed" && pendingSuggestions.length > 0)) return;
     const status = image.status === "reviewed" ? "ready" : "reviewed";
     commit(annotations, status);
   }
@@ -395,14 +562,19 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     commit(annotations.map((item) => item.id === annotation.id ? { ...item, class_id: classId } : item));
   }
 
+  function reviewSuggestion(annotation: Annotation, review_status: "reviewed" | "rejected") {
+    if (annotation.source !== "ai" || annotation.review_status !== "needs_review") return;
+    commit(annotations.map((item) => item.id === annotation.id ? { ...item, review_status } : item));
+  }
+
   const history = image ? histories.current.get(image.path) : undefined;
   const visibleAnnotations = useMemo(() => {
-    if (!gesture || gesture.kind === "draw" || gesture.kind === "pan") return annotations;
+    if (!gesture || gesture.kind === "draw" || gesture.kind === "pan") return activeAnnotations;
     const updated = gesture.kind === "move"
       ? moveBox(gesture.box, gesture.start, gesture.current, preview?.width ?? image?.width ?? 1, preview?.height ?? image?.height ?? 1)
       : resizeBox(gesture.box, gesture.handle, gesture.current, preview?.width ?? image?.width ?? 1, preview?.height ?? image?.height ?? 1);
-    return annotations.map((annotation) => annotation.id === updated.id ? updated : annotation);
-  }, [annotations, gesture, image?.height, image?.width, preview?.height, preview?.width]);
+    return activeAnnotations.map((annotation) => annotation.id === updated.id ? updated : annotation);
+  }, [activeAnnotations, gesture, image?.height, image?.width, preview?.height, preview?.width]);
   const draft = gesture?.kind === "draw" ? {
     x_min: Math.min(gesture.start.x, gesture.current.x),
     y_min: Math.min(gesture.start.y, gesture.current.y),
@@ -431,7 +603,8 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         </div>
         <div className="label-image-list" role="list" aria-label="Danh sách ảnh cần gán nhãn">
           {images.map((item, index) => {
-            const count = item.annotations?.length ?? 0;
+            const count = item.annotations?.filter((annotation) => annotation.review_status !== "rejected").length ?? 0;
+            const pendingCount = item.annotations?.filter((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review").length ?? 0;
             const current = item.path === image.path;
             return (
               <div role="listitem" key={item.path}>
@@ -439,10 +612,11 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                   className={`label-image-row${current ? " selected" : ""}`}
                   type="button"
                   aria-current={current ? "true" : undefined}
+                  disabled={inferenceBusy}
                   onClick={() => selectImage(item.path)}
                 >
-                  <span className={`label-review-dot${item.status === "reviewed" ? " reviewed" : ""}`} aria-label={item.status === "reviewed" ? "Đã review" : "Chưa review"} />
-                  <span className="label-image-copy"><strong>{imageName(item.path)}</strong><small>{item.width} × {item.height} · {count} box</small></span>
+                  <span className={`label-review-dot${pendingCount ? " needs-review" : item.status === "reviewed" ? " reviewed" : ""}`} aria-label={pendingCount ? `${pendingCount} gợi ý AI cần duyệt` : item.status === "reviewed" ? "Đã review" : "Chưa review"} />
+                  <span className="label-image-copy"><strong>{imageName(item.path)}</strong><small>{item.width} × {item.height} · {count} box{pendingCount ? ` · ${pendingCount} AI chờ duyệt` : ""}</small></span>
                   <small className="label-image-index">{index + 1}</small>
                 </button>
               </div>
@@ -454,9 +628,9 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       <section className="panel label-canvas-panel" aria-label={`Ảnh đang gán nhãn ${imageName(image.path)}`}>
         <div className="label-canvas-toolbar">
           <div className="label-image-navigation">
-            <button type="button" className="label-icon-button" aria-label="Ảnh trước" title="Ảnh trước" disabled={imageIndex <= 0} onClick={() => selectImage(images[imageIndex - 1].path)}><ArrowLeft size={14} /></button>
+            <button type="button" className="label-icon-button" aria-label="Ảnh trước" title="Ảnh trước" disabled={inferenceBusy || imageIndex <= 0} onClick={() => selectImage(images[imageIndex - 1].path)}><ArrowLeft size={14} /></button>
             <span>{imageIndex + 1} / {images.length}</span>
-            <button type="button" className="label-icon-button" aria-label="Ảnh tiếp theo" title="Ảnh tiếp theo" disabled={imageIndex < 0 || imageIndex >= images.length - 1} onClick={() => selectImage(images[imageIndex + 1].path)}><ArrowRight size={14} /></button>
+            <button type="button" className="label-icon-button" aria-label="Ảnh tiếp theo" title="Ảnh tiếp theo" disabled={inferenceBusy || imageIndex < 0 || imageIndex >= images.length - 1} onClick={() => selectImage(images[imageIndex + 1].path)}><ArrowRight size={14} /></button>
           </div>
           <div className="label-canvas-zoom" role="group" aria-label="Tỷ lệ ảnh">
             <button type="button" className="label-icon-button" aria-label="Thu nhỏ" title="Thu nhỏ" disabled={zoom <= 0.25} onClick={() => setZoom((current) => Math.max(0.25, Number((current - 0.25).toFixed(2))))}><ZoomOut size={14} /></button>
@@ -494,14 +668,15 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                   const y = annotation.y_min;
                   const w = annotation.x_max - annotation.x_min;
                   const h = annotation.y_max - annotation.y_min;
+                  const aiStroke = annotation.source === "ai" ? `${8 / (fitSize.scale || 1)} ${5 / (fitSize.scale || 1)}` : undefined;
                   const handles: { name: ResizeHandle; x: number; y: number }[] = [
                     { name: "nw", x, y }, { name: "n", x: x + w / 2, y }, { name: "ne", x: x + w, y },
                     { name: "e", x: x + w, y: y + h / 2 }, { name: "se", x: x + w, y: y + h },
                     { name: "s", x: x + w / 2, y: y + h }, { name: "sw", x, y: y + h }, { name: "w", x, y: y + h / 2 },
                   ];
                   return (
-                    <g key={annotation.id} className="label-box-group" data-class-id={annotation.class_id}>
-                      <rect data-annotation-id={annotation.id} x={x} y={y} width={w} height={h} fill={color} fillOpacity={selected ? 0.16 : 0.05} stroke={color} strokeWidth={strokeWidth} />
+                    <g key={annotation.id} className={`label-box-group${annotation.source === "ai" ? " ai-suggestion" : ""}`} data-class-id={annotation.class_id}>
+                      <rect data-annotation-id={annotation.id} x={x} y={y} width={w} height={h} fill={color} fillOpacity={selected ? 0.16 : 0.05} stroke={color} strokeWidth={strokeWidth} strokeDasharray={aiStroke} />
                       <rect className="label-box-title-bg" x={x} y={Math.max(0, y - labelHeight)} width={labelWidth} height={labelHeight} fill={color} pointerEvents="none" />
                       <text className="label-box-title" x={x + 6 / (fitSize.scale || 1)} y={Math.max(labelHeight * 0.72, y - labelHeight * 0.28)} fontSize={11 / (fitSize.scale || 1)} pointerEvents="none">{classNameFor(classes, annotation.class_id)}</text>
                       {selected && handles.map((handle) => <rect
@@ -517,7 +692,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                         stroke={color}
                         strokeWidth={strokeWidth}
                       />)}
-                      <title>{`${index + 1}. ${classNameFor(classes, annotation.class_id)} · ${Math.round(w)} × ${Math.round(h)} px`}</title>
+                      <title>{`${index + 1}. ${classNameFor(classes, annotation.class_id)}${annotation.source === "ai" ? ` · Gợi ý AI · ${annotation.review_status === "needs_review" ? "cần duyệt" : annotation.review_status === "rejected" ? "đã loại" : "đã duyệt"} · ${annotation.confidence == null ? "confidence không rõ" : `${Math.round(annotation.confidence * 100)}%`}` : ""} · ${Math.round(w)} × ${Math.round(h)} px`}</title>
                     </g>
                   );
                 })}
@@ -530,7 +705,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
 
         <div className="label-canvas-footer">
           <span>{preview ? `${preview.width} × ${preview.height} px` : imageName(image.path)}</span>
-          <span>{annotations.length} box</span>
+          <span>{activeAnnotations.length} box{pendingSuggestions.length ? ` · ${pendingSuggestions.length} AI chờ duyệt` : ""}</span>
           <span className={`label-save-status ${saveState.status}`} aria-live="polite">
             {saveState.status === "saving" ? <><LoaderCircle className="spin" size={12} /> Đang lưu…</> : saveState.status === "error" ? "Chưa lưu" : <><Check size={12} /> Đã tự lưu</>}
           </span>
@@ -543,8 +718,41 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       </section>
 
       <aside className="panel label-inspector-panel">
-        <div className="settings-header"><h2>Công cụ gán nhãn</h2><span>{annotations.length} box</span></div>
+        <div className="settings-header"><h2>Công cụ gán nhãn</h2><span>{activeAnnotations.length} box</span></div>
         <div className="label-inspector-scroll">
+          <section className="label-tool-section label-ai-section" aria-label="Gợi ý nhãn bằng AI">
+            <div className="label-ai-heading">
+              <h3><Sparkles size={13} /> Gợi ý AI</h3>
+              <button type="button" className="label-icon-button" aria-label="Làm mới checkpoint" title="Làm mới checkpoint" disabled={modelsLoading || inferenceBusy} onClick={() => void refreshModels()}><RefreshCw size={12} /></button>
+            </div>
+            <label className="label-ai-model">
+              <span>Checkpoint nội bộ</span>
+              <select aria-label="Checkpoint inference" value={selectedModelId} disabled={modelsLoading || inferenceBusy || usableModels.length === 0} onChange={(event) => setSelectedModelId(event.target.value)}>
+                <option value="">{modelsLoading ? "Đang tải checkpoint…" : "Chọn checkpoint"}</option>
+                {usableModels.map((model) => <option key={model.run_id} value={model.run_id}>
+                  YOLO11n · {model.effective_imgsz ?? model.requested_imgsz ?? "—"} px · {model.run_id.slice(0, 8)}
+                </option>)}
+              </select>
+            </label>
+            {inferenceBusy ? (
+              <button type="button" className="subtle-button label-ai-run-button" disabled={inferenceCancelling} onClick={() => void cancelInference()}>
+                <X size={13} /> {inferenceCancelling ? "Đang dừng…" : "Dừng inference"}
+              </button>
+            ) : (
+              <button type="button" className="label-ai-run-button" disabled={!canEdit || !selectedModel || alreadySuggestedByModel} onClick={() => void startInference()}>
+                <Sparkles size={13} /> Gợi ý ảnh này
+              </button>
+            )}
+            {modelsLoading && <small className="label-ai-note">Đang đọc registry checkpoint…</small>}
+            {!modelsLoading && usableModels.length === 0 && <small className="label-ai-note">Chưa có checkpoint YOLO11n nội bộ khớp class của dự án.</small>}
+            {alreadySuggestedByModel && <small className="label-ai-note">Ảnh đã có gợi ý từ checkpoint này. Duyệt hoặc loại chúng trước khi chạy lại.</small>}
+            {inferenceBusy && <small className="label-ai-progress" aria-live="polite"><LoaderCircle className="spin" size={12} /> {inferenceCancelling ? "Đang chờ inference dừng an toàn…" : inferenceProgress?.stage === "inference_started" ? "Đang chạy YOLO trên ảnh hiện tại…" : "Đang khởi tạo inference…"}</small>}
+            {inferenceMessage && <small className="label-ai-note" aria-live="polite">{inferenceMessage}</small>}
+            {modelError && <small className="label-ai-error" role="alert">Không đọc được registry checkpoint: {modelError}</small>}
+            {inferenceError && <small className="label-ai-error" role="alert">Inference chưa hoàn tất: {inferenceError}</small>}
+            <small className="label-ai-note">Box do AI tạo sẽ ghi rõ confidence và chỉ vào dataset sau khi được duyệt.</small>
+          </section>
+
           <section className="label-tool-section" aria-label="Chọn class để vẽ box">
             <h3>Lớp cần vẽ</h3>
             <div className="label-class-tools">
@@ -576,9 +784,9 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
           </section>
 
           <section className="label-tool-section">
-            <div className="label-review-heading"><h3>Danh sách box</h3><button type="button" className={`label-review-button${image.status === "reviewed" ? " reviewed" : ""}`} disabled={!canEdit} aria-pressed={image.status === "reviewed"} onClick={markReviewed}>{image.status === "reviewed" ? <><CheckCircle2 size={13} /> Đã review</> : <><Check size={13} /> Đánh dấu đã review</>}</button></div>
+            <div className="label-review-heading"><h3>Danh sách box</h3><button type="button" className={`label-review-button${image.status === "reviewed" ? " reviewed" : ""}`} disabled={!canEdit || (image.status !== "reviewed" && pendingSuggestions.length > 0)} title={pendingSuggestions.length && image.status !== "reviewed" ? "Duyệt hoặc loại gợi ý AI trước khi xác nhận ảnh âm tính." : undefined} aria-pressed={image.status === "reviewed"} onClick={markReviewed}>{image.status === "reviewed" ? <><CheckCircle2 size={13} /> Đã review</> : <><Check size={13} /> Đánh dấu đã review</>}</button></div>
             <div className="label-box-list" role="list" aria-label="Box trên ảnh">
-              {annotations.map((annotation, index) => (
+              {activeAnnotations.map((annotation, index) => (
                 <div className={`label-box-row${annotation.id === selectedAnnotationId ? " selected" : ""}`} role="listitem" key={annotation.id}>
                   <button type="button" className="label-box-select" aria-pressed={annotation.id === selectedAnnotationId} onClick={() => { setSelectedAnnotationId(annotation.id); setTool({ kind: "select" }); }}>
                     <span className={`label-class-swatch class-${annotation.class_id}`} />
@@ -589,11 +797,22 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                   </select>
                   <button type="button" className="label-icon-button danger" aria-label={`Xóa box ${index + 1}`} title="Xóa box" disabled={!canEdit} onClick={() => {
                     if (annotation.id === selectedAnnotationId) setSelectedAnnotationId(null);
-                    commit(annotations.filter((item) => item.id !== annotation.id));
+                    commit(annotation.source === "ai"
+                      ? annotations.map((item) => item.id === annotation.id ? { ...item, review_status: "rejected" } : item)
+                      : annotations.filter((item) => item.id !== annotation.id));
                   }}><Trash2 size={13} /></button>
+                  {annotation.source === "ai" && <div className="label-box-ai-meta">
+                    <span className={`label-ai-badge${annotation.review_status === "needs_review" ? " pending" : " accepted"}`}>
+                      AI · {annotation.review_status === "needs_review" ? "Cần duyệt" : "Đã duyệt"} · {annotation.confidence == null ? "—" : `${Math.round(annotation.confidence * 100)}%`}
+                    </span>
+                    {annotation.review_status === "needs_review" && <div className="label-ai-review-actions">
+                      <button type="button" className="label-ai-accept" disabled={!canEdit} onClick={() => reviewSuggestion(annotation, "reviewed")}><Check size={11} /> Duyệt</button>
+                      <button type="button" className="label-ai-reject" disabled={!canEdit} onClick={() => reviewSuggestion(annotation, "rejected")}><Ban size={11} /> Loại</button>
+                    </div>}
+                  </div>}
                 </div>
               ))}
-              {annotations.length === 0 && <p className="label-box-empty">Chưa có box. Chọn Head hoặc Body rồi kéo trên ảnh.</p>}
+              {activeAnnotations.length === 0 && <p className="label-box-empty">Chưa có box. Chọn lớp để vẽ hoặc chạy gợi ý AI cho ảnh này.</p>}
             </div>
           </section>
 
