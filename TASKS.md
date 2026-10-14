@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay was committed locally as `7cbae6d`. See Git history and `DEVELOPMENT.md` for the latest verification record. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
+This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation is committed locally as `d1b57c3` (with dataset lineage/replay in `7cbae6d`). See Git history and `DEVELOPMENT.md` for the latest verification record. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
 
 ## COMPLETED_VERIFIED
 
@@ -50,7 +50,7 @@ This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay wa
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub push is currently blocked. Pushing implementation commit `7cbae6d` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
+- GitHub push is currently blocked. Pushing `d1b57c3` with `git push --set-upstream origin feature/manual-labeling` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
 
 ## Dependencies and next work
 

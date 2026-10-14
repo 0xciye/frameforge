@@ -144,6 +144,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Mục tiêu quality/deployment là tùy chọn, không đặt ngưỡng mặc định. Checkpoint size được đo; latency/P50/P95/P99/FPS/throughput/memory vẫn `not_measured` đến khi có benchmark triển khai thật. Đánh giá có thể hủy ở ranh giới batch và không lưu kết quả dở dang.
 - Kiểm tra lượt này: `./.venv/bin/python -m pytest engine/tests -q` — 75 passed; `pnpm build` — thành công; `cargo fmt --check` và `cargo check` — thành công. Shell không có Node/Cargo trên PATH ban đầu; chạy lại với runtime workspace và Rust toolchain local.
 - Chưa xác minh: Ultralytics evaluation bằng checkpoint thật và app bundle click-through; registry local không có checkpoint usable. Frontend chỉ được production-build kiểm tra.
+- Git: commit `d1b57c3` (`feat: add fixed-set model evaluation`) đã lưu local trên `feature/manual-labeling`. Push với `git push --set-upstream origin feature/manual-labeling` thất bại do môi trường không cung cấp GitHub HTTPS credentials.
 - Bước tiếp: chạy evaluator trên checkpoint nội bộ thật, sau đó xây so sánh Champion/Challenger và promotion history.
 
 ### 2026-10-14 — Nối inference vào gán nhãn
