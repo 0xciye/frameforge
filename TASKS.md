@@ -53,7 +53,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub push is currently blocked. Pushing `feature/manual-labeling` with the Champion/Challenger implementation and FHD benchmark documentation to `origin` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
+- GitHub push is currently blocked. Commit `d129744` (`fix(inference): skip crop-edge detections`) is local; pushing `feature/manual-labeling` to `origin` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
 
 ## Dependencies and next work
 

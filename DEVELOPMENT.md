@@ -149,6 +149,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Thay đổi:** Bỏ detection box nếu một cạnh nằm cách biên ảnh không quá 1 px; đây có thể là object bị crop hoặc lớn hơn vùng crop. Engine trả số box đã bỏ qua. Nếu toàn bộ box bị bỏ qua, không tạo negative candidate; ảnh vẫn cần người dùng review. UI ảnh hiện tại và batch project hiển thị số lượng.
 - **Kiểm tra:** `pnpm test:engine` — 83 passed trong 10,71 giây; `pnpm build` — thành công với TypeScript/Vite; `git diff --check` — thành công. Lệnh dùng Node và Python runtime đóng gói workspace.
 - **Giới hạn:** Kiểm tra biên là heuristic; object hợp lệ thực sự chạm mép ảnh cũng bị bỏ qua. Engine behavior được kiểm tra bằng fake YOLO runtime; chưa click-through với checkpoint thật vì registry local không có checkpoint usable.
+- **Git:** Commit local `d129744` (`fix(inference): skip crop-edge detections`). Push tới `origin/feature/manual-labeling` thất bại: `could not read Username for 'https://github.com': Device not configured`.
 
 ### 2026-10-14 — Làm rõ ngưỡng dHash
 
