@@ -33,6 +33,7 @@
       "../engine/frameforge/project.py": "engine/frameforge/project.py",
       "../engine/frameforge/dataset.py": "engine/frameforge/dataset.py",
       "../engine/frameforge/discovery.py": "engine/frameforge/discovery.py",
+      "../engine/frameforge/inference.py": "engine/frameforge/inference.py",
       "../engine/frameforge/session.py": "engine/frameforge/session.py",
       "../engine/frameforge/training.py": "engine/frameforge/training.py"
     },

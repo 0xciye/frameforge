@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.discovery import scan_project_folder
+from frameforge.inference import predict_crops
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, save_annotations, save_project
 from frameforge.session import load_session, save_session
@@ -49,6 +50,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "training_capabilities",
                     "training_dataset_inspection",
                     "yolo11n_training",
+                    "yolo11n_inference",
                     "training_registry",
                     "external_training_registry",
                     "smart_folder_discovery",
@@ -144,13 +146,23 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             )
         elif command == "train_yolo_queue":
             result = train_yolo_queue(arguments, progress)
+        elif command == "predict_crops":
+            result = predict_crops(
+                arguments["checkpoint"],
+                arguments["images"],
+                arguments.get("confidence_threshold", 0.25),
+                arguments.get("iou_threshold", 0.7),
+                arguments.get("class_ids"),
+                arguments.get("cancel_file"),
+                progress,
+            )
         else:
             return {
                 "id": request_id,
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue, predict_crops.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:

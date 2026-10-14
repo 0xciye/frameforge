@@ -284,6 +284,46 @@ def test_discovered_training_run_command_persists_scan_record(monkeypatch: pytes
     assert response["data"] == {"root": "/project", "run_id": "run-123", "checkpoint_trusted": False}
 
 
+def test_yolo_inference_command_routes_threshold_and_cancellation(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "predict_crops",
+        lambda checkpoint, images, confidence, iou, classes, cancel_file, progress: {
+            "checkpoint": checkpoint,
+            "images": images,
+            "confidence": confidence,
+            "iou": iou,
+            "classes": classes,
+            "cancel_file": cancel_file,
+            "progress_enabled": progress is not None,
+        },
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "infer-1",
+        "command": "predict_crops",
+        "arguments": {
+            "checkpoint": "/models/best.pt",
+            "images": ["/images/crop.jpg"],
+            "confidence_threshold": 0.5,
+            "iou_threshold": 0.6,
+            "class_ids": [1],
+            "cancel_file": "/app/inference/cancel/request.cancel",
+        },
+    }, progress=lambda _event: None)
+
+    assert response["ok"] is True
+    assert response["data"] == {
+        "checkpoint": "/models/best.pt",
+        "images": ["/images/crop.jpg"],
+        "confidence": 0.5,
+        "iou": 0.6,
+        "classes": [1],
+        "cancel_file": "/app/inference/cancel/request.cancel",
+        "progress_enabled": True,
+    }
+
+
 def test_media_inspection_and_preview_read_real_image(tmp_path: Path):
     image_path = tmp_path / "ảnh thử.png"
     image = distinct_frame(2)

@@ -90,12 +90,15 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         .app_data_dir()
         .map_err(|error| format!("Không xác định được thư mục dữ liệu FrameForge: {error}"))?;
     let mut cancellation_marker = None;
-    if command == "train_yolo_queue" || command == "scan_project_folder" {
+    if matches!(
+        command.as_str(),
+        "train_yolo_queue" | "scan_project_folder" | "predict_crops"
+    ) {
         let marker_dir = app_data_dir
-            .join(if command == "train_yolo_queue" {
-                "training"
-            } else {
-                "discovery"
+            .join(match command.as_str() {
+                "train_yolo_queue" => "training",
+                "scan_project_folder" => "discovery",
+                _ => "inference",
             })
             .join("cancel");
         std::fs::create_dir_all(&marker_dir)
@@ -119,7 +122,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     }
     let cancellable = matches!(
         command.as_str(),
-        "extract_frames" | "train_yolo_queue" | "scan_project_folder"
+        "extract_frames" | "train_yolo_queue" | "scan_project_folder" | "predict_crops"
     );
     if cancellable
         && jobs
@@ -450,6 +453,76 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                         .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
                 {
                     return Err("Checkpoint fine-tune phải là tệp .pt hợp lệ.".to_string());
+                }
+            }
+            Ok(())
+        }
+        "predict_crops" => {
+            let checkpoint = canonical_existing_path(
+                arguments
+                    .get("checkpoint")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu checkpoint inference.")?,
+            )?;
+            if !checkpoint.is_file()
+                || !checkpoint
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+            {
+                return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
+            }
+            let images = arguments
+                .get("images")
+                .and_then(Value::as_array)
+                .filter(|images| !images.is_empty() && images.len() <= 500)
+                .ok_or("Inference nhận từ 1 đến 500 ảnh mỗi lượt.")?;
+            for image in images {
+                let image = validate_media_path(
+                    image
+                        .as_str()
+                        .ok_or("Đường dẫn ảnh inference không hợp lệ.")?,
+                    false,
+                )?;
+                let extension = image
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
+                    .contains(&extension.as_str())
+                {
+                    return Err("Inference chỉ nhận ảnh đã trích xuất.".to_string());
+                }
+            }
+            for (key, default) in [("confidence_threshold", 0.25), ("iou_threshold", 0.7)] {
+                let value = match arguments.get(key) {
+                    None => default,
+                    Some(value) => value
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or("Confidence threshold và NMS IoU phải là số hữu hạn.")?,
+                };
+                if !(0.0..=1.0).contains(&value) {
+                    return Err(
+                        "Confidence threshold và NMS IoU phải nằm trong khoảng 0–1.".to_string()
+                    );
+                }
+            }
+            if let Some(classes) = arguments.get("class_ids").filter(|value| !value.is_null()) {
+                let classes = classes
+                    .as_array()
+                    .filter(|classes| classes.len() <= 256)
+                    .ok_or("Bộ lọc class inference không hợp lệ.")?;
+                let mut unique = std::collections::HashSet::new();
+                for class_id in classes {
+                    let class_id = class_id
+                        .as_u64()
+                        .filter(|class_id| *class_id <= u32::MAX as u64)
+                        .ok_or("Class ID phải là số nguyên không âm.")?;
+                    if !unique.insert(class_id) {
+                        return Err("Danh sách class ID không được trùng.".to_string());
+                    }
                 }
             }
             Ok(())

@@ -128,8 +128,8 @@ def _is_internal_training_record(record: Dict[str, Any], checkpoint: Path) -> bo
     return output_dir.is_dir()
 
 
-def _registered_checkpoint_run_id(checkpoint: Path) -> Optional[str]:
-    """Return the run ID only when registry metadata and the file checksum agree."""
+def verified_checkpoint_record(checkpoint: Path) -> Optional[Dict[str, Any]]:
+    """Return trusted internal run metadata only when the registered file hash matches."""
     connection = _registry_connection()
     try:
         rows = connection.execute(
@@ -156,6 +156,7 @@ def _registered_checkpoint_run_id(checkpoint: Path) -> Optional[str]:
             not isinstance(record, dict)
             or row["status"] not in {"completed", "cancelled"}
             or record.get("status") != row["status"]
+            or record.get("run_id") != row["run_id"]
         ):
             continue
         record_path_value = record.get("checkpoint_path")
@@ -178,8 +179,14 @@ def _registered_checkpoint_run_id(checkpoint: Path) -> Optional[str]:
                 continue
         except OSError:
             continue
-        return str(row["run_id"])
+        return record
     return None
+
+
+def _registered_checkpoint_run_id(checkpoint: Path) -> Optional[str]:
+    record = verified_checkpoint_record(checkpoint)
+    run_id = record.get("run_id") if record else None
+    return run_id if isinstance(run_id, str) else None
 
 
 def _package_version(name: str) -> Optional[str]:

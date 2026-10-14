@@ -2,6 +2,7 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Thêm engine YOLO11n inference theo batch cho ảnh crop; chỉ nạp checkpoint nội bộ đã xác minh, kiểm tra class schema và trả box pixel/confidence từ Ultralytics; hỗ trợ hủy giữa các batch.
 - Khóa fine-tune vào checkpoint YOLO11n detection nội bộ đã đăng ký, còn trong thư mục run và khớp SHA-256; từ chối checkpoint `.pt` bất kỳ hoặc được phát hiện từ nguồn ngoài.
 - Giới hạn đầu vào video tối đa 1920×1080; từ chối video lớn hơn ở import, preview và extraction, không tự scale; hiển thị lý do từ chối.
 - Đo một lượt extraction trên fixture H.264 FHD dài một giờ: 3.600 crop JPG 320×320 trong 132,27 giây, không lỗi; RSS cao nhất đo được 807,3 MiB. Điều kiện phép đo được ghi trong DEVELOPMENT.md.

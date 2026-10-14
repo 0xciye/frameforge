@@ -17,11 +17,12 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Quét thư mục dự án ở chế độ chỉ đọc để tìm dataset YOLO, run Ultralytics, metric CSV, checkpoint, model export và project FrameForge; giới hạn độ sâu/số file, bỏ symlink, báo progress và hỗ trợ hủy.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.
 - Huấn luyện YOLO11n trên CPU hoặc backend GPU mà PyTorch báo khả dụng; kiểm tra dataset trước train, queue nhiều imgsz độc lập, theo dõi progress/metrics thật, dừng tại ranh giới epoch và lưu registry/checkpoint. Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký và checksum còn khớp.
+- Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Kết quả chưa được lưu thành nhãn dự án hoặc đưa ra giao diện.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài giữ trạng thái chưa xác minh và không được đưa vào lựa chọn fine-tune.
 
 ## Chưa khả dụng
 
-- Adapter YOLO và inference.
+- Auto-label pipeline/UI: lưu nhãn đề xuất, provenance, candidate negatives, review/edit/accept/reject và giữ nguyên nhãn thủ công.
 - Xác minh an toàn/khả năng tương thích và nạp checkpoint `.pt` từ nguồn ngoài.
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
 - Resume training sau khi tiến trình bị gián đoạn.

@@ -1,6 +1,6 @@
 # FrameForge agent notes
 
-FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. Extraction, manual labeling, dataset validation/grouped splits/YOLO export, ONNX metadata inspection, and a real YOLO11n training queue are implemented. YOLO inference, benchmarking, and deployment export remain unavailable.
+FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. Extraction, manual labeling, dataset validation/grouped splits/YOLO export, ONNX metadata inspection, YOLO11n training, and a verified-checkpoint inference engine are implemented. The inference command is not yet connected to an auto-label/review UI; evaluation, benchmarking, and deployment export remain unavailable.
 
 ## Read first
 
@@ -15,7 +15,7 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 - YOLO11n training uses the optional engine[train] extra (PyTorch, Ultralytics, psutil). Inspect local datasets before training, run each image size independently, store checkpoints/logs/config under the chosen output, cache pretrained weights in app data, and report the actual device and metrics. Fine-tuning may load only a registered internal YOLO11n detection checkpoint whose current SHA-256 matches its registry entry.
 - Never fabricate media, ONNX metadata, detections or annotation results. Manual labels must come from user edits and remain independent of inference.
 - Manual labeling requires a saved `.ffproj` so annotations can autosave to SQLite. Class IDs are stable: Head = 0, Body = 1. Store and validate boxes in the original image's pixel coordinates.
-- Keep inference, benchmarking and deployment export unavailable until backed by working code. Training progress, metrics, cancellation and checkpoint discovery must come from real engine work.
+- Inference must use a verified internal checkpoint, match its registered class schema, and report pixel-space boxes and actual confidence. Ultralytics NMS runs once; the final confidence filter is inclusive. Do not expose auto-label UI until suggestions have provenance and review state. Benchmarking and deployment export remain unavailable until backed by working code.
 - Dataset export includes only positive images or reviewed negatives, groups video/time segments and byte-identical images into the same split, preserves image pixels, and writes normalized YOLO labels plus an integrity/provenance manifest into a new version directory.
 - Smart Folder Discovery scans only inside the user-selected root, skips symlinks, reports bounded progress, and reads YAML/CSV metadata without loading `.pt` files. Reject external YAML references; imported run metadata and checkpoints stay untrusted and must not become fine-tuning choices.
 - Open the app directly into the extraction workspace. Run engine health in the background and keep its status in the toolbar; do not show a blocking welcome/check-engine screen.

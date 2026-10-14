@@ -2,7 +2,7 @@
 
 FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, gán nhãn và huấn luyện YOLO11n. Workspace hỗ trợ nhập video/ảnh, preview frame thật, Exact Center Crop đúng pixel, quét thư mục tìm dataset/run/model, xuất YOLO và queue training nhiều độ phân giải. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối, không tự thu nhỏ.
 
-Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận, theo dõi queue và checkpoint đã triển khai. Fine-tune chỉ nhận checkpoint YOLO11n nội bộ có registry và checksum còn khớp; `.pt` tìm thấy bên ngoài không được nạp. Inference YOLO, đánh giá model và export model triển khai vẫn chưa khả dụng; ONNX Runtime hiện chỉ đọc tensor/metadata, không tạo detection hoặc metric giả.
+Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận, theo dõi queue và checkpoint đã triển khai. Fine-tune/inference chỉ nhận checkpoint YOLO11n nội bộ có registry và checksum còn khớp; `.pt` tìm thấy bên ngoài không được nạp. Engine inference đã chạy trên crop và trả box pixel/class/confidence thật, nhưng chưa có giao diện auto-label/review. Đánh giá model và export model triển khai vẫn chưa khả dụng; ONNX Runtime hiện chỉ đọc tensor/metadata.
 
 ## Yêu cầu
 
