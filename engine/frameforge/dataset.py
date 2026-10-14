@@ -17,7 +17,7 @@ import cv2
 import yaml
 from PIL import Image, UnidentifiedImageError
 
-from frameforge.media import _RecentHashes, _dhash
+from frameforge.media import _RecentHashes, _dhash, _read_image
 from frameforge.project import load_project
 
 
@@ -278,7 +278,7 @@ def _balanced_replay_groups(samples: List[Dict[str, Any]], seed: int) -> set[str
 
 def _negative_hash(sample: Dict[str, Any]) -> int:
     path = Path(sample.get("parent_asset_path") or sample["path"])
-    frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    frame = _read_image(path, cv2.IMREAD_COLOR)
     if frame is None:
         raise ValueError("Không đọc được ảnh negative để kiểm tra ảnh gần giống: {0}".format(path))
     return _dhash(frame)
@@ -1160,13 +1160,14 @@ def export_yolo_dataset(
                     annotation["class_id"], x_center, y_center, box_width, box_height
                 ))
             label_text = "\n".join(label_lines) + ("\n" if label_lines else "")
-            (temporary_root / label_relative).write_text(label_text, encoding="utf-8")
+            label_bytes = label_text.encode("utf-8")
+            (temporary_root / label_relative).write_bytes(label_bytes)
             manifest_images.append({
                 "source_image": sample["path"],
                 "exported_image": image_relative.as_posix(),
                 "exported_label": label_relative.as_posix(),
                 "sha256": sample["sha256"],
-                "label_sha256": hashlib.sha256(label_text.encode("utf-8")).hexdigest(),
+                "label_sha256": hashlib.sha256(label_bytes).hexdigest(),
                 "width": sample["width"],
                 "height": sample["height"],
                 "source_path": sample["source_path"],

@@ -315,6 +315,29 @@ def test_discovered_training_run_command_persists_scan_record(monkeypatch: pytes
     assert response["data"] == {"root": "/project", "run_id": "run-123", "checkpoint_trusted": False}
 
 
+def test_prepare_discovered_dataset_command_routes_workspace_paths(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "prepare_discovered_dataset",
+        lambda root, data_yaml: {
+            "source_root": root,
+            "source_data_yaml": data_yaml,
+            "data_yaml": "/app-data/datasets/imported/abc/data.yaml",
+            "paths_rebased": True,
+        },
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "prepare-dataset-1",
+        "command": "prepare_discovered_dataset",
+        "arguments": {"discovery_root": "/project", "data_yaml": "/project/dataset/data.yaml"},
+    })
+
+    assert response["ok"] is True
+    assert response["data"]["source_data_yaml"] == "/project/dataset/data.yaml"
+    assert response["data"]["paths_rebased"] is True
+
+
 def test_yolo_inference_command_routes_threshold_and_cancellation(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         frameforge_engine,
@@ -358,9 +381,12 @@ def test_yolo_inference_command_routes_threshold_and_cancellation(monkeypatch: p
 def test_media_inspection_and_preview_read_real_image(tmp_path: Path):
     image_path = tmp_path / "ảnh thử.png"
     image = distinct_frame(2)
-    assert cv2.imwrite(str(image_path), image)
+    encoded_ok, encoded = cv2.imencode(".png", image)
+    assert encoded_ok
+    image_path.write_bytes(encoded.tobytes())
 
     result = inspect_sources([str(image_path)])
+    assert result["sources"], result["errors"]
     preview = preview_frame(str(image_path))
 
     assert result["sources"][0]["name"] == image_path.name
@@ -1033,7 +1059,7 @@ def test_dataset_lineage_excludes_unreviewed_training_annotations_from_parent(tm
         parent_manifest_path=str(manifest_path), replay_strategy="all", negative_ratio=1.0,
     )
 
-    assert report["valid"] is True
+    assert report["valid"] is True, report["errors"]
     assert report["unreviewed_parent_train_excluded_count"] == 1
     assert any("ảnh train trong parent" in warning for warning in report["warnings"])
 
@@ -1061,7 +1087,7 @@ def test_dataset_lineage_rejects_unreviewed_annotations_in_frozen_parent(tmp_pat
     )
 
     assert report["valid"] is False
-    assert any("Fixed validation/test" in error for error in report["errors"])
+    assert any("Fixed validation/test" in error for error in report["errors"]), report["errors"]
 
 
 def test_dataset_negative_sampling_respects_ratio_seed_and_visual_diversity(tmp_path: Path):
@@ -1298,6 +1324,10 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
     assert base_manifest["frozen_test_set"]["enabled"] is True
     assert len(base_manifest["annotation_revision"]) == 64
     assert all(len(item["label_sha256"]) == 64 and item["group_key"] for item in base_manifest["images"])
+    assert all(
+        hashlib.sha256((base_root / item["exported_label"]).read_bytes()).hexdigest() == item["label_sha256"]
+        for item in base_manifest["images"]
+    )
     fixed_negative_hashes = {
         item["sha256"] for item in base_manifest["images"]
         if item["split"] in {"val", "test"} and item["annotation_count"] == 0
@@ -1329,7 +1359,7 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
         str(project_path), "source", 0.8, 0.2, 0.0, seed,
         parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new", negative_ratio=0.0,
     )
-    assert report["valid"] is True
+    assert report["valid"] is True, report["errors"]
     assert report["new_image_count"] == 1
     assert report["replayed_image_count"] == 0
     assert report["fixed_validation_count"] == base["split_counts"]["val"]

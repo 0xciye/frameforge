@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
 import os
 import sqlite3
 import time
+import uuid
 from datetime import date, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
@@ -28,6 +30,8 @@ MAX_RESULTS_ROWS = 5_000
 MAX_DATASETS = 200
 MAX_RUNS = 500
 MAX_MODEL_EXPORTS = 1_000
+MAX_IMPORTED_LIST_BYTES = 2 * 1024 * 1024
+MAX_IMPORTED_LIST_TOTAL_BYTES = 16 * 1024 * 1024
 ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
 
 METRIC_COLUMNS = {
@@ -62,6 +66,186 @@ def _safe_path(value: str, base: Path, root: Path) -> Path:
     if not _inside(resolved, root):
         raise ValueError("Đường dẫn nằm ngoài thư mục được quét.")
     return resolved
+
+
+def _absolute_path_style(value: str) -> Optional[str]:
+    if PureWindowsPath(value).is_absolute():
+        return "windows"
+    if PurePosixPath(value).is_absolute():
+        return "posix"
+    return None
+
+
+def _relative_to_source_root(value: str, source_root: Optional[str]) -> Optional[Tuple[str, ...]]:
+    if not source_root:
+        return None
+    style = _absolute_path_style(source_root)
+    if style is None or _absolute_path_style(value) != style:
+        return None
+    try:
+        pure_path = PureWindowsPath if style == "windows" else PurePosixPath
+        return pure_path(value).relative_to(pure_path(source_root)).parts
+    except ValueError:
+        return None
+
+
+def _scoped_path(candidate: Path, scan_root: Path, *, strict: bool) -> Path:
+    lexical = Path(os.path.abspath(candidate))
+    if not _inside(lexical, scan_root):
+        raise ValueError("Đường dẫn nằm ngoài thư mục được chọn.")
+    cursor = scan_root
+    for part in lexical.relative_to(scan_root).parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("Đường dẫn chứa symlink; hãy dùng tệp thật trong thư mục được chọn.")
+    resolved = lexical.resolve(strict=strict)
+    if not _inside(resolved, scan_root):
+        raise ValueError("Đường dẫn nằm ngoài thư mục được chọn.")
+    return resolved
+
+
+def _dataset_base(
+    configured_root: Any,
+    yaml_path: Path,
+    scan_root: Path,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[Path, Optional[str], bool]:
+    if not isinstance(configured_root, str):
+        raise ValueError("Trường path trong data.yaml phải là chuỗi.")
+    configured_root = configured_root or "."
+    style = _absolute_path_style(configured_root)
+    native_style = "windows" if os.name == "nt" else "posix"
+    if style is None:
+        if os.name != "nt":
+            configured_root = configured_root.replace("\\", "/")
+        local_root = _scoped_path(yaml_path.parent / configured_root, scan_root, strict=False)
+        return local_root, None, False
+
+    if style == native_style:
+        configured_path = Path(configured_root).expanduser()
+        if _inside(Path(os.path.abspath(configured_path)), scan_root):
+            return _scoped_path(configured_path, scan_root, strict=False), configured_root, False
+
+    # A transferred workspace commonly keeps an absolute path from its source machine.
+    local_root = yaml_path.parent.resolve(strict=True)
+    if not _inside(local_root, scan_root):
+        raise ValueError("Không thể khôi phục đường dẫn dataset trong thư mục được quét.")
+    source_root = configured_root
+    has_split_paths = config and any(_split_values(config.get(name)) for name in ("train", "val", "test"))
+    if has_split_paths and not _dataset_sources_resolve(config, local_root, scan_root, source_root):
+        matches = _find_dataset_roots(config, scan_root, source_root, local_root)
+        if len(matches) > 1:
+            raise ValueError("Có nhiều thư mục khớp các split trong data.yaml; hãy đặt data.yaml trong đúng thư mục dataset.")
+        if len(matches) == 1:
+            return matches[0], source_root, True
+    return local_root, configured_root, True
+
+
+def _local_dataset_reference(
+    value: str,
+    base: Path,
+    scan_root: Path,
+    source_root: Optional[str],
+) -> Tuple[Path, bool]:
+    if value.lower().startswith(("http://", "https://")):
+        raise ValueError("Dataset dùng URL từ xa.")
+    style = _absolute_path_style(value)
+    native_style = "windows" if os.name == "nt" else "posix"
+    if style is None:
+        if os.name != "nt":
+            value = value.replace("\\", "/")
+        candidate = base / value
+        rebased = False
+    elif style == native_style:
+        candidate = Path(value).expanduser()
+        lexical = Path(os.path.abspath(candidate))
+        if _inside(lexical, scan_root):
+            return _scoped_path(candidate, scan_root, strict=False), False
+        relative = _relative_to_source_root(value, source_root)
+        if relative is None:
+            raise ValueError("Đường dẫn nằm ngoài thư mục được quét.")
+        candidate = base.joinpath(*relative)
+        rebased = True
+    else:
+        relative = _relative_to_source_root(value, source_root)
+        if relative is None:
+            raise ValueError("Đường dẫn thuộc máy nguồn và không khớp gốc dataset đã khai báo.")
+        candidate = base.joinpath(*relative)
+        rebased = True
+    resolved = _scoped_path(candidate, scan_root, strict=False)
+    return resolved, rebased
+
+
+def _dataset_sources_resolve(
+    config: Dict[str, Any],
+    dataset_root: Path,
+    scan_root: Path,
+    source_root: Optional[str],
+) -> bool:
+    found_split = False
+    try:
+        for split_name in ("train", "val", "test"):
+            value = config.get(split_name)
+            if value is None:
+                continue
+            sources = _split_values(value)
+            if not sources:
+                return False
+            found_split = True
+            for source in sources:
+                path, _rebased = _local_dataset_reference(source, dataset_root, scan_root, source_root)
+                path = _scoped_path(path, scan_root, strict=True)
+                if path.is_dir() or (path.is_file() and path.suffix.casefold() in IMAGE_EXTENSIONS):
+                    continue
+                if path.is_file() and path.suffix.casefold() == ".txt":
+                    continue
+                return False
+    except (OSError, ValueError):
+        return False
+    return found_split
+
+
+def _find_dataset_roots(
+    config: Dict[str, Any],
+    scan_root: Path,
+    source_root: Optional[str],
+    preferred_root: Path,
+) -> List[Path]:
+    matches: List[Path] = []
+    visited_entries = 0
+    depth_limited = False
+    failed_directories = False
+    stack = [(scan_root, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        if directory != preferred_root and _dataset_sources_resolve(config, directory, scan_root, source_root):
+            matches.append(directory)
+            if len(matches) > 1:
+                return matches
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            failed_directories = True
+            continue
+        visited_entries += len(entries)
+        if visited_entries > MAX_FILES:
+            raise ValueError("Không thể khôi phục dataset an toàn: đã vượt giới hạn quét 200.000 mục.")
+        if depth >= MAX_DEPTH:
+            for entry in entries:
+                try:
+                    depth_limited = depth_limited or entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    failed_directories = True
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_symlink() and entry.is_dir(follow_symlinks=False):
+                    stack.append((Path(entry.path), depth + 1))
+            except OSError:
+                failed_directories = True
+    if depth_limited or failed_directories:
+        raise ValueError("Không thể xác định duy nhất thư mục dataset vì lượt tìm kiếm chưa bao phủ hết workspace.")
+    return matches
 
 
 def _stable_id(kind: str, root: Path, path: Path) -> str:
@@ -175,10 +359,10 @@ def _dataset_candidate(
         configured_root = "."
         warnings.append("Trường path không phải chuỗi; dùng thư mục của YAML để giới hạn kiểm tra.")
     try:
-        dataset_root = _safe_path(configured_root, path.parent, root)
+        dataset_root, source_root, root_rebased = _dataset_base(configured_root or ".", path, root, config)
     except (OSError, ValueError) as error:
         dataset_root = path.parent
-        warnings.append("Thư mục dataset nằm ngoài phạm vi được phép: {0}".format(error))
+        warnings.append("Không thể xác định an toàn thư mục dataset: {0}".format(error))
         return {
             "dataset_id": dataset_id, "path": str(path), "name": path.parent.name,
             "status": "blocked_external", "dataset_root": str(dataset_root),
@@ -188,6 +372,7 @@ def _dataset_candidate(
 
     splits: List[Dict[str, Any]] = []
     external_reference = False
+    paths_rebased = root_rebased
     for split_name in ("train", "val", "test"):
         split_value = config.get(split_name)
         if split_value is None:
@@ -201,13 +386,9 @@ def _dataset_candidate(
         split_status = "indexed"
         split_warnings: List[str] = []
         for source in sources:
-            if source.lower().startswith(("http://", "https://")):
-                external_reference = True
-                split_status = "blocked_external"
-                split_warnings.append("Split dùng URL từ xa; chưa đọc dữ liệu bên ngoài.")
-                continue
             try:
-                split_path = _safe_path(source, dataset_root, root)
+                split_path, source_rebased = _local_dataset_reference(source, dataset_root, root, source_root)
+                paths_rebased = paths_rebased or source_rebased
             except (OSError, ValueError):
                 external_reference = True
                 split_status = "blocked_external"
@@ -236,7 +417,8 @@ def _dataset_candidate(
                     if not value:
                         continue
                     try:
-                        image_path = _safe_path(value, dataset_root, root)
+                        image_path, line_rebased = _local_dataset_reference(value, dataset_root, root, source_root)
+                        paths_rebased = paths_rebased or line_rebased
                     except (OSError, ValueError):
                         external_reference = True
                         split_status = "blocked_external"
@@ -268,6 +450,8 @@ def _dataset_candidate(
         status = "candidate"
     if not scan_complete:
         warnings.append("Số lượng ảnh chỉ là phần quan sát được; lượt quét chưa bao phủ hết thư mục.")
+    if paths_rebased and not external_reference:
+        warnings.append("Đường dẫn data.yaml từ máy nguồn đã được đối chiếu với dữ liệu nằm trong thư mục được chọn.")
     return {
         "dataset_id": dataset_id,
         "path": str(path),
@@ -279,6 +463,149 @@ def _dataset_candidate(
         "splits": splits,
         "warnings": list(dict.fromkeys(warnings)),
         "validation": "not_run",
+    }
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".partial")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="") as stream:
+            stream.write(content)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def prepare_discovered_dataset(discovery_root_value: str, data_yaml_value: str) -> Dict[str, Any]:
+    """Create a safe local-path copy of a discovered dataset YAML without copying its images."""
+    if not isinstance(discovery_root_value, str) or not discovery_root_value:
+        raise ValueError("Chọn thư mục làm việc đã quét.")
+    if not isinstance(data_yaml_value, str) or not data_yaml_value:
+        raise ValueError("Chọn data.yaml đã tìm thấy trong thư mục làm việc.")
+    try:
+        root = Path(discovery_root_value).expanduser().resolve(strict=True)
+        yaml_path = Path(data_yaml_value).expanduser()
+    except (OSError, ValueError) as error:
+        raise ValueError("Không tìm thấy thư mục hoặc data.yaml đã chọn.") from error
+    if not root.is_dir():
+        raise ValueError("Thư mục làm việc không còn tồn tại.")
+    try:
+        yaml_path = _scoped_path(yaml_path, root, strict=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("data.yaml phải là tệp thật bên trong thư mục làm việc: {0}".format(error)) from error
+    if not yaml_path.is_file() or yaml_path.suffix.casefold() not in {".yaml", ".yml"}:
+        raise ValueError("Chọn data.yaml hoặc .yml bên trong thư mục làm việc.")
+    config, yaml_error = _read_yaml(yaml_path)
+    if config is None:
+        raise ValueError(yaml_error or "Không đọc được data.yaml.")
+    class_names, _class_count, class_warning = _class_mapping(config)
+    if not class_names or class_warning:
+        raise ValueError(class_warning or "data.yaml cần danh sách class names hợp lệ.")
+    try:
+        dataset_root, source_root, root_rebased = _dataset_base(config.get("path", "."), yaml_path, root, config)
+        dataset_root = _scoped_path(dataset_root, root, strict=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("Không thể khôi phục path của dataset trong thư mục đã chọn: {0}".format(error)) from error
+    if not dataset_root.is_dir():
+        raise ValueError("Thư mục dataset không tồn tại trong thư mục đã chọn.")
+
+    rebased = root_rebased
+    list_files: Dict[str, str] = {}
+    split_sources: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+    total_list_bytes = 0
+    total_rewritten_list_bytes = 0
+    for split_name in ("train", "val", "test"):
+        split_value = config.get(split_name)
+        if split_value is None:
+            if split_name in {"train", "val"}:
+                raise ValueError("data.yaml thiếu split {0}.".format(split_name))
+            continue
+        sources = _split_values(split_value)
+        if not sources:
+            raise ValueError("Split {0} không có đường dẫn hợp lệ.".format(split_name))
+        mapped_sources: List[Tuple[str, Optional[str]]] = []
+        for source_index, source in enumerate(sources):
+            try:
+                source_path, source_rebased = _local_dataset_reference(source, dataset_root, root, source_root)
+                source_path = _scoped_path(source_path, root, strict=True)
+            except (OSError, ValueError) as error:
+                raise ValueError("Split {0}: {1}".format(split_name, error)) from error
+            rebased = rebased or source_rebased
+            if source_path.is_dir():
+                mapped_sources.append((str(source_path), None))
+                continue
+            if source_path.is_file() and source_path.suffix.casefold() in IMAGE_EXTENSIONS:
+                mapped_sources.append((str(source_path), None))
+                continue
+            if not source_path.is_file() or source_path.suffix.casefold() != ".txt":
+                raise ValueError("Split {0} phải trỏ tới thư mục ảnh, ảnh hoặc danh sách .txt local.".format(split_name))
+            source_size = source_path.stat().st_size
+            total_list_bytes += source_size
+            if source_size > MAX_IMPORTED_LIST_BYTES or total_list_bytes > MAX_IMPORTED_LIST_TOTAL_BYTES:
+                raise ValueError("Danh sách ảnh vượt giới hạn 2 MiB mỗi tệp hoặc 16 MiB tổng cộng.")
+            try:
+                lines = source_path.read_text(encoding="utf-8-sig").splitlines()
+            except (OSError, UnicodeError) as error:
+                raise ValueError("Không đọc được danh sách ảnh của split {0}: {1}".format(split_name, error)) from error
+            if len(lines) > 100_000:
+                raise ValueError("Danh sách ảnh của split {0} vượt 100.000 dòng.".format(split_name))
+            local_images: List[str] = []
+            for line in lines:
+                value = line.strip()
+                if not value:
+                    continue
+                try:
+                    image_path, line_rebased = _local_dataset_reference(value, dataset_root, root, source_root)
+                    image_path = _scoped_path(image_path, root, strict=True)
+                except (OSError, ValueError) as error:
+                    raise ValueError("Danh sách ảnh của split {0} có đường dẫn không dùng được: {1}".format(split_name, error)) from error
+                if not image_path.is_file() or image_path.suffix.casefold() not in IMAGE_EXTENSIONS:
+                    raise ValueError("Danh sách ảnh của split {0} chứa đường dẫn không phải ảnh local.".format(split_name))
+                local_images.append(str(image_path))
+                rebased = rebased or line_rebased
+            list_name = "{0}-{1}.txt".format(split_name, source_index)
+            rewritten_content = "".join(image + "\n" for image in local_images)
+            rewritten_size = len(rewritten_content.encode("utf-8"))
+            total_rewritten_list_bytes += rewritten_size
+            if rewritten_size > MAX_IMPORTED_LIST_BYTES or total_rewritten_list_bytes > MAX_IMPORTED_LIST_TOTAL_BYTES:
+                raise ValueError("Danh sách ảnh sau khi nối lại đường dẫn vượt giới hạn 2 MiB mỗi tệp hoặc 16 MiB tổng cộng.")
+            list_files[list_name] = rewritten_content
+            mapped_sources.append(("", list_name))
+        split_sources[split_name] = mapped_sources
+
+    relative_yaml = yaml_path.relative_to(root).as_posix()
+    fingerprint = hashlib.sha256()
+    fingerprint.update(str(root).encode("utf-8", errors="surrogatepass"))
+    fingerprint.update(relative_yaml.encode("utf-8", errors="surrogatepass"))
+    fingerprint.update(yaml_path.read_bytes())
+    for name, content in sorted(list_files.items()):
+        fingerprint.update(name.encode("utf-8"))
+        fingerprint.update(content.encode("utf-8"))
+    import_id = fingerprint.hexdigest()[:32]
+    from frameforge.training import _default_app_data_dir
+
+    imported_dir = _default_app_data_dir() / "datasets" / "imported" / import_id
+    imported_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name, content in list_files.items():
+        _write_text_atomic(imported_dir / name, content)
+    normalized: Dict[str, Any] = {"path": str(dataset_root), "names": class_names}
+    for split_name, sources in split_sources.items():
+        normalized_sources = [str(imported_dir / list_name) if list_name else local_path for local_path, list_name in sources]
+        normalized[split_name] = normalized_sources[0] if len(normalized_sources) == 1 else normalized_sources
+    _write_text_atomic(imported_dir / "data.yaml", yaml.safe_dump(normalized, sort_keys=False, allow_unicode=True))
+    _write_text_atomic(imported_dir / "imported-workspace.json", json.dumps({
+        "source_root": str(root),
+        "source_data_yaml": str(yaml_path),
+    }, ensure_ascii=False, indent=2) + "\n")
+    return {
+        "data_yaml": str(imported_dir / "data.yaml"),
+        "source_data_yaml": str(yaml_path),
+        "source_root": str(root),
+        "class_names": class_names,
+        "paths_rebased": rebased,
     }
 
 

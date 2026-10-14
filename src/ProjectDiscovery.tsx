@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import { Activity, AlertCircle, Database, FolderOpen, Search, ShieldAlert, X } from "lucide-react";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { Activity, AlertCircle, Database, FolderOpen, ShieldAlert, X } from "lucide-react";
 
 type DiscoveryProgress = {
   stage: string;
@@ -107,8 +107,8 @@ function stageLabel(stage?: string) {
 }
 
 function datasetStatus(status: string) {
-  if (status === "candidate") return "Có thể kiểm tra";
-  if (status === "blocked_external") return "Có đường dẫn ngoài thư mục";
+  if (status === "candidate") return "Có thể dùng";
+  if (status === "blocked_external") return "Cần nối lại đường dẫn";
   if (status === "invalid_metadata") return "YAML không hợp lệ";
   return "Cần xem lại";
 }
@@ -126,6 +126,10 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
   const [progress, setProgress] = useState<DiscoveryProgress | null>(null);
   const [result, setResult] = useState<DiscoveryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [usingDatasetId, setUsingDatasetId] = useState<string | null>(null);
+  const [importingCheckpointPath, setImportingCheckpointPath] = useState<string | null>(null);
+  const [importedCheckpointPaths, setImportedCheckpointPaths] = useState<Set<string>>(() => new Set());
+  const [importMessage, setImportMessage] = useState<string | null>(null);
   const [savingRunId, setSavingRunId] = useState<string | null>(null);
   const [savedRunIds, setSavedRunIds] = useState<Set<string>>(() => new Set());
   const requestRef = useRef<string | null>(null);
@@ -158,7 +162,7 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
       return;
     }
     try {
-      const selected = await open({ title: "Chọn thư mục dự án cần quét", directory: true, multiple: false });
+      const selected = await open({ title: "Chọn thư mục làm việc cần nhập", directory: true, multiple: false });
       if (typeof selected !== "string") return;
       const id = requestId();
       requestRef.current = id;
@@ -216,16 +220,88 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
     }
   }
 
+  async function useDataset(dataset: DiscoveryDataset) {
+    if (!result || usingDatasetId) return;
+    setUsingDatasetId(dataset.dataset_id);
+    setError(null);
+    setImportMessage(null);
+    try {
+      const prepared = await invoke<{
+        data_yaml: string;
+        class_names: string[];
+        paths_rebased: boolean;
+      }>("engine_request", {
+        request: {
+          id: requestId(),
+          command: "prepare_discovered_dataset",
+          arguments: { discovery_root: result.root, data_yaml: dataset.path },
+        },
+      });
+      setImportMessage(prepared.paths_rebased
+        ? "Đã nối lại đường dẫn và chuyển " + dataset.name + " sang bước kiểm tra dataset."
+        : "Đã chọn " + dataset.name + "; FrameForge sẽ kiểm tra ảnh và nhãn trước khi train.");
+      onUseDataset(prepared.data_yaml);
+    } catch (reason) {
+      setError(typeof reason === "string" ? reason : String(reason));
+    } finally {
+      setUsingDatasetId(null);
+    }
+  }
+
+  async function importCheckpoint(checkpoint: DiscoveryCheckpoint) {
+    if (importingCheckpointPath || importedCheckpointPaths.has(checkpoint.path)) return;
+    setError(null);
+    setImportMessage(null);
+    let trusted = false;
+    try {
+      trusted = await confirm(
+        "Checkpoint " + checkpoint.name + " là tệp .pt có thể chứa dữ liệu thực thi mã khi được nạp. Chỉ tiếp tục nếu bạn tự tạo tệp hoặc tin tưởng nguồn của thư mục này. FrameForge sẽ kiểm tra task detection, kiến trúc YOLO11n, class và checksum, rồi sao chép checkpoint vào thư mục quản lý riêng.",
+        { title: "Xác nhận tin cậy checkpoint", kind: "warning", okLabel: "Tin cậy và nhập", cancelLabel: "Hủy" },
+      );
+    } catch (reason) {
+      setError(typeof reason === "string" ? reason : String(reason));
+      return;
+    }
+    if (!trusted) return;
+    setImportingCheckpointPath(checkpoint.path);
+    try {
+      const imported = await invoke<{
+        architecture: string;
+        display_name: string;
+        class_names: string[];
+        requested_imgsz: number;
+        imgsz_source: "checkpoint_metadata" | "run_args_yaml" | "ultralytics_default";
+      }>("engine_request", {
+        request: {
+          id: requestId(),
+          command: "import_yolo_checkpoint",
+          arguments: { path: checkpoint.path, trust_source: true },
+        },
+      });
+      setImportedCheckpointPaths((current) => new Set(current).add(checkpoint.path));
+      const sizeMessage = imported.imgsz_source === "checkpoint_metadata"
+        ? `imgsz ${imported.requested_imgsz}px từ checkpoint`
+        : imported.imgsz_source === "run_args_yaml"
+          ? `imgsz ${imported.requested_imgsz}px từ args.yaml của run`
+          : `checkpoint và args.yaml không ghi imgsz; dùng mặc định ${imported.requested_imgsz}px`;
+      setImportMessage("Đã nhập " + imported.display_name + " (" + imported.architecture + "; " + sizeMessage + "; " + imported.class_names.join(", ") + "). Checkpoint chỉ dùng được khi class khớp project.");
+    } catch (reason) {
+      setError(typeof reason === "string" ? reason : String(reason));
+    } finally {
+      setImportingCheckpointPath(null);
+    }
+  }
+
   const checkpointCount = result?.runs.reduce((total, run) => total + run.checkpoints.length, 0) ?? 0;
 
   return (
-    <section className="panel dataset-card discovery-card" aria-label="Quét thư mục dự án">
+    <section className="panel dataset-card discovery-card" aria-label="Nhập thư mục làm việc">
       <div className="dataset-card-heading discovery-heading">
         <div>
-          <h2>Quét thư mục dự án</h2>
-          <span>Tìm dataset YOLO, run, metric và checkpoint trong thư mục đã chọn.</span>
+          <h2>Nhập thư mục làm việc</h2>
+          <span>Tìm data.yaml, dataset, run và model trong thư mục đã chuyển từ máy khác.</span>
         </div>
-        {!scanning ? <button className="dataset-secondary-button" type="button" onClick={() => void scanFolder()}><Search size={13} /> Quét thư mục</button>
+        {!scanning ? <button className="dataset-secondary-button" type="button" onClick={() => void scanFolder()}><FolderOpen size={13} /> Chọn thư mục</button>
           : <button className="dataset-secondary-button" type="button" onClick={() => void cancelScan()} disabled={cancelRequested}><X size={13} /> {cancelRequested ? "Đang hủy…" : "Hủy quét"}</button>}
       </div>
 
@@ -234,7 +310,7 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
         <label>Số tệp tối đa<input type="number" min="1" max="200000" step="1000" value={maxFiles} onChange={(event) => setMaxFiles(Number(event.target.value))} disabled={scanning} /></label>
         <label className="discovery-ignored">Bỏ qua thư mục<input value={ignoredDirs} onChange={(event) => setIgnoredDirs(event.target.value)} disabled={scanning} title="Nhập tên thư mục, cách nhau bằng dấu phẩy" /></label>
       </div>
-      <p className="discovery-safety"><ShieldAlert size={12} /> Chỉ đọc metadata trong thư mục đã chọn. Không mở checkpoint `.pt` và không sửa tệp nguồn.</p>
+      <p className="discovery-safety"><ShieldAlert size={12} /> Ảnh dataset được dùng tại chỗ; FrameForge tạo data.yaml riêng với đường dẫn đã khôi phục. Checkpoint .pt chỉ được nạp sau xác nhận tin cậy và được sao chép vào kho riêng.</p>
 
       {scanning && <div className="discovery-progress" role="status" aria-live="polite">
         <div className="discovery-progress-track" role="progressbar" aria-label="Tiến độ quét"><span /></div>
@@ -243,6 +319,7 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
       {error && <div className="dataset-message error" role="alert"><AlertCircle size={14} /><span>{error}</span></div>}
 
       {result && <div className="discovery-results" aria-live="polite">
+        {importMessage && <div className="dataset-message success" role="status"><span>{importMessage}</span></div>}
         <div className={`discovery-summary ${result.status}`}>
           <div><strong>{result.status === "complete" ? "Quét hoàn tất" : result.status === "cancelled" ? "Đã hủy quét" : "Quét một phần"}</strong><span>{result.files_seen} tệp · {result.directories_scanned} thư mục · {result.root}</span></div>
           <div className="discovery-counts"><span><strong>{result.datasets.length}</strong> dataset</span><span><strong>{result.runs.length}</strong> run</span><span><strong>{checkpointCount}</strong> checkpoint</span><span><strong>{result.exported_models.length}</strong> model export</span></div>
@@ -256,7 +333,9 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
             <div className="discovery-row-detail">
               <span>{dataset.class_names?.join(", ") ?? `${dataset.class_count ?? "?"} class`}</span>
               <span>{dataset.splits.map((split) => `${split.name}: ${split.image_count ?? `≥${split.observed_image_count}`} ảnh`).join(" · ") || "Chưa có split"}</span>
-              {dataset.status === "candidate" && <button className="dataset-text-action" type="button" onClick={() => onUseDataset(dataset.path)}>Kiểm tra để huấn luyện</button>}
+              {dataset.status !== "invalid_metadata" && <button className="dataset-text-action" type="button" onClick={() => void useDataset(dataset)} disabled={usingDatasetId !== null}>
+                {usingDatasetId === dataset.dataset_id ? "Đang nối đường dẫn…" : dataset.status === "blocked_external" ? "Khôi phục và dùng dataset" : "Kiểm tra để huấn luyện"}
+              </button>}
             </div>
             {dataset.warnings.map((warning) => <small className="discovery-warning" key={warning}>{warning}</small>)}
           </article>)}
@@ -279,6 +358,9 @@ export default function ProjectDiscovery({ onUseDataset }: Props) {
               <span>{checkpoint.kind === "best" ? "best" : checkpoint.kind === "last" ? "last" : "checkpoint"} · {checkpoint.name}</span>
               <code title={checkpoint.path}>{checkpoint.path}</code>
               <small>{bytes(checkpoint.size_bytes)} · Chưa xác minh tương thích · cần xác nhận nguồn tin cậy trước khi nạp</small>
+              <button className="dataset-text-action" type="button" onClick={() => void importCheckpoint(checkpoint)} disabled={importingCheckpointPath !== null || importedCheckpointPaths.has(checkpoint.path) || (checkpoint.size_bytes != null && checkpoint.size_bytes > 2 * 1024 * 1024 * 1024)}>
+                {importedCheckpointPaths.has(checkpoint.path) ? "Đã nhập checkpoint" : importingCheckpointPath === checkpoint.path ? "Đang xác minh và nhập…" : checkpoint.size_bytes != null && checkpoint.size_bytes > 2 * 1024 * 1024 * 1024 ? "Vượt giới hạn 2 GiB" : "Xác nhận và nhập checkpoint"}
+              </button>
             </div>)}
             {run.warnings.map((warning) => <small className="discovery-warning" key={warning}>{warning}</small>)}
           </article>)}

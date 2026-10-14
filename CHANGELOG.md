@@ -1,5 +1,30 @@
 # Nhật ký thay đổi
 
+## Chưa phát hành — Rà soát production v1.0
+
+- Nhập checkpoint `.pt` qua bản sao trong vùng quản lý riêng; giới hạn kích thước cả khi đọc/sao chép, xác minh nguồn và bản sao trước khi nạp, rồi xác minh lại checksum sau khi nạp.
+- Giới hạn log stderr giữ trong Rust ở 256 KiB/request và vẫn đọc hết pipe, tránh giữ log training dài vô hạn trong RAM.
+- Mở rộng GitHub Actions sang Ubuntu/macOS/Windows, thêm Tauri `cargo check` và build macOS app/Windows MSI trên runner tương ứng.
+- Ghi label YOLO bằng byte UTF-8 ổn định để SHA-256 manifest khớp trên Windows; đọc/ghi ảnh qua I/O Unicode-aware để hỗ trợ tên file Unicode.
+- Tạo được macOS `FrameForge.app` 4,50 MiB; engine trong bundle trả health `status: ok` với Python `.venv` hiện có. Engine tests local 110/110, Rust unit test 1/1, frontend build, Rust compile và bundle health thành công.
+- CI run `38564201938`: Ubuntu/macOS/Windows đều thành công; Windows runner chạy engine tests, Rust checks và build MSI. MSI chưa được cài/click-through trên máy Windows thật.
+- Chưa phát hành v1.0. Runtime/dependencies Python chưa được bundle; ký/notarize chưa cấu hình. Xem các cổng trong `DEVELOPMENT.md`.
+
+## Chưa phát hành — Khởi tạo train và kế thừa imgsz
+
+- Khi không chọn checkpoint để fine-tune, bắt đầu run mới từ YOLO11n pretrained `yolo11n.pt`.
+- Khi chọn checkpoint đã xác minh, tự chọn `imgsz` ghi trong checkpoint hoặc đọc `args.yaml` cùng run bằng YAML an toàn; nếu cả hai thiếu, đánh dấu mặc định Ultralytics 640 và báo điều đó trong giao diện.
+- Registry nhập checkpoint đời cũ không có provenance `imgsz` được báo là nguồn chưa ghi, tránh nhầm giá trị fallback với metadata thật.
+- Hiển thị kích thước được nhận diện sau khi nhập checkpoint; thêm regression cho metadata `imgsz` có và thiếu.
+
+## Chưa phát hành — Nhập thư mục làm việc từ máy khác
+
+- Đổi Smart Folder Discovery thành luồng nhập thư mục làm việc; có thể khôi phục đường dẫn dataset từ `data.yaml` cũ, kể cả khi YAML nằm ngoài dataset, khi duy nhất một thư mục khớp tất cả split.
+- Từ chối nối path khi có nhiều thư mục khớp hoặc tìm kiếm vượt giới hạn; thêm regression cho trường hợp YAML đặt riêng trong thư mục cấu hình và checkpoint vẫn chờ trust flow.
+- Tạo `data.yaml` local và chuẩn hóa file list trong App Data, không sửa hoặc sao chép ảnh/nhãn nguồn. Giới hạn file list và chặn đường dẫn ngoài scope.
+- Preflight xác minh workspace nguồn còn tồn tại và từ chối ảnh/nhãn đi qua symlink; checkpoint `.pt` vẫn chỉ được nhập sau trust flow.
+- Dataset nhập vào không tự đặt output vào vùng staging; người dùng chọn riêng nơi lưu training runs.
+
 ## Chưa phát hành — Rà soát repository
 
 - Thêm giấy phép GNU AGPL-3.0-or-later, phù hợp với tích hợp Ultralytics; ghi chú điều kiện cấp phép Ultralytics trong README.

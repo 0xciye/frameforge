@@ -23,11 +23,15 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO
 import cv2
 import yaml
 
+from frameforge.media import _read_image
+
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 DEFAULT_MODEL = "yolo11n.pt"
 MAX_IMAGE_SIZE = 2048
 MAX_IMPORTED_CHECKPOINT_BYTES = 2 * 1024 * 1024 * 1024
+MAX_IMPORTED_WORKSPACE_METADATA_BYTES = 64 * 1024
+MAX_CHECKPOINT_RUN_METADATA_BYTES = 2 * 1024 * 1024
 _PROMOTION_METRICS = ("precision", "recall", "f1", "map50", "map50_95")
 _PROMOTION_CLASS_METRICS = ("precision", "recall", "map50", "map50_95")
 _PROMOTION_CONDITION_KEYS = (
@@ -151,12 +155,52 @@ def _persist_run(record: Dict[str, Any]) -> None:
         connection.close()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, max_bytes: Optional[int] = None) -> str:
     digest = hashlib.sha256()
+    size = 0
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(block)
+            if max_bytes is not None and size > max_bytes:
+                raise ValueError("Tệp vượt giới hạn kích thước cho phép.")
             digest.update(block)
     return digest.hexdigest()
+
+
+def _valid_imgsz(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 1 <= value <= MAX_IMAGE_SIZE:
+        return value
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        height, width = value
+        if (
+            isinstance(height, int) and not isinstance(height, bool)
+            and isinstance(width, int) and not isinstance(width, bool)
+            and height == width and 1 <= height <= MAX_IMAGE_SIZE
+        ):
+            return height
+    return None
+
+
+def _checkpoint_imgsz(model: Any, checkpoint: Path) -> tuple[int, str, Optional[str]]:
+    overrides = getattr(model, "overrides", {})
+    checkpoint_imgsz = _valid_imgsz(overrides.get("imgsz")) if isinstance(overrides, dict) else None
+    if checkpoint_imgsz is not None:
+        return checkpoint_imgsz, "checkpoint_metadata", None
+
+    run_dir = checkpoint.parent.parent if checkpoint.parent.name.casefold() == "weights" else checkpoint.parent
+    args_path = run_dir / "args.yaml"
+    try:
+        if args_path.is_symlink() or not args_path.is_file() or args_path.stat().st_size > MAX_CHECKPOINT_RUN_METADATA_BYTES:
+            raise ValueError("args.yaml absent or exceeds metadata limit")
+        config = yaml.safe_load(args_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError):
+        config = None
+    run_imgsz = _valid_imgsz(config.get("imgsz")) if isinstance(config, dict) else None
+    if run_imgsz is not None:
+        return run_imgsz, "run_args_yaml", str(args_path)
+    return 640, "ultralytics_default", None
 
 
 def _is_internal_training_record(record: Dict[str, Any], checkpoint: Path) -> bool:
@@ -384,38 +428,14 @@ def import_yolo_checkpoint(path_value: str, trust_source: Any) -> Dict[str, Any]
         raise ValueError("Không tìm thấy checkpoint đã chọn.") from error
     if not source.is_file() or source.suffix.casefold() != ".pt":
         raise ValueError("Chỉ nhận checkpoint YOLO11n detection dạng `.pt`.")
-    if source.stat().st_size <= 0 or source.stat().st_size > MAX_IMPORTED_CHECKPOINT_BYTES:
+    source_size = source.stat().st_size
+    if source_size <= 0 or source_size > MAX_IMPORTED_CHECKPOINT_BYTES:
         raise ValueError("Checkpoint phải có kích thước lớn hơn 0 và không vượt quá 2 GiB.")
-
-    source_sha256 = _sha256_file(source)
+    source_sha256 = _sha256_file(source, MAX_IMPORTED_CHECKPOINT_BYTES)
     try:
         from ultralytics import YOLO
     except ImportError as error:
         raise RuntimeError("Import checkpoint cần PyTorch và Ultralytics trong Python engine.") from error
-    try:
-        model = YOLO(str(source))
-    except Exception as error:
-        raise ValueError("Không nạp được checkpoint đã xác nhận tin cậy: {0}".format(error)) from error
-
-    if getattr(model, "task", None) != "detect":
-        raise ValueError("Checkpoint chỉ hỗ trợ task object detection.")
-    model_config = getattr(getattr(model, "model", None), "yaml", None)
-    if not isinstance(model_config, dict):
-        raise ValueError("Không xác định được kiến trúc trong checkpoint.")
-    config_name = Path(str(model_config.get("yaml_file", ""))).stem.casefold()
-    model_scale = model_config.get("scale")
-    is_yolo11n = (
-        (config_name == "yolo11" and model_scale == "n")
-        or config_name == "yolo11n"
-        or config_name.startswith("yolo11n-")
-    )
-    if not is_yolo11n:
-        raise ValueError("Chỉ hỗ trợ kiến trúc YOLO11n; checkpoint khác không được đăng ký.")
-    class_names = _class_names(getattr(model, "names", None))
-
-    if _sha256_file(source) != source_sha256:
-        raise ValueError("Checkpoint nguồn thay đổi trong khi xác minh; hãy chọn lại tệp.")
-
     run_id = str(uuid.uuid4())
     display_name = "".join(character for character in source.name if character.isprintable()).strip()[:120]
     import_root = _training_root() / "imported"
@@ -423,19 +443,51 @@ def import_yolo_checkpoint(path_value: str, trust_source: Any) -> Dict[str, Any]
     run_dir = import_root / run_id
     weights_dir = run_dir / "weights"
     weights_dir.mkdir(parents=True, mode=0o700)
-    temporary = weights_dir / ".best.pt.partial"
+    temporary = weights_dir / (".best-{0}.partial.pt".format(uuid.uuid4().hex))
     checkpoint = weights_dir / "best.pt"
     try:
         with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
-            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            copied_digest = hashlib.sha256()
+            copied_size = 0
+            for block in iter(lambda: input_stream.read(1024 * 1024), b""):
+                copied_size += len(block)
+                if copied_size > MAX_IMPORTED_CHECKPOINT_BYTES:
+                    raise ValueError("Checkpoint vượt quá giới hạn 2 GiB trong khi sao chép.")
+                copied_digest.update(block)
+                output_stream.write(block)
         os.chmod(temporary, 0o600)
-        if _sha256_file(source) != source_sha256 or _sha256_file(temporary) != source_sha256:
+        if (
+            copied_size != source_size
+            or copied_digest.hexdigest() != source_sha256
+            or _sha256_file(source, MAX_IMPORTED_CHECKPOINT_BYTES) != source_sha256
+        ):
             raise ValueError("Checksum nguồn hoặc bản sao checkpoint không khớp.")
+
+        try:
+            model = YOLO(str(temporary))
+        except Exception as error:
+            raise ValueError("Không nạp được checkpoint đã xác nhận tin cậy: {0}".format(error)) from error
+
+        if getattr(model, "task", None) != "detect":
+            raise ValueError("Checkpoint chỉ hỗ trợ task object detection.")
+        model_config = getattr(getattr(model, "model", None), "yaml", None)
+        if not isinstance(model_config, dict):
+            raise ValueError("Không xác định được kiến trúc trong checkpoint.")
+        config_name = Path(str(model_config.get("yaml_file", ""))).stem.casefold()
+        model_scale = model_config.get("scale")
+        is_yolo11n = (
+            (config_name == "yolo11" and model_scale == "n")
+            or config_name == "yolo11n"
+            or config_name.startswith("yolo11n-")
+        )
+        if not is_yolo11n:
+            raise ValueError("Chỉ hỗ trợ kiến trúc YOLO11n; checkpoint khác không được đăng ký.")
+        class_names = _class_names(getattr(model, "names", None))
+
+        if _sha256_file(temporary, MAX_IMPORTED_CHECKPOINT_BYTES) != source_sha256:
+            raise ValueError("Bản sao checkpoint thay đổi trong khi xác minh; hãy nhập lại tệp.")
         os.replace(temporary, checkpoint)
-        overrides = getattr(model, "overrides", {})
-        requested_imgsz = overrides.get("imgsz", 640) if isinstance(overrides, dict) else 640
-        if isinstance(requested_imgsz, bool) or not isinstance(requested_imgsz, int) or not 1 <= requested_imgsz <= MAX_IMAGE_SIZE:
-            requested_imgsz = 640
+        requested_imgsz, imgsz_source, imgsz_source_path = _checkpoint_imgsz(model, source)
         now = _now()
         record = {
             "run_id": run_id,
@@ -452,6 +504,8 @@ def import_yolo_checkpoint(path_value: str, trust_source: Any) -> Dict[str, Any]
             "display_name": display_name or "YOLO11n",
             "requested_imgsz": requested_imgsz,
             "effective_imgsz": requested_imgsz,
+            "imgsz_source": imgsz_source,
+            "imgsz_source_path": imgsz_source_path,
             "base_model": "external checkpoint",
             "parent_model_id": None,
             "class_names": class_names,
@@ -477,6 +531,8 @@ def import_yolo_checkpoint(path_value: str, trust_source: Any) -> Dict[str, Any]
         "class_names": class_names,
         "architecture": "yolo11n",
         "display_name": display_name or "YOLO11n",
+        "requested_imgsz": requested_imgsz,
+        "imgsz_source": imgsz_source,
     }
 
 
@@ -490,6 +546,71 @@ def _resolve_dataset_root(data_file: Path, config: Dict[str, Any]) -> Path:
     return root.resolve()
 
 
+def _has_symlink_component(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _imported_workspace_scope(data_file: Path) -> tuple[Optional[Path], Optional[str]]:
+    metadata_path = data_file.parent / "imported-workspace.json"
+    if metadata_path.is_symlink():
+        return None, "Metadata của thư mục làm việc nhập vào không hợp lệ."
+    if not metadata_path.exists():
+        return None, None
+    try:
+        if metadata_path.stat().st_size > MAX_IMPORTED_WORKSPACE_METADATA_BYTES:
+            return None, "Metadata của thư mục làm việc nhập vào không hợp lệ."
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "Không đọc được metadata của thư mục làm việc nhập vào."
+    root_value = metadata.get("source_root") if isinstance(metadata, dict) else None
+    if not isinstance(root_value, str) or not root_value:
+        return None, "Metadata của thư mục làm việc thiếu đường dẫn nguồn hợp lệ."
+    try:
+        root = Path(root_value).expanduser()
+        if not root.is_absolute() or _has_symlink_component(root):
+            raise ValueError("đường dẫn chứa symlink hoặc không phải đường dẫn tuyệt đối")
+        resolved = root.resolve(strict=True)
+    except (OSError, ValueError) as error:
+        return None, "Thư mục nguồn đã nhập không còn dùng được: {0}".format(error)
+    if not resolved.is_dir():
+        return None, "Thư mục nguồn đã nhập không còn tồn tại."
+    return resolved, None
+
+
+def _scoped_imported_path(value: Path, root: Path, label: str, *, strict: bool = True) -> Path:
+    candidate = value.expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if ".." in candidate.parts:
+        raise ValueError("{0} chứa thành phần .. không được phép.".format(label))
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as error:
+        raise ValueError("{0} nằm ngoài thư mục đã nhập.".format(label)) from error
+    if _has_symlink_component(root):
+        raise ValueError("Thư mục nguồn đã nhập chứa symlink.")
+    cursor = root
+    if cursor.is_symlink():
+        raise ValueError("Thư mục nguồn đã nhập là symlink.")
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("{0} đi qua symlink.".format(label))
+    try:
+        resolved = candidate.resolve(strict=strict)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise ValueError("{0} không còn nằm trong thư mục đã nhập.".format(label)) from error
+    return resolved
+
+
 def _split_sources(value: Any, split_name: str) -> List[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
@@ -498,7 +619,14 @@ def _split_sources(value: Any, split_name: str) -> List[str]:
     raise ValueError("data.yaml cần đường dẫn cục bộ hợp lệ cho split {0}.".format(split_name))
 
 
-def _resolve_split_images(root: Path, sources: Iterable[str], split_name: str, errors: List[str]) -> List[Path]:
+def _resolve_split_images(
+    root: Path,
+    sources: Iterable[str],
+    split_name: str,
+    errors: List[str],
+    workspace_scope: Optional[Path] = None,
+    imported_lists_root: Optional[Path] = None,
+) -> List[Path]:
     images: Dict[str, Path] = {}
     for source in sources:
         if source.startswith(("http://", "https://")):
@@ -507,7 +635,18 @@ def _resolve_split_images(root: Path, sources: Iterable[str], split_name: str, e
         path = Path(source).expanduser()
         if not path.is_absolute():
             path = root / path
-        path = path.resolve()
+        is_imported_list = path.suffix.lower() == ".txt" and imported_lists_root is not None
+        if workspace_scope is not None:
+            try:
+                if is_imported_list:
+                    path = _scoped_imported_path(path, imported_lists_root, "Danh sách ảnh")
+                else:
+                    path = _scoped_imported_path(path, workspace_scope, "Split " + split_name)
+            except (OSError, ValueError) as error:
+                errors.append("Split {0} không an toàn: {1}".format(split_name, error))
+                continue
+        else:
+            path = path.resolve()
         if path.is_dir():
             candidates = (item for item in path.rglob("*") if item.suffix.lower() in IMAGE_EXTENSIONS)
         elif path.is_file() and path.suffix.lower() == ".txt":
@@ -519,13 +658,27 @@ def _resolve_split_images(root: Path, sources: Iterable[str], split_name: str, e
                 item = Path(value).expanduser()
                 if not item.is_absolute():
                     item = root / item
-                candidates.append(item.resolve())
+                if workspace_scope is not None:
+                    try:
+                        item = _scoped_imported_path(item, workspace_scope, "Ảnh trong danh sách")
+                    except (OSError, ValueError) as error:
+                        errors.append("Split {0} chứa đường dẫn ảnh không an toàn: {1}".format(split_name, error))
+                        continue
+                    candidates.append(item)
+                else:
+                    candidates.append(item.resolve())
         elif path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
             candidates = [path]
         else:
             errors.append("Không tìm thấy thư mục, ảnh hoặc danh sách ảnh split {0}: {1}".format(split_name, path))
             continue
         for item in candidates:
+            if workspace_scope is not None and not is_imported_list:
+                try:
+                    item = _scoped_imported_path(item, workspace_scope, "Ảnh trong split " + split_name)
+                except (OSError, ValueError) as error:
+                    errors.append("Split {0} chứa ảnh không an toàn: {1}".format(split_name, error))
+                    continue
             if item.suffix.lower() not in IMAGE_EXTENSIONS:
                 errors.append("Split {0} chứa định dạng ảnh không hỗ trợ: {1}".format(split_name, item))
             elif not item.is_file():
@@ -594,9 +747,26 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
         raise ValueError("data.yaml phải là một object YAML.")
 
     names = _class_names(config.get("names"))
-    root = _resolve_dataset_root(data_file, config)
     errors: List[str] = []
     warnings: List[str] = []
+    workspace_scope, workspace_error = _imported_workspace_scope(data_file)
+    if workspace_error:
+        errors.append(workspace_error)
+    try:
+        if workspace_scope is None:
+            root = _resolve_dataset_root(data_file, config)
+        else:
+            configured_root = config.get("path", ".")
+            if not isinstance(configured_root, str):
+                raise ValueError("Trường path trong data.yaml phải là đường dẫn cục bộ.")
+            root_reference = Path(configured_root).expanduser()
+            if not root_reference.is_absolute():
+                root_reference = data_file.parent / root_reference
+            root = _scoped_imported_path(root_reference, workspace_scope, "Thư mục dataset")
+    except (OSError, ValueError) as error:
+        errors.append("Dataset nhập vào không an toàn: {0}".format(error))
+        workspace_error = workspace_error or str(error)
+        root = data_file.parent
     split_images: Dict[str, List[Path]] = {}
     for split_name in ("train", "val", "test"):
         value = config.get(split_name)
@@ -609,15 +779,31 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
         except ValueError as error:
             errors.append(str(error))
             continue
-        split_images[split_name] = _resolve_split_images(root, sources, split_name, errors)
+        if workspace_error:
+            split_images[split_name] = []
+        else:
+            split_images[split_name] = _resolve_split_images(
+                root,
+                sources,
+                split_name,
+                errors,
+                workspace_scope=workspace_scope,
+                imported_lists_root=data_file.parent if workspace_scope is not None else None,
+            )
     for split_name in ("train", "val"):
         if not split_images.get(split_name):
             errors.append("Split {0} không có ảnh.".format(split_name))
 
-    manifest_path = data_file.parent / "manifest.json"
+    manifest_path: Optional[Path] = root / "manifest.json"
+    if manifest_path.is_file() and workspace_scope is not None and not workspace_error:
+        try:
+            manifest_path = _scoped_imported_path(manifest_path, workspace_scope, "manifest.json")
+        except (OSError, ValueError) as error:
+            errors.append("manifest.json không an toàn: {0}".format(error))
+            manifest_path = None
     manifest: Dict[str, Any] = {}
     manifest_digests: Dict[str, str] = {}
-    if manifest_path.is_file():
+    if manifest_path is not None and manifest_path.is_file():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             for item in manifest.get("images", []):
@@ -638,7 +824,7 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
 
     fingerprint = hashlib.sha256()
     fingerprint.update(data_file.read_bytes())
-    if manifest_path.is_file():
+    if manifest_path is not None and manifest_path.is_file():
         fingerprint.update(manifest_path.read_bytes())
     image_counts: Dict[str, int] = {}
     instance_counts: Dict[str, int] = {}
@@ -647,7 +833,7 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
     all_images = [(split, image) for split, images in split_images.items() for image in images]
     for index, (split_name, image_path) in enumerate(all_images, start=1):
         try:
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            image = _read_image(image_path, cv2.IMREAD_COLOR)
             if image is None:
                 errors.append("Ảnh không giải mã được: {0}".format(image_path))
                 continue
@@ -665,7 +851,16 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
             fingerprint.update(relative.encode("utf-8", errors="replace"))
             fingerprint.update(image_digest.encode("ascii"))
             label_file = _label_path(image_path)
-            if not label_file.is_file():
+            label_is_safe = True
+            if workspace_scope is not None:
+                try:
+                    label_file = _scoped_imported_path(
+                        label_file, workspace_scope, "Label của ảnh", strict=False,
+                    )
+                except (OSError, ValueError) as error:
+                    errors.append("Label của ảnh không an toàn: {0}".format(error))
+                    label_is_safe = False
+            if not label_is_safe or not label_file.is_file():
                 missing_labels += 1
                 fingerprint.update(b"missing-label")
                 instances = 0
@@ -704,6 +899,7 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
         "valid": not errors,
         "data_yaml": str(data_file),
         "dataset_root": str(root),
+        "imported_workspace": workspace_scope is not None or workspace_error is not None,
         "dataset_id": manifest.get("dataset_id"),
         "dataset_version": manifest.get("version"),
         "parent_dataset_id": manifest.get("parent_dataset_id"),
@@ -756,7 +952,7 @@ def _inspect_fixed_evaluation_set(
     root = _resolve_dataset_root(data_file, config).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("Thư mục dataset không còn tồn tại.")
-    manifest_path = data_file.parent / "manifest.json"
+    manifest_path = root / "manifest.json"
     try:
         manifest_path = manifest_path.resolve(strict=True)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -865,7 +1061,7 @@ def _inspect_fixed_evaluation_set(
             errors.append("Ảnh trong fixed set chưa được review: {0}".format(row.get("exported_image")))
         if _label_path(image_path).resolve() != label_path:
             errors.append("Đường dẫn label không khớp quy ước YOLO: {0}".format(row.get("exported_label")))
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image = _read_image(image_path, cv2.IMREAD_COLOR)
         if image is None:
             errors.append("Ảnh fixed set không giải mã được: {0}".format(image_path))
         elif image.shape[1] != row.get("width") or image.shape[0] != row.get("height"):

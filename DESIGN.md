@@ -30,16 +30,19 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 
 ## Huấn luyện
 
-- Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Mỗi imgsz chạy thành run riêng từ cùng checkpoint nền; fine-tune chỉ bắt đầu từ checkpoint YOLO11n đã đăng ký, được người dùng chọn, còn checksum hợp lệ và khớp class schema. Model nhập hiển thị tên file trong lựa chọn checkpoint.
+- Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Nếu không chọn checkpoint fine-tune, mỗi imgsz tạo run mới từ YOLO11n pretrained; khi chọn checkpoint đã đăng ký, tự điền `imgsz` từ checkpoint hoặc `args.yaml` cùng run. Nếu cả hai thiếu, dùng mặc định Ultralytics 640 và báo rõ; registry cũ chưa ghi nguồn được báo là chưa xác định. Fine-tune chỉ nhận checkpoint YOLO11n detection đã đăng ký, còn checksum hợp lệ và khớp class schema. Model nhập hiển thị tên file trong lựa chọn checkpoint.
 - Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data. Giữ `cache=False` cho dataset lớn; nhập Patience = 0 để tắt early stopping và chạy đủ epoch đã đặt.
+- Với dataset vừa nhập từ thư mục chuyển máy, người dùng chọn thư mục output riêng trước khi chạy; ảnh và nhãn tại nguồn vẫn giữ nguyên.
 - Card “Đánh giá model trên fixed set” chọn checkpoint registry, validation/test đã đóng băng, `imgsz`, batch, confidence, NMS IoU và thiết bị. Chỉ bật khi split hiện tại có fixed-set ID. Đánh giá có thể hủy giữa các batch; tác vụ dở dang không được ghi thành kết quả.
 - Hiển thị Precision/Recall/F1/mAP50/mAP50–95 tổng thể và theo class cùng mục tiêu người dùng đặt. Để trống là không đặt ngưỡng. Kèm dataset/fixed-set/checkpoint fingerprint, thiết bị/framework và cảnh báo tập nhỏ/thiếu class; latency/FPS/throughput/RAM ghi “Chưa đo” cho đến khi có benchmark triển khai.
 - Hiển thị Champion hiện tại, Challenger mới nhất, bảng delta metric, blockers/target và lịch sử. Chỉ dùng fixed validation có cùng fingerprint/schema/điều kiện; mặc định không chấp nhận regression. Promote và rollback đều cần xác nhận rõ, model cũ được giữ trong registry.
 
-## Quét thư mục dự án
+## Nhập thư mục làm việc
 
-- Chọn một thư mục cha để quét cấu trúc, dataset YAML, cấu hình run, metric CSV, checkpoint và model export; hiện progress, giới hạn quét và nút hủy.
+- Chọn thư mục làm việc đã chuyển để quét cấu trúc, dataset YAML, cấu hình run, metric CSV, checkpoint và model export; hiện progress, giới hạn quét và nút hủy.
+- Dataset được đưa sang bước kiểm tra bằng `data.yaml` local trong App Data; file list được chuẩn hóa còn ảnh/nhãn được dùng tại chỗ. Nếu YAML nằm ngoài dataset, chỉ nối path cũ khi duy nhất một thư mục trong workspace khớp tất cả split; trường hợp mơ hồ hoặc tìm kiếm chưa đầy đủ bị chặn. Preflight từ chối nguồn mất, ngoài scope hoặc đi qua symlink.
 - Kết quả run ngoài là metadata chỉ đọc. Lưu vào registry cần thao tác riêng; checkpoint `.pt` chưa được nạp hoặc xác minh tương thích nên không xuất hiện làm model fine-tune.
+- Checkpoint `.pt` có nút nhập riêng với cảnh báo tin cậy; sau xác nhận, FrameForge giới hạn kích thước, sao chép vào vùng quản lý riêng, xác minh checksum trước khi nạp bản sao, kiểm tra YOLO11n detection/class rồi xác minh lại checksum. Chỉ sau đó checkpoint mới được đăng ký.
 
 Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa source/preview/settings và trên gallery kéo được bằng chuột hoặc phím mũi tên; kích thước lưu ở local storage. Ở cửa sổ hẹp hơn 1240px, panel co theo CSS trong khi nội dung settings/gallery cuộn độc lập. Cửa sổ Tauri khởi tạo ở 1440×960, tối thiểu 1024×700.
 
