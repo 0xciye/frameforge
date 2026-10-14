@@ -93,6 +93,15 @@ type ProjectState = {
   class_names: string[];
 };
 
+type WorkspaceTab = "extract" | "label" | "dataset" | "training";
+type SessionSnapshot = {
+  available: boolean;
+  project?: ProjectState;
+  session?: Record<string, unknown>;
+  original_project_exists?: boolean;
+  original_project_unchanged?: boolean;
+};
+
 type FramePreview = {
   data_url: string;
   width: number;
@@ -239,15 +248,17 @@ function App() {
   const [fileListTruncated, setFileListTruncated] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [engineStatus, setEngineStatus] = useState<"checking" | "ready" | "error">("checking");
+  const [sessionReady, setSessionReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [inspectingModel, setInspectingModel] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [activeTab, setActiveTab] = useState<"extract" | "label" | "dataset" | "training">("extract");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("extract");
   const [trainingDatasetSeed, setTrainingDatasetSeed] = useState<string | null>(null);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
   const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const annotationSaveFailed = useRef(false);
+  const sessionSaveErrorShown = useRef(false);
   const previewSequence = useRef(0);
   const activeExtractionId = useRef<string | null>(null);
   const progressSubscription = useRef<Promise<void>>(Promise.resolve());
@@ -462,15 +473,118 @@ function App() {
 
   useEffect(() => {
     let alive = true;
+    let interacted = false;
+    const noteInteraction = () => { interacted = true; };
+    window.addEventListener("pointerdown", noteInteraction, true);
+    window.addEventListener("keydown", noteInteraction, true);
     if (!isTauri()) {
       setEngineStatus("error");
-      return () => { alive = false; };
+      setSessionReady(true);
+      return () => {
+        alive = false;
+        window.removeEventListener("pointerdown", noteInteraction, true);
+        window.removeEventListener("keydown", noteInteraction, true);
+      };
     }
-    void callEngine<{ status: string }>("health", {})
-      .then(() => alive && setEngineStatus("ready"))
-      .catch(() => alive && setEngineStatus("error"));
-    return () => { alive = false; };
+    void (async () => {
+      let engineReady = false;
+      try {
+        await callEngine<{ status: string }>("health", {});
+        if (!alive) return;
+        engineReady = true;
+        setEngineStatus("ready");
+        const snapshot = await callEngine<SessionSnapshot>("load_session", {});
+        if (!alive || interacted || !snapshot.available || !snapshot.project || !snapshot.session) return;
+
+        const restoredProject = {
+          ...snapshot.project,
+          settings: { ...DEFAULT_OPTIONS, ...(snapshot.project.settings as Partial<ExtractionOptions>) },
+        };
+        const sourcePaths = new Set(restoredProject.sources.map((source) => source.path));
+        const requestedSelectedPaths = snapshot.session.selected_paths;
+        const restoredSelectedPaths = Array.isArray(requestedSelectedPaths)
+          ? requestedSelectedPaths.filter((path): path is string => typeof path === "string" && sourcePaths.has(path))
+          : restoredProject.sources.map((source) => source.path);
+        const requestedSelectedPath = snapshot.session.selected_path;
+        const restoredSelectedPath = typeof requestedSelectedPath === "string" && sourcePaths.has(requestedSelectedPath)
+          ? requestedSelectedPath
+          : restoredProject.sources[0]?.path ?? null;
+        const selectedSource = restoredProject.sources.find((source) => source.path === restoredSelectedPath);
+        const requestedFrame = snapshot.session.frame_index;
+        const restoredFrame = typeof requestedFrame === "number" && Number.isFinite(requestedFrame)
+          ? Math.max(0, Math.min(selectedSource?.frame_count ? selectedSource.frame_count - 1 : Number.MAX_SAFE_INTEGER, Math.floor(requestedFrame)))
+          : 0;
+        const requestedTab = snapshot.session.active_tab;
+        const restoredTab: WorkspaceTab = requestedTab === "label" || requestedTab === "dataset" || requestedTab === "training"
+          ? requestedTab
+          : "extract";
+        const requestedProjectPath = snapshot.session.project_path;
+        const originalIsSafeToResume = snapshot.original_project_exists === true
+          && snapshot.original_project_unchanged === true
+          && typeof requestedProjectPath === "string";
+
+        setProject(restoredProject);
+        setOptions(restoredProject.settings);
+        setProjectPath(originalIsSafeToResume ? requestedProjectPath : null);
+        setDirty(snapshot.session.dirty === true || !originalIsSafeToResume);
+        setSelectedPaths(restoredSelectedPaths);
+        setSelectedPath(restoredSelectedPath);
+        setFrameIndex(restoredFrame);
+        setOutputDirectory(typeof snapshot.session.output_directory === "string" ? snapshot.session.output_directory : "");
+        setActiveTab(restoredTab);
+        setGallery([]);
+        setFileListTruncated(false);
+        annotationSaveFailed.current = false;
+      } catch (reason) {
+        if (alive && engineReady && !interacted) {
+          setError(`Không khôi phục được phiên trước. Mở dự án thủ công để tiếp tục. ${String(reason)}`);
+        }
+        if (alive && !engineReady) setEngineStatus("error");
+      } finally {
+        if (alive) setSessionReady(true);
+      }
+    })();
+    return () => {
+      alive = false;
+      window.removeEventListener("pointerdown", noteInteraction, true);
+      window.removeEventListener("keydown", noteInteraction, true);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!sessionReady || !isTauri()) return;
+    const hasSessionState = Boolean(
+      projectPath
+      || project.sources.length
+      || project.images.length
+      || activeTab !== "extract"
+      || outputDirectory
+      || JSON.stringify(options) !== JSON.stringify(DEFAULT_OPTIONS),
+    );
+    if (!hasSessionState) return;
+    const timer = window.setTimeout(() => {
+      void serializeProjectWrite(() => callEngine("save_session", {
+        project: { ...project, settings: options },
+        session: {
+          project_path: projectPath,
+          selected_paths: selectedPaths,
+          selected_path: selectedPath,
+          frame_index: frameIndex,
+          output_directory: outputDirectory,
+          active_tab: activeTab,
+          dirty,
+        },
+      })).then(() => {
+        sessionSaveErrorShown.current = false;
+      }).catch((reason) => {
+        if (!sessionSaveErrorShown.current) {
+          setError(`Không lưu được bản khôi phục phiên: ${String(reason)}`);
+          sessionSaveErrorShown.current = true;
+        }
+      });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [sessionReady, project, projectPath, selectedPaths, selectedPath, frameIndex, outputDirectory, activeTab, dirty, options]);
 
   useEffect(() => {
     try {

@@ -20,6 +20,7 @@
 - Không thêm tuỳ chọn nhận video 2K/4K hoặc video vượt FHD; `imgsz` training là cấu hình riêng, không thay đổi giới hạn video đầu vào.
 - Benchmark hiện có xử lý batch fixture H.264 FHD tổng cộng 4 giờ nguồn, tạo 14.400 crop trong 519 giây và RSS đỉnh 892 MiB. Đây là dữ liệu tổng hợp lặp lại, không phải soak test trên nhiều video thực hoặc nhiều codec.
 - App mở thẳng workspace. Không khôi phục màn chào bắt buộc kiểm tra engine; health check chạy nền và chỉ hiện trạng thái gọn trên toolbar.
+- Tự lưu snapshot workspace cục bộ và tự khôi phục sau health check, không hiện hộp thoại phục hồi. Ghi qua hàng đợi project để không đảo thứ tự với annotation/save; nếu `.ffproj` gốc mất hoặc checksum đổi, mở snapshot thành dự án chưa lưu để tránh ghi đè âm thầm.
 - Giữ cầu nối Tauri an toàn: allowlist command, xác thực đường dẫn/argument và gọi tiến trình trực tiếp; không chạy lệnh qua shell.
 - Giao thức engine là JSON-lines UTF-8: mỗi request và response chiếm một dòng.
 - Khi thêm module được import từ `engine/frameforge_engine.py`, thêm module đó vào resource list trong `src-tauri/tauri.conf.json` và kiểm tra import/health từ engine trong app bundle.

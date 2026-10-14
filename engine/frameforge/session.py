@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -25,16 +26,34 @@ def _app_data_dir() -> Path:
 
 def _session_paths() -> tuple[Path, Path]:
     directory = _app_data_dir() / "session"
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     return directory / "last-session.ffproj", directory / "last-session.json"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def save_session(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
     """Atomically replace the hidden project snapshot and its small UI state file."""
     if not isinstance(project, dict) or not isinstance(session, dict):
         raise ValueError("Dữ liệu phiên làm việc không hợp lệ.")
+    metadata = dict(session)
+    metadata["source_project_sha256"] = None
+    project_path_value = session.get("project_path")
+    if isinstance(project_path_value, str) and project_path_value:
+        try:
+            source_project = Path(project_path_value).expanduser().resolve(strict=True)
+            if source_project.is_file():
+                metadata["source_project_sha256"] = _sha256_file(source_project)
+        except OSError:
+            pass
     try:
-        session_json = json.dumps(session, ensure_ascii=False, allow_nan=False)
+        session_json = json.dumps(metadata, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError) as error:
         raise ValueError("Cài đặt phiên làm việc không phải JSON an toàn.") from error
 
@@ -43,7 +62,9 @@ def save_session(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, 
     temporary_metadata = metadata_path.with_name(".session-{0}.json".format(uuid.uuid4().hex))
     try:
         save_project(str(temporary_project), project)
+        os.chmod(temporary_project, 0o600)
         temporary_metadata.write_text(session_json, encoding="utf-8")
+        os.chmod(temporary_metadata, 0o600)
         os.replace(temporary_project, project_path)
         os.replace(temporary_metadata, metadata_path)
     except BaseException:
@@ -67,10 +88,15 @@ def load_session() -> Dict[str, Any]:
         raise ValueError("Metadata phiên làm việc bị hỏng.")
     original_path = session.get("project_path")
     original_exists = False
+    original_unchanged = False
     if isinstance(original_path, str) and original_path:
         candidate = Path(original_path).expanduser()
         try:
-            original_exists = candidate.is_file() and _is_frameforge_project(candidate.resolve(strict=True))
+            candidate = candidate.resolve(strict=True)
+            original_exists = candidate.is_file() and _is_frameforge_project(candidate)
+            expected_digest = session.get("source_project_sha256")
+            if original_exists and isinstance(expected_digest, str):
+                original_unchanged = _sha256_file(candidate) == expected_digest
         except (OSError, ValueError):
             original_exists = False
     return {
@@ -78,4 +104,5 @@ def load_session() -> Dict[str, Any]:
         "project": project,
         "session": session,
         "original_project_exists": original_exists,
+        "original_project_unchanged": original_unchanged,
     }

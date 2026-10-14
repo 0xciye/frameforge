@@ -24,10 +24,10 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Đánh giá YOLO11n chỉ trên fixed validation/test của manifest FrameForge và checkpoint nội bộ có SHA-256 hợp lệ. Lưu metric tổng/per-class, checksum, dataset/split, cấu hình inference, thiết bị/framework, cảnh báo về độ tin cậy và lịch sử. Mục tiêu để trống mặc định, hỗ trợ theo class; latency, FPS, throughput và memory hiển thị chưa đo tới khi có benchmark triển khai.
 - Champion/Challenger dùng validation cố định để so sánh cùng tập và điều kiện; xác minh checksum, target chất lượng và regression tổng/per-class. Promote do người dùng xác nhận, lưu lịch sử và hỗ trợ rollback. Engine đã qua fake-runtime tests; kiểm tra bằng checkpoint thật trên máy này còn thiếu.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài vẫn chưa xác minh và không được đưa vào fine-tune/inference cho đến khi nhập riêng.
+- Tự lưu snapshot workspace cục bộ và tự khôi phục khi mở app mà không hiện hộp thoại. Nếu dự án gốc mất hoặc checksum thay đổi, mở snapshot như dự án chưa lưu để không ghi đè dữ liệu gốc.
 
 ## Chưa khả dụng
 
-- Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
 - Resume training sau khi tiến trình bị gián đoạn.
 - Benchmark latency/FPS/throughput/memory theo runtime triển khai, experiment comparison và export ONNX/TensorRT/OpenVINO.
 - Soak test extraction trên nhiều giờ video FHD thực vẫn chưa có. Đã chạy một batch tổng cộng bốn giờ nguồn bằng bốn bản sao của cùng fixture tổng hợp một giờ; chưa đại diện nội dung và codec thực.

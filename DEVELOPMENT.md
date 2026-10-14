@@ -14,7 +14,7 @@
 | YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 91 engine tests pass |
+| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
@@ -22,12 +22,12 @@
 | Import model YOLO bên ngoài | TESTED_ENGINE | Native dialog cảnh báo `.pt` có thể thực thi mã và yêu cầu xác nhận; kiểm tra detection/YOLO11n/class, giới hạn 2 GiB, xác minh checksum trước/sau khi nạp và sao chép; file riêng quyền hạn chế, provenance và registry được lưu; fake-runtime regression tests pass |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Smoke một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro. Kiểm tra synthetic 20.003 ảnh 320×320 và chuyển cấu hình 301 epoch tới hai imgsz bằng fake runtime; chưa xác nhận throughput/độ ổn định YOLO thật ở quy mô đầy đủ. |
 | Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection đã đăng ký, khớp checksum tệp/record/registry và class schema dataset; nguồn được phép gồm run FrameForge và checkpoint đã nhập qua xác nhận tin cậy. |
-| Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
+| Khôi phục phiên làm việc | TESTED_ENGINE + BUILT_UI | Snapshot riêng tư lưu project và trạng thái workspace; frontend tự lưu sau debounce, tự khôi phục không hiện hộp thoại. Nếu dự án gốc mất hoặc checksum đổi, snapshot mở thành dự án chưa lưu. Engine có regression tests; UI đã build nhưng chưa click-through trên app bundle mới. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
 | Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Media batch benchmark FHD 4 giờ là phép đo extraction, không phải model benchmark. |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự tiếp theo: dùng checkpoint YOLO11n thật đã nhập hoặc train để click-through inference → manual review → dataset export → fixed-set evaluation/Champion-Challenger. Sau đó tiếp tục deployment benchmark/export, resume/recovery training, session recovery UI và Windows validation. Engine suite xác minh trust flow; registry local hiện chưa có checkpoint thật để kiểm tra luồng end-to-end. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
+Thứ tự tiếp theo: dùng checkpoint YOLO11n thật đã nhập hoặc train để click-through inference → manual review → dataset export → fixed-set evaluation/Champion-Challenger. Sau đó tiếp tục deployment benchmark/export, resume training và Windows validation. Engine suite xác minh trust flow; registry local hiện chưa có checkpoint thật để kiểm tra luồng end-to-end. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
 
 ## Đo hiệu năng media
 
@@ -260,6 +260,13 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Chưa xác minh:** Dataset controls đã qua TypeScript/Vite build nhưng chưa click-through trong app bundle. Fixed-set evaluation/Champion-Challenger chưa triển khai. Benchmark một giờ là một lượt extraction trên fixture H.264 tổng hợp FHD; không phải soak test nhiều giờ hoặc mọi codec. Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch chưa chạy.
 - **Git:** Commit `7cbae6d` (`feat(dataset): add lineage and frozen evaluation sets`) đã lưu local trên `feature/manual-labeling`. Push bị chặn do GitHub HTTPS yêu cầu username nhưng phiên này không cung cấp (`could not read Username for 'https://github.com': Device not configured`).
 - **Bước tiếp:** Triển khai evaluation trên fixed validation/test sets và lưu metric theo từng run trước khi xây Champion/Challenger.
+
+### 2026-10-14 — Tự lưu và khôi phục workspace
+
+- **Thay đổi:** Frontend tự lưu snapshot cục bộ sau debounce và khôi phục project, cài đặt, nguồn/frame đang chọn, thư mục output và tab sau health check. Không hiện hộp thoại phục hồi. Snapshot dùng quyền riêng; nếu `.ffproj` gốc mất hoặc SHA-256 đổi thì mở nội dung phục hồi thành project chưa lưu để tránh ghi đè.
+- **FHD:** Giữ nguyên phạm vi đầu vào tối đa 1920×1080. Video lớn hơn bị từ chối ở import/preview/extraction, không scale và không thêm lựa chọn độ phân giải cao hơn. Benchmark gần nhất vẫn là 4 giờ nguồn tổng hợp H.264 FHD, không phải soak test nhiều giờ theo thời gian thực.
+- **Kiểm tra:** `pnpm test:engine` — 93 passed; `pnpm build` — thành công; `git diff --check` — sạch. Chưa click-through UI trên app bundle mới.
+- **Git:** Commit milestone được lưu local trên `feature/manual-labeling`; remote GitHub chưa xác thực được trong workspace.
 
 ## Quy trình thay đổi
 
