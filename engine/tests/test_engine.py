@@ -596,6 +596,41 @@ def test_sqlite_project_round_trips_settings_images_and_annotations(tmp_path: Pa
     assert reopened["class_names"] == ["person"]
 
 
+def test_legacy_dhash_default_migrates_once_and_preserves_later_choice(tmp_path: Path):
+    project_path = tmp_path / "legacy-dhash.ffproj"
+    save_project(str(project_path), {
+        "name": "Legacy dHash",
+        "settings_version": 0,
+        "sources": [],
+        "settings": {"duplicate_threshold": 5},
+        "images": [{
+            "path": str(tmp_path / "crop.jpg"),
+            "width": 320,
+            "height": 320,
+            "status": "ready",
+            "extraction_settings": {"duplicate_threshold": 5},
+            "annotations": [],
+        }],
+        "class_names": ["head", "body"],
+    })
+
+    migrated = load_project(str(project_path))
+
+    assert migrated["settings"]["duplicate_threshold"] == 1
+    assert migrated["settings_migrated"] is True
+    assert migrated["settings_version"] == 0
+    assert migrated["images"][0]["extraction_settings"]["duplicate_threshold"] == 5
+
+    migrated["settings"]["duplicate_threshold"] = 5
+    migrated["settings_version"] = 1
+    save_project(str(project_path), migrated)
+    reopened = load_project(str(project_path))
+
+    assert reopened["settings"]["duplicate_threshold"] == 5
+    assert reopened["settings_migrated"] is False
+    assert reopened["settings_version"] == 1
+
+
 def _create_annotation_project(tmp_path: Path) -> tuple[Path, str]:
     project_path = tmp_path / "labels.ffproj"
     created = create_project(str(project_path), "Labels")

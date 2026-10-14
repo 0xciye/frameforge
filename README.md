@@ -52,6 +52,10 @@ UI dùng React/TypeScript; Tauri gọi Python engine qua JSON-lines. Python runt
 
 Media, gán nhãn, dataset, inference và workflow YOLO11n đã được triển khai. Training quy mô lớn chưa được xác minh bằng dataset/model thực; benchmark hiện có dùng fixture H.264 FHD tổng hợp lặp lại: 14.400 crop từ 4 giờ nguồn trong 519 giây, RSS đỉnh khoảng 892 MiB. Chưa có deployment benchmark/export ONNX, TensorRT, OpenVINO hoặc resume training. Xem [DEVELOPMENT.md](DEVELOPMENT.md) để biết phạm vi kiểm chứng và giới hạn.
 
+## Giấy phép
+
+Mã nguồn FrameForge được cấp phép theo GNU AGPL phiên bản 3 trở lên; xem [LICENSE](LICENSE). Ứng dụng tích hợp Ultralytics trong workflow huấn luyện và inference tùy chọn. Trước khi phân phối bản thương mại/đóng nguồn hoặc model YOLO, hãy kiểm tra [điều khoản cấp phép hiện hành của Ultralytics](https://www.ultralytics.com/license); hướng dẫn của họ nêu AGPL-3.0 hoặc giấy phép Enterprise cho các trường hợp sử dụng tương ứng. Dependency bên thứ ba vẫn giữ giấy phép riêng.
+
 ## Tài liệu
 
 [Phạm vi sản phẩm](PRODUCT.md) · [Thiết kế](DESIGN.md) · [Trạng thái phát triển](DEVELOPMENT.md) · [Hướng dẫn agent](AGENTS.md)

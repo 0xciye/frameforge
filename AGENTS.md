@@ -17,6 +17,7 @@
 - Đánh giá model chỉ chạy trên fixed validation/test của manifest FrameForge: xác minh hash manifest, ảnh/label, class schema và không có fingerprint/group rò rỉ giữa train với evaluation. Chỉ nạp checkpoint nội bộ đã đăng ký còn khớp SHA-256. Lưu metric tổng/per-class, điều kiện thật, cảnh báo và lịch sử; mục tiêu để trống mặc định, latency/FPS/RAM là `not_measured` tới khi có benchmark triển khai thật.
 - Champion/Challenger chỉ dùng kết quả fixed validation cùng fingerprint, class schema, cấu hình inference/runtime và phần cứng; xác minh checksum cả hai checkpoint, chặn target chưa đạt và regression vượt tolerance. Mặc định tolerance bằng 0. Promote cần xác nhận rõ của người dùng; lưu quyết định và cho rollback về Champion trước.
 - Ngưỡng dHash là số bit Hamming tối đa khác nhau giữa hai hash cảm nhận 64-bit, không phải số ảnh cần giữ. Mặc định 1 chỉ loại crop gần như trùng (khoảng cách ≤1) so với một trong tối đa 4.096 crop đã giữ gần nhất; ngưỡng cao hơn lọc mạnh hơn. Gallery hiển thị số crop thực tế bị lọc.
+- Project cũ chưa có `settings_version` chỉ migrate ngưỡng dHash mặc định 5 thành 1; giữ nguyên ngưỡng do người dùng chọn sau migration và giữ nguyên `extraction_settings` làm provenance.
 - Chỉ nhận video có chiều rộng ≤1920 và chiều cao ≤1080. Video lớn hơn bị từ chối, không scale; video nhỏ hơn giữ độ phân giải gốc. Giới hạn crop/output tối đa rộng 1920, cao 1080 px.
 - Không thêm tuỳ chọn nhận video 2K/4K hoặc video vượt FHD; `imgsz` training là cấu hình riêng, không thay đổi giới hạn video đầu vào.
 - Benchmark hiện có xử lý batch fixture H.264 FHD tổng cộng 4 giờ nguồn, tạo 14.400 crop trong 519 giây và RSS đỉnh 892 MiB. Đây là dữ liệu tổng hợp lặp lại, không phải soak test trên nhiều video thực hoặc nhiều codec.
@@ -27,5 +28,5 @@
 - Khi thêm module được import từ `engine/frameforge_engine.py`, thêm module đó vào resource list trong `src-tauri/tauri.conf.json` và kiểm tra import/health từ engine trong app bundle.
 - Chạy kiểm thử phù hợp sau thay đổi; không ghi kết quả kiểm thử chưa chạy.
 - Trước khi commit/push, kiểm tra `git status`, nhánh và remote; không đưa cache, media, model weights hoặc credentials vào Git. Chỉ ghi đã publish khi lệnh push thành công.
-- Sau mỗi lượt hoàn thành, cập nhật `README.md`, `AGENTS.md`, `agent.md` và `DEVELOPMENT.md`; đồng bộ tài liệu sản phẩm/thiết kế và changelog khi có thay đổi liên quan.
+- Sau mỗi lượt hoàn thành, cập nhật `README.md`, `AGENTS.md` và `DEVELOPMENT.md`; đồng bộ `PRODUCT.md`, `DESIGN.md` và `CHANGELOG.md` khi có thay đổi liên quan. Dùng `AGENTS.md` làm hướng dẫn agent chuẩn, không tạo file hướng dẫn hoặc task ledger trùng lặp.
 - Không khẳng định hỗ trợ Windows trước khi build/test Windows; DirectML và RX 6600 còn chờ máy Windows.
