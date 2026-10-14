@@ -23,10 +23,16 @@
 | Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký, nằm trong run và khớp checksum ở tệp, record và registry; từ chối `.pt` ngoài hoặc chưa đăng ký. |
 | Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
-| Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Video extraction test một giờ không phải model benchmark. |
+| Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Media batch benchmark FHD 4 giờ là phép đo extraction, không phải model benchmark. |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
 Thứ tự tiếp theo: xác minh evaluation/Champion-Challenger bằng checkpoint nội bộ thật khi có model phù hợp → deployment benchmark/export → resume/recovery training → session recovery UI → Windows validation. Dataset lineage/replay và Champion-Challenger đã qua engine tests; panel so sánh chưa được click-through với model thật do registry local chưa có checkpoint usable. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
+
+## Đo hiệu năng media
+
+Batch tổng hợp 4 giờ nguồn FHD: bốn bản sao của cùng một fixture H.264 dài một giờ, mỗi nguồn 1920×1080 ở 30 fps. Engine giải mã xấp xỉ 432.000 frame, lấy mẫu mỗi giây và ghi 14.400 crop tâm 320×320 JPG. Một tiến trình hoàn tất trong 519,16 giây (27,74× tổng thời lượng nguồn), không có lỗi; output 48.064.436 byte và peak RSS 892,3 MiB. Fixture tạo mất thêm 158,6 giây, không tính vào thời gian extraction. RSS mẫu tăng nhẹ từ khoảng 855 MiB lên peak 892,3 MiB trong suốt batch.
+
+Đây là một lượt chạy khoảng 8,7 phút với nội dung tổng hợp lặp lại và một codec. Kết quả xác nhận batch dài theo thời lượng nguồn; chưa xác nhận soak nhiều giờ theo thời gian thực, video người dùng, nội dung đa dạng hoặc codec khác. Đây là media extraction benchmark, không phải model deployment benchmark.
 
 ## Công cụ và cài đặt
 
@@ -144,11 +150,18 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 81 passed trong 11,34 giây; TypeScript + Vite production build qua Node runtime đóng gói — thành công, 1.922 modules.
 - **Giới hạn:** Số lượng bị lọc phụ thuộc nội dung video và tần suất lấy mẫu; 5 chỉ là ngưỡng giống nhau. Không thêm độ phân giải video cao hơn FHD.
 
+### 2026-10-14 — Batch soak fixture FHD tổng cộng 4 giờ
+
+- **Fixture:** Tạo H.264 1920×1080, 30 fps, dài một giờ; sao chép thành bốn đường dẫn đầu vào và xử lý trong cùng một batch. Crop tâm 320×320, lấy một frame mỗi giây, tắt lựa chọn lọc blur/duplicate; mã vẫn tính điểm blur và dHash cho crop.
+- **Kết quả:** Giải mã ước tính 432.000 frame, xuất đủ 14.400/14.400 crop trong 519,16 giây; 0 nguồn lỗi, 0 lỗi ghi, tốc độ tương đương 27,74× thời lượng video. Tổng JPEG 48.064.436 byte; peak RSS 892,3 MiB. Tạo fixture mất 158,6 giây và không tính trong throughput.
+- **Giới hạn:** Bốn nguồn là bản sao cùng một fixture ít chuyển động và cùng codec. Một batch chạy 8,7 phút chưa xác nhận soak nhiều giờ theo thời gian thực, hành vi trên footage người dùng hoặc hiệu năng codec khác. Không mở rộng giới hạn nguồn: chỉ dùng FHD.
+- **Git:** Ghi kết quả vào commit tài liệu local `docs: record four-hour FHD extraction benchmark`. Push branch `feature/manual-labeling` lên `origin` vẫn bị chặn do thiếu GitHub HTTPS username.
+
 ### 2026-10-14 — Champion/Challenger và xác nhận giới hạn FHD
 
 - **Thay đổi:** Thêm state Champion/Challenger trong training registry; validation mới thành Challenger, test không được promote. So sánh yêu cầu cùng fixed validation/fingerprint, class schema, inference/runtime/hardware; xác minh checksum, target tổng/theo class và regression (mặc định tolerance 0). Promote cần thao tác xác nhận; rollback khôi phục Champion trước và lưu lịch sử. Giữ video nguồn tối đa FHD 1920×1080, từ chối nguồn lớn hơn và không scale; `imgsz` training vẫn độc lập.
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 81 passed trong 10,65 giây; `pnpm build` qua Node runtime đóng gói — thành công (1.922 modules); `cargo fmt --check`, `cargo check` qua Rust toolchain local — thành công; `git diff --check` — thành công.
-- **UI/chưa xác minh:** Mở tab Huấn luyện trong app macOS dev, xác nhận PyTorch 2.14.1, Ultralytics 8.4.177 và MPS sẵn sàng. Registry local có 0 checkpoint nội bộ; do đó chưa click-through đánh giá/promote model thật. Benchmark video hiện có là một lượt trên fixture FHD tổng hợp một giờ (3.600 crop/132,27 giây, RSS lấy mẫu cao nhất 807,3 MiB), chưa phải soak test nhiều giờ.
+- **UI/chưa xác minh:** Mở tab Huấn luyện trong app macOS dev, xác nhận PyTorch 2.14.1, Ultralytics 8.4.177 và MPS sẵn sàng. Registry local có 0 checkpoint nội bộ; do đó chưa click-through đánh giá/promote model thật. Benchmark media tổng hợp mới nhất xử lý batch 4 giờ nguồn trong 519,16 giây; vẫn chưa chạy nhiều giờ trên video thực.
 - **Git:** Commit local (`feat: add champion challenger model promotion`) trên `feature/manual-labeling`. Push lên `origin/feature/manual-labeling` bị chặn: `could not read Username for 'https://github.com': Device not configured`.
 - **Bước tiếp:** Xác minh trên checkpoint nội bộ thật khi có model khả dụng; sau đó triển khai benchmark/export deployment. Không thêm tuỳ chọn video vượt FHD.
 

@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and dataset lineage/replay are committed locally, and Champion/Challenger is now committed locally with the 81-test engine suite, frontend production build, Rust format/check, and `git diff --check` passing. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
+This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and dataset lineage/replay are committed locally, and Champion/Challenger is committed with the 81-test engine suite, frontend production build, Rust format/check, and `git diff --check` passing. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds; see `DEVELOPMENT.md`. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
 
 ## COMPLETED_VERIFIED
 
@@ -8,7 +8,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 - Exact Center Crop uses `floor((frame − crop) / 2)` and displays the source frame with the crop overlay. FHD fixture check confirms 320×320 at `(800, 380)` on 1920×1080.
 - Video input bounds are enforced in the engine at import/preview/extraction. Regression coverage rejects sources exceeding either FHD dimension.
 - dHash filtering uses a 64-bit Hamming-distance threshold (default 5), compares up to 4,096 recently retained crop hashes, and reports the actual filtered-crop count; the UI now clarifies that 5 is not a count.
-- A one-hour synthetic H.264 FHD fixture was extracted at 1 frame/second: 3,600 crops in 132.27 seconds, no extraction errors, sampled peak RSS 807.3 MiB. See `DEVELOPMENT.md` for fixture limits.
+- A batch of four copies of a synthetic one-hour H.264 FHD fixture was extracted at 1 frame/second: 14,400 crops from 4 aggregate source hours in 519.16 seconds, no errors, peak RSS 892.3 MiB. See `DEVELOPMENT.md` for fixture limits.
 - Dataset lineage is implemented: freeze reviewed validation/test sets, verify parent manifest and image/label hashes, preserve fixed images and labels across child versions, and replay historical training groups with `all`, `balanced`, or `new`. Training preflight/queue/run metadata records the lineage.
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
 - The fixed-set evaluator has fake-runtime engine coverage for internal checkpoint trust, manifest/class/split checks, image and label hashes, cross-split leakage, target status/persistence, history, and cancellation; it records overall/per-class Precision/Recall/F1/mAP and evaluation conditions.
@@ -33,7 +33,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 - Session snapshots have Python IPC commands and private storage, but the frontend does not autosave or restore state on launch.
 - Training has dataset preflight, independent `imgsz` jobs, actual metrics/logs/checkpoints, cancellation at epoch boundaries, and fine-tuning. Engine accepts 10,000 as the maximum epoch setting; set patience to 0 to disable early stopping. Actual training on more than 20,000 images for more than 300 epochs per size has not been run. Resume after interruption and richer optimizer/augmentation controls remain absent.
 - Smart Folder Discovery reads external run metadata and lists checkpoints without loading them. External checkpoint architecture/task verification and import are intentionally unavailable.
-- The one-hour media benchmark verifies a single synthetic clip; it does not establish multi-hour soak behavior or performance across codecs/content.
+- The 4-hour aggregate media run used copies of one synthetic clip and lasted 8.7 minutes wall time; it does not establish multi-hour wall-clock soak behavior or performance across real content/codecs.
 
 ## BROKEN
 
@@ -52,7 +52,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub push is currently blocked. Pushing the Champion/Challenger feature commit to `origin/feature/manual-labeling` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
+- GitHub push is currently blocked. Pushing `feature/manual-labeling` with the Champion/Challenger implementation and FHD benchmark documentation to `origin` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
 
 ## Dependencies and next work
 

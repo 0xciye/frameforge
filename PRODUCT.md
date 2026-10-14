@@ -31,7 +31,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
 - Resume training sau khi tiến trình bị gián đoạn.
 - Benchmark latency/FPS/throughput/memory theo runtime triển khai, experiment comparison và export ONNX/TensorRT/OpenVINO.
-- Soak test extraction chạy liên tục nhiều giờ trên video FHD thực; hiện có một lượt benchmark fixture tổng hợp dài một giờ.
+- Soak test extraction trên nhiều giờ video FHD thực vẫn chưa có. Đã chạy một batch tổng cộng bốn giờ nguồn bằng bốn bản sao của cùng fixture tổng hợp một giờ; chưa đại diện nội dung và codec thực.
 - Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch; hiện chỉ xác nhận plumbing bằng fake trainer và smoke nhỏ.
 - Đóng gói Python engine thành sidecar standalone.
 

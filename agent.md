@@ -26,6 +26,7 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 - Smart Folder Discovery scans only inside the user-selected root, skips symlinks, reports bounded progress, and reads YAML/CSV metadata without loading `.pt` files. Reject external YAML references; imported run metadata and checkpoints stay untrusted and must not become fine-tuning choices.
 - Open the app directly into the extraction workspace. Run engine health in the background and keep its status in the toolbar; do not show a blocking welcome/check-engine screen.
 - Accept video only up to FHD 1920×1080; reject larger video during import, preview, and extraction without scaling. Do not add higher-resolution video options. Preserve the source resolution of smaller video. Limit crop/output dimensions to 1920×1080; training `imgsz` is separate from input-video resolution and must not expand video support.
+- Current performance evidence is a synthetic H.264 FHD batch totaling four source hours: 14,400 crops in 519 seconds with 892 MiB peak RSS. It repeats one fixture and does not establish behavior across real footage/codecs.
 - Exact Center Crop previews the accepted source video frame (up to FHD) through `preview_frame`, then draws a solid orange box in that frame's pixel coordinates using `floor((frame − crop) / 2)`. Equal W/H dimensions make a square; changing a preset resizes the box over the same frame. Never replace the displayed frame with a crop output image.
 
 ## Development practice

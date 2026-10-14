@@ -18,6 +18,7 @@
 - Ngưỡng dHash là số bit Hamming tối đa khác nhau giữa hai hash 64-bit, không phải số ảnh cần lọc. Mặc định 5 loại crop có khoảng cách ≤5 so với hash crop đã giữ gần đây; gallery hiển thị số crop thực tế bị lọc.
 - Chỉ nhận video có chiều rộng ≤1920 và chiều cao ≤1080. Video lớn hơn bị từ chối, không scale; video nhỏ hơn giữ độ phân giải gốc. Giới hạn crop/output tối đa rộng 1920, cao 1080 px.
 - Không thêm tuỳ chọn nhận video 2K/4K hoặc video vượt FHD; `imgsz` training là cấu hình riêng, không thay đổi giới hạn video đầu vào.
+- Benchmark hiện có xử lý batch fixture H.264 FHD tổng cộng 4 giờ nguồn, tạo 14.400 crop trong 519 giây và RSS đỉnh 892 MiB. Đây là dữ liệu tổng hợp lặp lại, không phải soak test trên nhiều video thực hoặc nhiều codec.
 - App mở thẳng workspace. Không khôi phục màn chào bắt buộc kiểm tra engine; health check chạy nền và chỉ hiện trạng thái gọn trên toolbar.
 - Giữ cầu nối Tauri an toàn: allowlist command, xác thực đường dẫn/argument và gọi tiến trình trực tiếp; không chạy lệnh qua shell.
 - Giao thức engine là JSON-lines UTF-8: mỗi request và response chiếm một dòng.
