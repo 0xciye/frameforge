@@ -87,7 +87,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Split theo source gom toàn bộ frame/crop cùng video; split theo segment dùng timestamp hoặc frame/FPS. Ảnh có SHA-256 trùng nội dung luôn được gộp cùng nhóm split. Khi số nhóm độc lập ít hơn số split được bật, báo cảnh báo và chỉ gán các nhóm có sẵn.
 - YOLO export tạo thư mục phiên bản mới nguyên tử dưới thư mục người dùng đã chọn, sao chép ảnh gốc và xác minh SHA-256 sau khi sao chép; nhãn dùng `class x_center y_center width height` chuẩn hóa 8 chữ số thập phân. `manifest.json` lưu mapping class, split, fingerprint, hình học crop và provenance nguồn. Export không sửa project/ảnh nguồn.
 - Smart Folder Discovery dùng `yaml.safe_load`, chỉ quét trong root được chọn, bỏ symlink, giới hạn depth/files/metadata/CSV rows, không đọc pixel hoặc nội dung checkpoint. YAML split/data trỏ ra ngoài root bị chặn; ngoại lệ quyền truy cập tạo kết quả partial.
-- Run ngoài chỉ được lưu metadata khi nhấn “Lưu run vào registry”. Registry vẫn đánh dấu checkpoint ngoài chưa tin cậy và không chọn nó làm model fine-tune; xác minh kiến trúc/trust vẫn chưa triển khai.
+- Run ngoài chỉ được lưu metadata khi nhấn “Lưu run vào registry”. Registry đánh dấu checkpoint ngoài chưa tin cậy và không chọn nó làm model fine-tune; muốn dùng phải nhập qua trust flow riêng, kiểm tra task/kiến trúc YOLO11n, class, kích thước và SHA-256 trước/sau sao chép.
 - Python engine được đóng gói cùng nguồn, nhưng runtime và dependency Python vẫn cần cài riêng khi chạy ứng dụng. Standalone sidecar packaging chưa làm.
 
 ## Kiểm chứng macOS
@@ -290,3 +290,8 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 ## Windows handoff
 
 Windows chưa được build hoặc xác nhận. Các việc còn lại: xác nhận native dialogs/paths, đóng gói Python và DLL của OpenCV/ONNX Runtime, build Tauri, kiểm tra Windows 10/11, tích hợp DirectML và benchmark trên RX 6600. Chỉ ghi `TESTED_WINDOWS_CI` hoặc `VERIFIED_WINDOWS_HARDWARE` sau đúng loại kiểm thử đó.
+
+### 2026-10-14 — Rà soát source và chuẩn bị publish
+
+- **Source:** Worktree ban đầu sạch tại `8807a5d`; không có thay đổi source chưa commit cần dọn. Rà danh sách file tracked không thấy cache/build, media/model hoặc mẫu token/private key thông dụng. Lượt này chỉ chỉnh tài liệu hướng dẫn publish và ghi nhận trạng thái.
+- **GitHub:** Đã cài GitHub CLI arm64 chính thức, xác minh SHA-256 và đăng nhập thành công. Nhánh `feature/manual-labeling` đã push lên `origin` và tracking đã cấu hình. Lúc bắt đầu publish, repo chưa có refs; `main` local là tổ tiên của feature branch và được dùng làm base PR.

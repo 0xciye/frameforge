@@ -61,6 +61,16 @@ pnpm tauri build
 - `docs/design/` — hợp đồng giao diện cho workspace trích xuất
 - `PRODUCT.md`, `DESIGN.md`, `DEVELOPMENT.md` — phạm vi, hướng thiết kế và trạng thái phát triển
 
+## Đẩy nhánh lên GitHub
+
+Trước khi publish, kiểm tra `git status` và remote. Đăng nhập GitHub CLI bằng `gh auth login`, cấu hình Git dùng credential đó bằng `gh auth setup-git`, rồi đẩy nhánh làm việc:
+
+```sh
+git push --set-upstream origin feature/manual-labeling
+```
+
+Chỉ xem là đã publish khi lệnh push hoàn tất thành công.
+
 ## Trạng thái
 
 Đã triển khai media preview/trích xuất, Exact Center Crop, gán nhãn, dataset validation/grouped split/YOLO export với negative sampling, lineage/replay, Smart Folder Discovery, YOLO11n training, inference, nhập checkpoint YOLO11n có xác nhận tin cậy, fixed-set evaluation và Champion/Challenger. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale hay thêm lựa chọn độ phân giải cao hơn. Video nhỏ hơn giữ nguyên độ phân giải. Kích thước `imgsz` trong training là cấu hình riêng.

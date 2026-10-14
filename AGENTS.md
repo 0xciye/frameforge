@@ -26,5 +26,6 @@
 - Giao thức engine là JSON-lines UTF-8: mỗi request và response chiếm một dòng.
 - Khi thêm module được import từ `engine/frameforge_engine.py`, thêm module đó vào resource list trong `src-tauri/tauri.conf.json` và kiểm tra import/health từ engine trong app bundle.
 - Chạy kiểm thử phù hợp sau thay đổi; không ghi kết quả kiểm thử chưa chạy.
+- Trước khi commit/push, kiểm tra `git status`, nhánh và remote; không đưa cache, media, model weights hoặc credentials vào Git. Chỉ ghi đã publish khi lệnh push thành công.
 - Sau mỗi lượt hoàn thành, cập nhật `README.md`, `AGENTS.md`, `agent.md` và `DEVELOPMENT.md`; đồng bộ tài liệu sản phẩm/thiết kế và changelog khi có thay đổi liên quan.
 - Không khẳng định hỗ trợ Windows trước khi build/test Windows; DirectML và RX 6600 còn chờ máy Windows.

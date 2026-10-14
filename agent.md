@@ -33,4 +33,4 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 
 ## Development practice
 
-Keep changes small and aligned with the roadmap. After each completed work turn, update `README.md`, `AGENTS.md`, `agent.md` and `DEVELOPMENT.md`; also update product/design docs and `CHANGELOG.md` when the change affects them. Report only checks that actually ran. Never claim Windows, DirectML or RX 6600 support until validated on Windows hardware; current Windows work remains pending.
+Keep changes small and aligned with the roadmap. Before committing or pushing, inspect the worktree, branch and remote; keep caches, media, model weights and credentials out of Git. Report a push only after it succeeds. After each completed work turn, update `README.md`, `AGENTS.md`, `agent.md` and `DEVELOPMENT.md`; also update product/design docs and `CHANGELOG.md` when the change affects them. Report only checks that actually ran. Never claim Windows, DirectML or RX 6600 support until validated on Windows hardware; current Windows work remains pending.

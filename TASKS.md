@@ -22,7 +22,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dat
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
 - Earlier verification: 68 engine tests, TypeScript/Vite production build, Rust format/check; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
 - A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.
-- Commit `f6ad23c` adds project-wide inference, reviewed negative candidates and large-dataset training plumbing; it is local and unpushed. The inherited base includes commit `85dc842` for FHD/training/discovery and checkpoint-trust recovery.
+- The `feature/manual-labeling` branch is pushed and tracks `origin`. GitHub authentication is set up locally; before the push, the remote repository had no refs, so local `main` is the ancestor used as the pull request base.
 
 ## IMPLEMENTED_UNVERIFIED
 
@@ -56,7 +56,6 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dat
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub remote setup/push is still pending. `origin` points to `https://github.com/0xciye/frameforge.git`; HTTPS push previously failed because credentials were unavailable, and `gh` is not installed in this workspace. The unauthenticated GitHub page returns 404, which cannot distinguish a private repository from one that has not been created. Current changes, including session recovery, are committed locally; retry remote creation/push when GitHub authentication is available.
 
 ## Dependencies and next work
 
