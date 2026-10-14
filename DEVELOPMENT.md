@@ -150,6 +150,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Thay đổi:** Thêm import `.pt` cho YOLO11n detection sau xác nhận cảnh báo mã thực thi. Engine kiểm tra kích thước không quá 2 GiB, task, kiến trúc/scale, class names và SHA-256 trước/sau khi nạp/copy; lưu file trong thư mục riêng, hạn chế quyền, giữ tên/hash/đường dẫn nguồn và đăng ký vào model registry. UI Gán nhãn hiển thị tên checkpoint nhập; Huấn luyện cho phép fine-tune khi class schema trùng dataset. Run tìm thấy bằng Smart Folder Discovery vẫn không được nạp tự động.
 - **Kiểm tra:** `pnpm test:engine` — 91 passed; `pnpm build` — thành công; `cargo fmt --check` — thành công; `cargo check` — thành công; `git diff --check` — sạch.
 - **Giới hạn:** Importer/fine-tune integration dùng fake Ultralytics runtime; chưa có tệp YOLO11n ngoài phù hợp để click-through inference hoặc training model thật. UI chỉ được kiểm tra bằng TypeScript/Vite build trong lượt này. Giới hạn video giữ nguyên ở FHD 1920×1080; không thêm tùy chọn video độ phân giải cao.
+- **Git:** Commit `cefe0ca` (`feat(training): import trusted YOLO11n checkpoints`) đã lưu trên `feature/manual-labeling`. Push tới `origin/feature/manual-labeling` tiếp tục bị chặn do thiếu HTTPS username/credentials (`could not read Username for 'https://github.com': Device not configured`).
 - **Bước tiếp:** Dùng checkpoint YOLO11n thật đã nhập hoặc train để kiểm tra luồng inference/review/export/evaluation trong app.
 
 ### 2026-10-14 — Bỏ qua object vượt biên crop trong inference
