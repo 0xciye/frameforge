@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
-import { Activity, AlertCircle, Check, ChevronDown, CircleHelp, Cpu, Database, FolderOpen, LoaderCircle, Play, Plus, RefreshCw, Square, Zap } from "lucide-react";
+import { Activity, AlertCircle, Check, ChevronDown, CircleHelp, Cpu, Crown, Database, FolderOpen, LoaderCircle, Play, Plus, RefreshCw, RotateCcw, Square, Zap } from "lucide-react";
 import "./TrainingWorkspace.css";
 
 type TrainingDevice = "auto" | "cpu" | "mps" | "cuda";
@@ -53,12 +53,34 @@ type TrainProgress = {
 };
 type MetricPoint = { key: string; epoch: number; loss: number | null; map50: number | null };
 type EvaluationRecord = {
-  evaluation_id: string; run_id: string; dataset_id: string; dataset_version: number; split: "val" | "test";
-  fixed_set_id: string; image_count: number; instance_count: number; warnings: string[];
+  evaluation_id: string; created_at?: string; run_id: string; dataset_id: string; dataset_version: number; split: "val" | "test";
+  fixed_set_id: string; evaluation_fingerprint?: string; class_names?: string[]; class_instance_counts?: Record<string, number>;
+  checkpoint_path?: string; checkpoint_sha256?: string; image_count: number; instance_count: number; warnings: string[];
   metrics: Record<string, number | null>;
   per_class: Record<string, Record<string, number | null>>;
   target_status: { overall: Record<string, string | null>; per_class: Record<string, Record<string, string | null>> };
-  conditions: { imgsz: number; confidence_threshold: number; nms_iou_threshold: number; batch: number; device_actual: string; framework_version: string | null };
+  conditions: {
+    imgsz: number; confidence_threshold: number; nms_iou_threshold: number; batch: number;
+    device_actual: string; framework_version: string | null;
+  };
+};
+type PromotionMetric = { champion: number | null; challenger: number | null; delta: number | null; regressed: boolean; ground_truth_instances?: number };
+type PromotionComparison = {
+  created_at: string; champion_evaluation_id: string | null; challenger_evaluation_id: string;
+  comparable: boolean; can_promote: boolean;
+  recommendation: "incomparable" | "retain_champion" | "initial_champion" | "promote_challenger";
+  max_regression: number; overall: Record<string, PromotionMetric>;
+  per_class: Record<string, Record<string, PromotionMetric>>;
+  blockers: string[]; regressions: string[]; target_failures: string[]; warnings: string[];
+};
+type ModelDecision = {
+  decision_id: number; action: "compared" | "promoted" | "rolled_back"; created_at: string;
+  challenger_evaluation_id?: string | null; recommendation?: PromotionComparison["recommendation"];
+  champion_after_evaluation_id?: string | null; reason?: string;
+};
+type ModelPromotionState = {
+  champion: EvaluationRecord | null; challenger: EvaluationRecord | null;
+  history: ModelDecision[]; can_rollback: boolean;
 };
 type EvaluationProgress = { stage: string; checked_images?: number; total_images?: number; batch?: number; total_batches?: number };
 type EvaluationTargetResponse = { targets?: Record<string, number>; per_class?: Record<string, Record<string, number>> };
@@ -82,6 +104,20 @@ function targetStatusLabel(status?: string | null) {
   if (status === "incompatible_comparison") return "Điều kiện không tương thích";
   if (status === "not_measured") return "Chưa đo";
   return "Chưa đặt";
+}
+
+function promotionRecommendationLabel(recommendation?: PromotionComparison["recommendation"]) {
+  if (recommendation === "initial_champion") return "Đủ điều kiện làm Champion đầu tiên";
+  if (recommendation === "promote_challenger") return "Đủ điều kiện promote thủ công";
+  if (recommendation === "retain_champion") return "Giữ Champion hiện tại";
+  if (recommendation === "incomparable") return "Không đủ điều kiện so sánh";
+  return "Chưa so sánh";
+}
+
+function modelDecisionLabel(action: ModelDecision["action"]) {
+  if (action === "promoted") return "Đã promote";
+  if (action === "rolled_back") return "Đã rollback";
+  return "Đã so sánh";
 }
 
 function requestId() {
@@ -180,6 +216,10 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
   const [evaluation, setEvaluation] = useState<EvaluationRecord | null>(null);
   const [evaluationHistory, setEvaluationHistory] = useState<EvaluationRecord[]>([]);
   const [evaluationMessage, setEvaluationMessage] = useState<string | null>(null);
+  const [promotionState, setPromotionState] = useState<ModelPromotionState | null>(null);
+  const [promotionComparison, setPromotionComparison] = useState<PromotionComparison | null>(null);
+  const [promotionTolerance, setPromotionTolerance] = useState("0");
+  const [promotionBusy, setPromotionBusy] = useState(false);
   const activeRequestId = useRef<string | null>(null);
   const evaluationRequestId = useRef<string | null>(null);
 
@@ -222,7 +262,8 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
       engineRequest<RunList>("list_training_runs"),
       engineRequest<EvaluationTargetResponse>("get_evaluation_targets"),
       engineRequest<{ evaluations: EvaluationRecord[] }>("list_model_evaluations"),
-    ]).then(([status, registry, savedTargets, pastEvaluations]) => {
+      engineRequest<ModelPromotionState>("get_model_promotion_state"),
+    ]).then(([status, registry, savedTargets, pastEvaluations, savedPromotionState]) => {
       if (!active) return;
       setCapabilities(status);
       setRuns(registry.runs);
@@ -232,6 +273,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
       setTargetInputs(Object.fromEntries(Object.entries(targets).map(([key, value]) => [key, String(value)])));
       setClassTargetInputs(Object.fromEntries(Object.entries(perClass).map(([name, values]) => [name, Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)]))])));
       setEvaluationHistory(pastEvaluations.evaluations ?? []);
+      setPromotionState(savedPromotionState);
       setSettings({
         epochs: status.recommendation?.epochs ?? 100,
         batch: status.recommendation?.batch ?? 8,
@@ -374,6 +416,12 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
       });
       setEvaluation(result);
       setEvaluationHistory((current) => [result, ...current.filter((entry) => entry.evaluation_id !== result.evaluation_id)].slice(0, 100));
+      if (result.split === "val") {
+        setPromotionState((current) => current
+          ? { ...current, challenger: result }
+          : { champion: null, challenger: result, history: [], can_rollback: false });
+        setPromotionComparison(null);
+      }
       setEvaluationMessage("Đã hoàn tất đánh giá và lưu điều kiện đo.");
     } catch (reason) {
       if (String(reason).includes("Đã hủy đánh giá")) setEvaluationMessage("Đã hủy đánh giá; không lưu kết quả dở dang.");
@@ -394,6 +442,67 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
       else setOperationError("Tác vụ đánh giá đã kết thúc trước khi nhận yêu cầu hủy.");
     } catch (reason) {
       setOperationError(String(reason));
+    }
+  }
+
+  async function compareModelChallenger() {
+    setPromotionBusy(true);
+    setOperationError(null);
+    setPromotionComparison(null);
+    try {
+      const comparison = await engineRequest<PromotionComparison>("compare_model_challenger", {
+        max_regression: Number(promotionTolerance),
+      });
+      const state = await engineRequest<ModelPromotionState>("get_model_promotion_state");
+      setPromotionComparison(comparison);
+      setPromotionState(state);
+    } catch (reason) {
+      setOperationError(String(reason));
+    } finally {
+      setPromotionBusy(false);
+    }
+  }
+
+  async function promoteModelChallenger() {
+    if (!promotionComparison?.can_promote) return;
+    const accepted = await confirm(
+      "Promote Challenger thành Champion? Model hiện tại sẽ được giữ trong lịch sử để rollback.",
+      { title: "Promote model", kind: "warning" },
+    );
+    if (!accepted) return;
+    setPromotionBusy(true);
+    setOperationError(null);
+    try {
+      const state = await engineRequest<ModelPromotionState>("promote_model_challenger", {
+        max_regression: Number(promotionTolerance),
+      });
+      setPromotionState(state);
+      setPromotionComparison(null);
+      setEvaluationMessage("Đã ghi nhận quyết định promote cùng lịch sử so sánh.");
+    } catch (reason) {
+      setOperationError(String(reason));
+    } finally {
+      setPromotionBusy(false);
+    }
+  }
+
+  async function rollbackModelPromotion() {
+    const accepted = await confirm(
+      "Khôi phục Champion trước đó? Model hiện tại sẽ được giữ làm Challenger.",
+      { title: "Rollback model", kind: "warning" },
+    );
+    if (!accepted) return;
+    setPromotionBusy(true);
+    setOperationError(null);
+    try {
+      const state = await engineRequest<ModelPromotionState>("rollback_model_promotion");
+      setPromotionState(state);
+      setPromotionComparison(null);
+      setEvaluationMessage("Đã khôi phục Champion trước và lưu lịch sử rollback.");
+    } catch (reason) {
+      setOperationError(String(reason));
+    } finally {
+      setPromotionBusy(false);
     }
   }
 
@@ -740,6 +849,88 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
               {evaluation.warnings.map((warning) => <p className="train-warning" key={warning}><CircleHelp size={12} />{warning}</p>)}
             </>}
             {evaluationHistory.length > 0 && <div className="train-eval-history"><strong>Lịch sử đánh giá gần đây</strong>{evaluationHistory.filter((item) => item.fixed_set_id === evaluation?.fixed_set_id || item.dataset_id === dataset?.dataset_id).slice(0, 5).map((item) => <span key={item.evaluation_id}>{item.split} · {item.run_id.slice(0, 8)} · mAP50 {formatMetric(item.metrics.map50)} · {item.image_count} ảnh</span>)}</div>}
+            <section className="train-promotion-section" aria-label="So sánh Champion và Challenger">
+              <div className="train-promotion-heading"><div><Crown size={14} /><h3>Champion / Challenger</h3></div>
+                <button className="train-secondary-button" type="button" onClick={() => void rollbackModelPromotion()} disabled={!promotionState?.can_rollback || promotionBusy}>
+                  <RotateCcw size={12} /> Rollback
+                </button>
+              </div>
+              <div className="train-promotion-roles">
+                <div className="train-promotion-role">
+                  <strong>Champion hiện tại</strong>
+                  {promotionState?.champion
+                    ? <span>Run {promotionState.champion.run_id.slice(0, 8)} · mAP50 {formatMetric(promotionState.champion.metrics.map50)} · imgsz {promotionState.champion.conditions.imgsz}</span>
+                    : <span>Chưa có Champion. Đánh giá fixed validation để chọn model đầu tiên.</span>}
+                </div>
+                <div className="train-promotion-role">
+                  <strong>Challenger đang chờ</strong>
+                  {promotionState?.challenger
+                    ? <span>Run {promotionState.challenger.run_id.slice(0, 8)} · mAP50 {formatMetric(promotionState.challenger.metrics.map50)} · imgsz {promotionState.challenger.conditions.imgsz}</span>
+                    : <span>Chạy đánh giá trên fixed validation để tạo Challenger.</span>}
+                </div>
+              </div>
+              <div className="train-promotion-controls">
+                <label className="train-field">Mức giảm metric tối đa
+                  <input type="number" min="0" max="1" step="0.001" value={promotionTolerance} onChange={(event) => {
+                    setPromotionTolerance(event.target.value);
+                    setPromotionComparison(null);
+                  }} disabled={promotionBusy} aria-label="Mức regression tối đa từ 0 đến 1" />
+                </label>
+                <p>0.01 tương đương 1 điểm phần trăm. Chỉ so sánh cùng fixed validation, imgsz, confidence/NMS, batch, runtime và thiết bị. Target đang đặt phải đạt; promote cần xác nhận riêng.</p>
+                <button className="train-secondary-button" type="button" onClick={() => void compareModelChallenger()} disabled={!promotionState?.challenger || promotionBusy}>
+                  {promotionBusy ? <LoaderCircle className="spin" size={12} /> : <Activity size={12} />} So sánh
+                </button>
+                {promotionComparison?.can_promote && <button className="train-primary-button" type="button" onClick={() => void promoteModelChallenger()} disabled={promotionBusy}>
+                  <Crown size={12} /> Promote Challenger
+                </button>}
+              </div>
+              {promotionComparison && <div className={"train-promotion-result " + (promotionComparison.can_promote ? "eligible" : "blocked")} aria-live="polite">
+                <strong>{promotionRecommendationLabel(promotionComparison.recommendation)}</strong>
+                <p>{promotionComparison.champion_evaluation_id
+                  ? "Tolerance regression: " + formatMetric(promotionComparison.max_regression) + " · so sánh " + promotionComparison.challenger_evaluation_id.slice(0, 8) + " với Champion " + promotionComparison.champion_evaluation_id.slice(0, 8) + "."
+                  : "Challenger là mốc đầu tiên; chưa có Champion để tính delta."}</p>
+                <div className="train-promotion-table-wrap">
+                  <table className="train-promotion-table">
+                    <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Chênh lệch</th></tr></thead>
+                    <tbody>{QUALITY_TARGETS.map((key) => {
+                      const metric = promotionComparison.overall[key];
+                      return <tr key={key}>
+                        <th scope="row">{QUALITY_LABELS[key]}</th>
+                        <td>{formatMetric(metric?.champion)}</td>
+                        <td>{formatMetric(metric?.challenger)}</td>
+                        <td className={metric?.regressed ? "regressed" : ""}>{metric?.delta == null
+                          ? promotionComparison.champion_evaluation_id ? "—" : "Mốc đầu"
+                          : <>{metric.delta > 0 ? "+" : ""}{formatMetric(metric.delta)}</>}</td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>
+                {Object.keys(promotionComparison.per_class).length > 0 && <details className="train-promotion-classes">
+                  <summary>Chi tiết theo class</summary>
+                  {Object.entries(promotionComparison.per_class).map(([className, metrics]) => <div className="train-promotion-class" key={className}>
+                    <strong>{className} · {metrics.precision?.ground_truth_instances ?? 0} box thật</strong>
+                    <div>{(["precision", "recall", "map50", "map50_95"] as const).map((key) => {
+                      const metric = metrics[key];
+                      return <span className={metric?.regressed ? "regressed" : ""} key={key}>
+                        {QUALITY_LABELS[key]}: {formatMetric(metric?.champion)} → {formatMetric(metric?.challenger)}
+                        {metric?.delta == null ? "" : " (" + (metric.delta > 0 ? "+" : "") + formatMetric(metric.delta) + ")"}
+                      </span>;
+                    })}</div>
+                  </div>)}
+                </details>}
+                {promotionComparison.blockers.length > 0 && <ul className="train-promotion-blockers" aria-label="Lý do chưa thể promote">
+                  {promotionComparison.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+                </ul>}
+                {promotionComparison.warnings.map((warning) => <p className="train-eval-note" key={warning}><CircleHelp size={11} /> {warning}</p>)}
+                <p className="train-eval-note">FrameForge không tự promote. Bản cũ luôn nằm trong registry và có thể rollback.</p>
+              </div>}
+              {promotionState?.history.length ? <div className="train-promotion-history">
+                <strong>Lịch sử so sánh và promote</strong>
+                {promotionState.history.slice(0, 5).map((decision) => <span key={decision.decision_id}>
+                  <b>{modelDecisionLabel(decision.action)}</b> · {decision.challenger_evaluation_id?.slice(0, 8) ?? "—"} · {new Date(decision.created_at).toLocaleString()}
+                </span>)}
+              </div> : null}
+            </section>
           </section>
 
           {operationError && <div className="train-operation-error" role="alert"><AlertCircle size={14} /><span>{operationError}</span></div>}

@@ -1217,7 +1217,10 @@ function App() {
               </div>
               <label className="field-label max-frames-field">Giới hạn tổng frame <span>0 = không giới hạn</span><input type="number" min="0" step="1" value={options.max_frames} onChange={(event) => updateOptions({ max_frames: Number(event.target.value) })} /></label>
               <SettingToggle label="Lọc frame gần giống" checked={options.filter_duplicates} onChange={(checked) => updateOptions({ filter_duplicates: checked })} />
-              {options.filter_duplicates && <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />}
+              {options.filter_duplicates && <>
+                <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />
+                <p className="setting-note">{options.duplicate_threshold} bit là độ chênh tối đa giữa hai hash 64-bit, không phải số ảnh. Crop lệch ≤ {options.duplicate_threshold} bit so với crop đã giữ gần đây sẽ bị bỏ; số crop bị lọc hiện trong tổng kết sau khi trích.</p>
+              </>}
               <SettingToggle label="Lọc ảnh mờ" checked={options.filter_blurry} onChange={(checked) => updateOptions({ filter_blurry: checked })} />
               {options.filter_blurry && <ThresholdControl label="Độ nét Laplacian" value={options.blur_threshold} min={0} max={250} suffix="" onChange={(value) => updateOptions({ blur_threshold: value })} />}
               <p className="setting-note">Ngưỡng độ nét phụ thuộc độ phân giải và nội dung video.</p>
@@ -1297,7 +1300,7 @@ function App() {
             <div><h2>Frame vừa trích</h2><span>{project.images.length} trong dự án{fileListTruncated ? " · đang hiển thị tối đa 500 ảnh gần nhất" : ""}</span></div>
             <div className="gallery-summary">
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
-              {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop trùng</span>}
+              {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop gần giống đã lọc</span>}
               {progress && progress.blurry_crops > 0 && <span>{progress.blurry_crops} crop mờ</span>}
               {progress && <span>{progress.elapsed_seconds}s</span>}
             </div>

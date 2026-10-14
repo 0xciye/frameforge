@@ -13,6 +13,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 from frameforge import training
+import frameforge_engine
 
 
 def _make_fixed_dataset(root: Path, *, leakage: bool = False) -> Path:
@@ -60,14 +61,14 @@ def _make_fixed_dataset(root: Path, *, leakage: bool = False) -> Path:
     return data_yaml
 
 
-def _register_checkpoint(root: Path, class_names: list[str] | None = None) -> Path:
-    run_dir = root / "run-1"
+def _register_checkpoint(root: Path, class_names: list[str] | None = None, run_id: str = "run-1") -> Path:
+    run_dir = root / run_id
     weights = run_dir / "weights"
     weights.mkdir(parents=True)
     checkpoint = weights / "best.pt"
     checkpoint.write_bytes(b"internal checkpoint")
     record = {
-        "run_id": "run-1", "queue_id": "queue-1", "created_at": "2026-10-14T00:00:00+00:00",
+        "run_id": run_id, "queue_id": "queue-" + run_id, "created_at": "2026-10-14T00:00:00+00:00",
         "status": "completed", "source": "frameforge_training", "checkpoint_trusted": True,
         "model": "YOLO11n", "architecture": "yolo11n", "task": "detect",
         "requested_imgsz": 64, "effective_imgsz": 64, "output_dir": str(run_dir),
@@ -83,6 +84,7 @@ def _fake_evaluator(
     *,
     class_names: list[str] | None = None,
     metric_overrides: dict[str, float] | None = None,
+    class_metric_overrides: dict[str, float] | None = None,
 ):
     class FakeModel:
         task = "detect"
@@ -104,12 +106,14 @@ def _fake_evaluator(
                 "metrics/mAP50(B)": 0.7, "metrics/mAP50-95(B)": 0.45,
             }
             values.update(metric_overrides or {})
+            summary = {
+                "Class": "head", "Box-P": 0.8, "Box-R": 0.6, "Box-F1": 0.68571,
+                "mAP50": 0.7, "mAP50-95": 0.45,
+            }
+            summary.update(class_metric_overrides or {})
             return SimpleNamespace(
                 results_dict=values,
-                summary=lambda: [{
-                    "Class": "head", "Box-P": 0.8, "Box-R": 0.6, "Box-F1": 0.68571,
-                    "mAP50": 0.7, "mAP50-95": 0.45,
-                }],
+                summary=lambda: [summary],
             )
 
     monkeypatch.setattr(training, "_load_yolo_model", lambda _path: FakeModel())
@@ -217,3 +221,169 @@ def test_fixed_set_evaluation_cancellation_does_not_persist_partial_result(tmp_p
             "checkpoint": str(checkpoint), "data_yaml": str(data_yaml), "imgsz": 64, "cancel_file": str(cancel_file),
         })
     assert training.list_model_evaluations("run-1")["evaluations"] == []
+
+
+def _run_fake_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    data_yaml: Path,
+    run_id: str,
+    *,
+    metric_overrides: dict[str, float] | None = None,
+    class_metric_overrides: dict[str, float] | None = None,
+    split: str = "val",
+    imgsz: int = 64,
+):
+    checkpoint = _register_checkpoint(tmp_path / "runs", run_id=run_id)
+    _fake_evaluator(
+        monkeypatch,
+        metric_overrides=metric_overrides,
+        class_metric_overrides=class_metric_overrides,
+    )
+    return training.evaluate_yolo_checkpoint({
+        "checkpoint": str(checkpoint), "data_yaml": str(data_yaml), "split": split,
+        "imgsz": imgsz, "confidence_threshold": 0.01, "iou_threshold": 0.65, "batch": 2, "device": "cpu",
+    })
+
+
+def test_champion_challenger_promote_and_rollback_are_explicit_and_persistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = _make_fixed_dataset(tmp_path / "dataset")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    champion_eval = _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-1")
+
+    state = training.get_model_promotion_state()
+    assert state["champion"] is None
+    assert state["challenger"]["evaluation_id"] == champion_eval["evaluation_id"]
+    assert state["can_rollback"] is False
+
+    comparison = training.compare_model_challenger({"max_regression": 0})
+    assert comparison["can_promote"] is True
+    assert comparison["recommendation"] == "initial_champion"
+    state = training.promote_model_challenger({"max_regression": 0})
+    assert state["champion"]["evaluation_id"] == champion_eval["evaluation_id"]
+    assert state["challenger"] is None
+    assert state["history"][0]["action"] == "promoted"
+
+    next_eval = _run_fake_evaluation(
+        tmp_path, monkeypatch, data_yaml, "run-2",
+        metric_overrides={
+            "metrics/precision(B)": 0.82, "metrics/recall(B)": 0.65,
+            "metrics/mAP50(B)": 0.73, "metrics/mAP50-95(B)": 0.48,
+        },
+        class_metric_overrides={
+            "Box-P": 0.82, "Box-R": 0.65, "Box-F1": 0.725,
+            "mAP50": 0.73, "mAP50-95": 0.48,
+        },
+    )
+    comparison = training.compare_model_challenger({"max_regression": 0})
+    assert comparison["comparable"] is True
+    assert comparison["can_promote"] is True
+    assert comparison["overall"]["map50"]["delta"] == pytest.approx(0.03)
+    state = training.promote_model_challenger({"max_regression": 0})
+    assert state["champion"]["evaluation_id"] == next_eval["evaluation_id"]
+    assert state["can_rollback"] is True
+
+    restored = training.rollback_model_promotion()
+    assert restored["champion"]["evaluation_id"] == champion_eval["evaluation_id"]
+    assert restored["challenger"]["evaluation_id"] == next_eval["evaluation_id"]
+    assert restored["can_rollback"] is False
+    assert restored["history"][0]["action"] == "rolled_back"
+
+
+def test_challenger_cannot_promote_when_quality_regresses_or_targets_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = _make_fixed_dataset(tmp_path / "dataset")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    champion_eval = _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-1")
+    training.promote_model_challenger({})
+    training.save_evaluation_targets({
+        "data_yaml": str(data_yaml), "targets": {"precision": 0.9}, "per_class": {},
+    })
+    challenger_eval = _run_fake_evaluation(
+        tmp_path, monkeypatch, data_yaml, "run-2",
+        metric_overrides={
+            "metrics/precision(B)": 0.8, "metrics/recall(B)": 0.3,
+            "metrics/mAP50(B)": 0.65, "metrics/mAP50-95(B)": 0.4,
+        },
+        class_metric_overrides={
+            "Box-P": 0.8, "Box-R": 0.3, "Box-F1": 0.436,
+            "mAP50": 0.65, "mAP50-95": 0.4,
+        },
+    )
+    comparison = training.compare_model_challenger({"max_regression": 0})
+    assert comparison["can_promote"] is False
+    assert comparison["recommendation"] == "retain_champion"
+    assert any("recall" in reason for reason in comparison["regressions"])
+    assert any("precision" in reason for reason in comparison["target_failures"])
+    with pytest.raises(ValueError, match="Chưa thể promote"):
+        training.promote_model_challenger({"max_regression": 0})
+    state = training.get_model_promotion_state()
+    assert state["champion"]["evaluation_id"] == champion_eval["evaluation_id"]
+    assert state["challenger"]["evaluation_id"] == challenger_eval["evaluation_id"]
+
+
+def test_challenger_comparison_rejects_different_fixed_conditions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = _make_fixed_dataset(tmp_path / "dataset")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    champion_eval = _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-1")
+    training.promote_model_challenger({})
+    _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-2", imgsz=128)
+
+    comparison = training.compare_model_challenger({})
+    assert comparison["comparable"] is False
+    assert comparison["can_promote"] is False
+    assert any("imgsz" in reason for reason in comparison["blockers"])
+    assert training.get_model_promotion_state()["champion"]["evaluation_id"] == champion_eval["evaluation_id"]
+
+
+def test_changed_checkpoint_blocks_promotion_and_rollback_preserves_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = _make_fixed_dataset(tmp_path / "dataset")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    champion_eval = _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-1")
+    checkpoint = Path(champion_eval["checkpoint_path"])
+    checkpoint.write_bytes(checkpoint.read_bytes() + b"changed")
+
+    comparison = training.compare_model_challenger({})
+    assert comparison["can_promote"] is False
+    assert any("checksum" in reason for reason in comparison["blockers"])
+    with pytest.raises(ValueError, match="Chưa thể promote"):
+        training.promote_model_challenger({})
+    assert training.get_model_promotion_state()["champion"] is None
+
+
+def test_existing_validation_history_is_migrated_to_pending_challenger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = _make_fixed_dataset(tmp_path / "dataset")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    evaluation = _run_fake_evaluation(tmp_path, monkeypatch, data_yaml, "run-1")
+    connection = training._registry_connection()
+    try:
+        connection.execute("DELETE FROM model_roles WHERE role_id='default'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    state = training.get_model_promotion_state()
+
+    assert state["challenger"]["evaluation_id"] == evaluation["evaluation_id"]
+
+
+def test_engine_routes_model_promotion_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+
+    response = frameforge_engine.handle_request({
+        "id": "promotion-state", "command": "get_model_promotion_state", "arguments": {},
+    })
+
+    assert response["id"] == "promotion-state"
+    assert response["ok"] is True
+    assert response["data"]["champion"] is None
+    assert response["data"]["challenger"] is None

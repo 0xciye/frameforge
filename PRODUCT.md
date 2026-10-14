@@ -8,7 +8,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 
 - Workspace desktop Tauri 2, React và TypeScript bằng tiếng Việt.
 - Nhập video/ảnh bằng dialog, kéo thả hoặc quét thư mục; đọc metadata và preview frame thật. Chỉ nhận video tối đa 1920×1080; video lớn hơn bị từ chối thay vì scale.
-- Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian.
+- Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian. Ngưỡng dHash là số bit khác nhau tối đa trên hash 64-bit, không phải số lượng ảnh; gallery báo số crop gần giống thực tế đã bị lọc.
 - Exact Center Crop cắt đúng vùng W×H từ tâm frame nguồn, không resize/padding vùng crop; preview phủ overlay đúng pixel. Video lớn hơn 1920×1080 bị từ chối. Full-frame letterbox và grid vẫn khả dụng; kích thước crop/output tối đa 1920×1080.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
 - Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema v1/v2/v3 lên v4.
@@ -22,15 +22,16 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Dataset có thể đóng băng validation/test khi toàn bộ ảnh đã review. Phiên bản con xác minh manifest/checksum parent, giữ nguyên ảnh và labels của hai split cố định, chia dữ liệu mới theo nhóm và hỗ trợ replay train `all`, `balanced` hoặc `new`; manifest và training metadata ghi lineage.
 - Training preflight xử lý dataset lớn theo luồng, giữ `cache=False`, hỗ trợ hơn 20.000 ảnh và cấu hình hơn 300 epoch cho mỗi imgsz. Fixture tổng hợp 20.003 ảnh cùng hai job 301 epoch đã được kiểm tra bằng fake trainer; đây là kiểm tra cấu hình, không phải benchmark hoặc train thật ở quy mô đó. Patience = 0 tắt early stopping.
 - Đánh giá YOLO11n chỉ trên fixed validation/test của manifest FrameForge và checkpoint nội bộ có SHA-256 hợp lệ. Lưu metric tổng/per-class, checksum, dataset/split, cấu hình inference, thiết bị/framework, cảnh báo về độ tin cậy và lịch sử. Mục tiêu để trống mặc định, hỗ trợ theo class; latency, FPS, throughput và memory hiển thị chưa đo tới khi có benchmark triển khai.
+- Champion/Challenger dùng validation cố định để so sánh cùng tập và điều kiện; xác minh checksum, target chất lượng và regression tổng/per-class. Promote do người dùng xác nhận, lưu lịch sử và hỗ trợ rollback. Engine đã qua fake-runtime tests; kiểm tra bằng checkpoint thật trên máy này còn thiếu.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài giữ trạng thái chưa xác minh và không được đưa vào lựa chọn fine-tune.
 
 ## Chưa khả dụng
 
 - Xác minh an toàn/khả năng tương thích và nạp checkpoint `.pt` từ nguồn ngoài.
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
-- So sánh Champion/Challenger, regression policy, quyết định promote có lưu lịch sử và rollback.
 - Resume training sau khi tiến trình bị gián đoạn.
 - Benchmark latency/FPS/throughput/memory theo runtime triển khai, experiment comparison và export ONNX/TensorRT/OpenVINO.
+- Soak test extraction chạy liên tục nhiều giờ trên video FHD thực; hiện có một lượt benchmark fixture tổng hợp dài một giờ.
 - Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch; hiện chỉ xác nhận plumbing bằng fake trainer và smoke nhỏ.
 - Đóng gói Python engine thành sidecar standalone.
 

@@ -27,6 +27,12 @@ import yaml
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 DEFAULT_MODEL = "yolo11n.pt"
 MAX_IMAGE_SIZE = 2048
+_PROMOTION_METRICS = ("precision", "recall", "f1", "map50", "map50_95")
+_PROMOTION_CLASS_METRICS = ("precision", "recall", "map50", "map50_95")
+_PROMOTION_CONDITION_KEYS = (
+    "imgsz", "confidence_threshold", "nms_iou_threshold", "batch",
+    "device_actual", "framework", "framework_version",
+)
 ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
 
 
@@ -85,6 +91,29 @@ def _registry_connection() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS evaluation_targets (
             target_id TEXT PRIMARY KEY,
             updated_at TEXT NOT NULL,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_roles (
+            role_id TEXT PRIMARY KEY,
+            champion_evaluation_id TEXT,
+            challenger_evaluation_id TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_decisions (
+            decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            action TEXT NOT NULL,
+            champion_before_id TEXT,
+            champion_after_id TEXT,
+            challenger_evaluation_id TEXT,
             record_json TEXT NOT NULL
         )
         """
@@ -1061,6 +1090,16 @@ def evaluate_yolo_checkpoint(arguments: Dict[str, Any], progress: ProgressCallba
                 "INSERT INTO model_evaluations(evaluation_id, run_id, created_at, record_json) VALUES(?, ?, ?, ?)",
                 (evaluation_id, run["run_id"], evaluation["created_at"], json.dumps(evaluation, ensure_ascii=False, allow_nan=False)),
             )
+            if split == "val":
+                connection.execute(
+                    "INSERT OR IGNORE INTO model_roles(role_id, champion_evaluation_id, challenger_evaluation_id, updated_at) "
+                    "VALUES('default', NULL, NULL, ?)",
+                    (_now(),),
+                )
+                connection.execute(
+                    "UPDATE model_roles SET challenger_evaluation_id=?, updated_at=? WHERE role_id='default'",
+                    (evaluation_id, _now()),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -1092,6 +1131,477 @@ def list_model_evaluations(run_id: Optional[str] = None) -> Dict[str, Any]:
         if isinstance(record, dict):
             evaluations.append(record)
     return {"evaluations": evaluations}
+
+
+def _load_evaluation(connection: sqlite3.Connection, evaluation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not evaluation_id:
+        return None
+    row = connection.execute(
+        "SELECT record_json FROM model_evaluations WHERE evaluation_id=?", (evaluation_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError("Kết quả đánh giá không còn trong registry.")
+    try:
+        record = json.loads(row["record_json"])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ValueError("Kết quả đánh giá trong registry bị hỏng.") from error
+    if not isinstance(record, dict) or record.get("evaluation_id") != evaluation_id:
+        raise ValueError("Kết quả đánh giá trong registry không hợp lệ.")
+    return record
+
+
+def _evaluation_checkpoint_error(evaluation: Dict[str, Any], connection: sqlite3.Connection) -> Optional[str]:
+    run_id = evaluation.get("run_id")
+    checkpoint_value = evaluation.get("checkpoint_path")
+    if not isinstance(run_id, str) or not isinstance(checkpoint_value, str):
+        return "Thiếu checkpoint hoặc mã run trong kết quả đánh giá."
+    try:
+        checkpoint = Path(checkpoint_value).expanduser().resolve(strict=True)
+    except (OSError, ValueError):
+        return "Checkpoint của kết quả đánh giá không còn tồn tại."
+    row = connection.execute(
+        "SELECT status, checkpoint_path, checkpoint_sha256, record_json FROM training_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return "Run của kết quả đánh giá không còn trong registry."
+    try:
+        run = json.loads(row["record_json"])
+        registered_path = Path(row["checkpoint_path"]).expanduser().resolve(strict=True)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return "Thông tin checkpoint trong registry không hợp lệ."
+    if (
+        not isinstance(run, dict)
+        or registered_path != checkpoint
+        or run.get("run_id") != run_id
+        or run.get("status") != row["status"]
+        or not _is_internal_training_record(run, checkpoint)
+    ):
+        return "Checkpoint không còn là model YOLO11n nội bộ đã xác minh."
+    digest = evaluation.get("checkpoint_sha256")
+    conditions = evaluation.get("conditions") if isinstance(evaluation.get("conditions"), dict) else {}
+    if (
+        not isinstance(digest, str)
+        or digest != row["checkpoint_sha256"]
+        or digest != run.get("checkpoint_sha256")
+        or conditions.get("checkpoint_sha256", digest) != digest
+    ):
+        return "Checksum checkpoint của kết quả đánh giá không khớp registry."
+    try:
+        if _sha256_file(checkpoint) != digest:
+            return "Checkpoint đã đổi checksum kể từ lần đánh giá."
+    except OSError:
+        return "Không đọc được checkpoint để xác minh checksum."
+    return None
+
+
+def _current_promotion_targets(connection: sqlite3.Connection) -> Dict[str, Any]:
+    row = connection.execute(
+        "SELECT record_json FROM evaluation_targets WHERE target_id='default'"
+    ).fetchone()
+    if row is None:
+        return {"targets": {}, "per_class": {}}
+    try:
+        record = json.loads(row["record_json"])
+    except (json.JSONDecodeError, TypeError):
+        return {"targets": {}, "per_class": {}}
+    return record if isinstance(record, dict) else {"targets": {}, "per_class": {}}
+
+
+def _promotion_target_failures(evaluation: Dict[str, Any], targets: Dict[str, Any]) -> List[str]:
+    failures: List[str] = []
+    class_names = evaluation.get("class_names")
+    configured_class_names = targets.get("class_names")
+    if configured_class_names and configured_class_names != class_names:
+        failures.append("Class schema đã đổi kể từ khi lưu chỉ số mục tiêu.")
+    metrics = evaluation.get("metrics") if isinstance(evaluation.get("metrics"), dict) else {}
+    target_values = targets.get("targets") if isinstance(targets.get("targets"), dict) else {}
+    metric_aliases = {"max_model_size_mb": "model_size_mb"}
+    for key, target in target_values.items():
+        if target is None:
+            continue
+        direction = _TARGET_DIRECTIONS.get(key)
+        if direction is None or isinstance(target, bool) or not isinstance(target, (int, float)) or not math.isfinite(target):
+            failures.append("Chỉ số mục tiêu {0} không hợp lệ.".format(key))
+            continue
+        value = metrics.get(metric_aliases.get(key, key))
+        status = _target_status(float(target), _finite_number(value), direction)
+        if status != "met":
+            failures.append("Challenger chưa đạt mục tiêu {0} ({1}).".format(key, status or "chưa đo"))
+    class_targets = targets.get("per_class") if isinstance(targets.get("per_class"), dict) else {}
+    class_metrics = evaluation.get("per_class") if isinstance(evaluation.get("per_class"), dict) else {}
+    for class_name, values in class_targets.items():
+        if not isinstance(values, dict):
+            failures.append("Chỉ số mục tiêu theo class {0} không hợp lệ.".format(class_name))
+            continue
+        measured = class_metrics.get(class_name) if isinstance(class_metrics.get(class_name), dict) else {}
+        for key, target in values.items():
+            if target is None:
+                continue
+            direction = _TARGET_DIRECTIONS.get(key)
+            if key not in _QUALITY_TARGET_KEYS or direction is None or isinstance(target, bool) or not isinstance(target, (int, float)) or not math.isfinite(target):
+                failures.append("Chỉ số mục tiêu {0}/{1} không hợp lệ.".format(class_name, key))
+                continue
+            status = _target_status(float(target), _finite_number(measured.get(key)), direction)
+            if status != "met":
+                failures.append("Challenger chưa đạt mục tiêu {0}/{1} ({2}).".format(class_name, key, status or "chưa đo"))
+    return failures
+
+
+def _promotion_metric(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _stable_hardware(hardware: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(hardware, dict):
+        return None
+    keys = ("os", "architecture", "processor", "logical_cpu_count", "physical_cpu_count", "memory_total_bytes")
+    return {key: hardware.get(key) for key in keys}
+
+
+def _promotion_comparison(
+    connection: sqlite3.Connection,
+    champion: Optional[Dict[str, Any]],
+    challenger: Dict[str, Any],
+    max_regression: float,
+) -> Dict[str, Any]:
+    blockers: List[str] = []
+    incompatibilities: List[str] = []
+    regressions: List[str] = []
+    if challenger.get("split") != "val":
+        incompatibilities.append("Promotion chỉ dùng fixed validation; test là holdout cuối.")
+    if not challenger.get("fixed_set_id") or not challenger.get("evaluation_fingerprint"):
+        incompatibilities.append("Challenger không có fingerprint của fixed validation set.")
+    challenger_checkpoint_error = _evaluation_checkpoint_error(challenger, connection)
+    if challenger_checkpoint_error:
+        blockers.append(challenger_checkpoint_error)
+    targets = _current_promotion_targets(connection)
+    target_failures = _promotion_target_failures(challenger, targets)
+    blockers.extend(target_failures)
+    overall: Dict[str, Dict[str, Any]] = {}
+    per_class: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    comparable = champion is None
+    if champion is not None:
+        for key in (
+            "split", "fixed_set_id", "evaluation_fingerprint", "image_count", "instance_count",
+            "class_names", "class_instance_counts",
+        ):
+            if champion.get(key) != challenger.get(key):
+                incompatibilities.append("Champion và Challenger khác {0}.".format(key))
+        champion_conditions = champion.get("conditions") if isinstance(champion.get("conditions"), dict) else {}
+        challenger_conditions = challenger.get("conditions") if isinstance(challenger.get("conditions"), dict) else {}
+        for key in _PROMOTION_CONDITION_KEYS:
+            if (
+                key not in champion_conditions
+                or key not in challenger_conditions
+                or champion_conditions.get(key) is None
+                or challenger_conditions.get(key) is None
+                or champion_conditions.get(key) != challenger_conditions.get(key)
+            ):
+                incompatibilities.append("Điều kiện đánh giá khác nhau tại {0}.".format(key))
+        champion_hardware = _stable_hardware(champion_conditions.get("hardware"))
+        challenger_hardware = _stable_hardware(challenger_conditions.get("hardware"))
+        if champion_hardware is None or challenger_hardware is None or champion_hardware != challenger_hardware:
+            incompatibilities.append("Champion và Challenger được đo trên phần cứng khác nhau.")
+        if champion.get("split") != "val":
+            incompatibilities.append("Champion không có kết quả trên fixed validation.")
+        champion_checkpoint_error = _evaluation_checkpoint_error(champion, connection)
+        if champion_checkpoint_error:
+            blockers.append("Champion: " + champion_checkpoint_error)
+        comparable = not incompatibilities
+    candidate_metrics = challenger.get("metrics") if isinstance(challenger.get("metrics"), dict) else {}
+    champion_metrics = champion.get("metrics") if champion and isinstance(champion.get("metrics"), dict) else {}
+    for key in _PROMOTION_METRICS:
+        new_value = _promotion_metric(candidate_metrics.get(key))
+        old_value = _promotion_metric(champion_metrics.get(key)) if champion else None
+        if new_value is None:
+            blockers.append("Challenger thiếu metric hợp lệ {0}.".format(key))
+        if champion is not None and old_value is None:
+            blockers.append("Champion thiếu metric hợp lệ {0}.".format(key))
+        delta = new_value - old_value if comparable and new_value is not None and old_value is not None else None
+        is_regression = delta is not None and delta < -max_regression
+        if is_regression:
+            regressions.append("{0}: giảm {1:.4f}, vượt tolerance {2:.4f}.".format(key, -delta, max_regression))
+        overall[key] = {
+            "champion": old_value,
+            "challenger": new_value,
+            "delta": delta,
+            "regressed": is_regression,
+        }
+    candidate_classes = challenger.get("per_class") if isinstance(challenger.get("per_class"), dict) else {}
+    champion_classes = champion.get("per_class") if champion and isinstance(champion.get("per_class"), dict) else {}
+    class_counts = challenger.get("class_instance_counts") if isinstance(challenger.get("class_instance_counts"), dict) else {}
+    champion_counts = champion.get("class_instance_counts") if champion and isinstance(champion.get("class_instance_counts"), dict) else {}
+    class_names = challenger.get("class_names") if isinstance(challenger.get("class_names"), list) else []
+    for class_name in class_names:
+        per_class[class_name] = {}
+        count = class_counts.get(class_name, 0)
+        prior_count = champion_counts.get(class_name, count) if champion else count
+        new_class_metrics = candidate_classes.get(class_name) if isinstance(candidate_classes.get(class_name), dict) else {}
+        old_class_metrics = champion_classes.get(class_name) if isinstance(champion_classes.get(class_name), dict) else {}
+        for key in _PROMOTION_CLASS_METRICS:
+            new_value = _promotion_metric(new_class_metrics.get(key))
+            old_value = _promotion_metric(old_class_metrics.get(key)) if champion else None
+            if count and new_value is None:
+                blockers.append("Challenger thiếu {0} cho class {1}.".format(key, class_name))
+            if champion is not None and prior_count and old_value is None:
+                blockers.append("Champion thiếu {0} cho class {1}.".format(key, class_name))
+            delta = new_value - old_value if comparable and champion is not None and new_value is not None and old_value is not None and count and prior_count else None
+            is_regression = delta is not None and delta < -max_regression
+            if is_regression:
+                regressions.append("{0}/{1}: giảm {2:.4f}, vượt tolerance {3:.4f}.".format(class_name, key, -delta, max_regression))
+            per_class[class_name][key] = {
+                "champion": old_value,
+                "challenger": new_value,
+                "delta": delta,
+                "regressed": is_regression,
+                "ground_truth_instances": count,
+            }
+    blockers.extend(incompatibilities)
+    blockers.extend(regressions)
+    can_promote = not blockers
+    recommendation = (
+        "incomparable" if incompatibilities
+        else "retain_champion" if blockers
+        else "initial_champion" if champion is None
+        else "promote_challenger"
+    )
+    return {
+        "created_at": _now(),
+        "champion_evaluation_id": champion.get("evaluation_id") if champion else None,
+        "challenger_evaluation_id": challenger.get("evaluation_id"),
+        "comparable": comparable,
+        "can_promote": can_promote,
+        "recommendation": recommendation,
+        "max_regression": max_regression,
+        "overall": overall,
+        "per_class": per_class,
+        "blockers": list(dict.fromkeys(blockers)),
+        "regressions": regressions,
+        "target_failures": target_failures,
+        "targets": targets,
+        "warnings": challenger.get("warnings", []),
+    }
+
+
+def _promotion_role(connection: sqlite3.Connection) -> Dict[str, Optional[str]]:
+    row = connection.execute(
+        "SELECT champion_evaluation_id, challenger_evaluation_id FROM model_roles WHERE role_id='default'"
+    ).fetchone()
+    if row is None:
+        return {"champion_evaluation_id": None, "challenger_evaluation_id": None}
+    return {
+        "champion_evaluation_id": row["champion_evaluation_id"],
+        "challenger_evaluation_id": row["challenger_evaluation_id"],
+    }
+
+
+def _record_model_decision(
+    connection: sqlite3.Connection,
+    action: str,
+    champion_before_id: Optional[str],
+    champion_after_id: Optional[str],
+    challenger_evaluation_id: Optional[str],
+    record: Dict[str, Any],
+) -> None:
+    created_at = str(record.get("created_at") or _now())
+    decision = {
+        **record,
+        "action": action,
+        "champion_before_evaluation_id": champion_before_id,
+        "champion_after_evaluation_id": champion_after_id,
+        "challenger_evaluation_id": challenger_evaluation_id,
+        "created_at": created_at,
+        "decision_by": "user",
+    }
+    connection.execute(
+        "INSERT INTO model_decisions(created_at, action, champion_before_id, champion_after_id, challenger_evaluation_id, record_json) "
+        "VALUES(?, ?, ?, ?, ?, ?)",
+        (created_at, action, champion_before_id, champion_after_id, challenger_evaluation_id,
+         json.dumps(decision, ensure_ascii=False, allow_nan=False)),
+    )
+
+
+def compare_model_challenger(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    tolerance = arguments.get("max_regression", 0)
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or not 0 <= tolerance <= 1:
+        raise ValueError("Tolerance regression phải nằm trong khoảng 0–1.")
+    connection = _registry_connection()
+    try:
+        roles = _promotion_role(connection)
+        challenger_id = roles["challenger_evaluation_id"]
+        if not challenger_id:
+            raise ValueError("Chưa có Challenger. Chạy đánh giá trên fixed validation trước.")
+        challenger = _load_evaluation(connection, challenger_id)
+        champion = _load_evaluation(connection, roles["champion_evaluation_id"])
+        if champion and challenger and champion.get("evaluation_id") == challenger.get("evaluation_id"):
+            raise ValueError("Kết quả hiện tại đã là Champion.")
+        comparison = _promotion_comparison(connection, champion, challenger or {}, float(tolerance))
+        _record_model_decision(
+            connection, "compared", roles["champion_evaluation_id"], roles["champion_evaluation_id"],
+            challenger_id, comparison,
+        )
+        connection.commit()
+        return comparison
+    except sqlite3.Error as error:
+        raise ValueError("Không thể đọc hoặc lưu lịch sử so sánh model: {0}".format(error)) from error
+    finally:
+        connection.close()
+
+
+def promote_model_challenger(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    tolerance = arguments.get("max_regression", 0)
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or not 0 <= tolerance <= 1:
+        raise ValueError("Tolerance regression phải nằm trong khoảng 0–1.")
+    connection = _registry_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO model_roles(role_id, champion_evaluation_id, challenger_evaluation_id, updated_at) "
+            "VALUES('default', NULL, NULL, ?)",
+            (_now(),),
+        )
+        roles = _promotion_role(connection)
+        challenger_id = roles["challenger_evaluation_id"]
+        if not challenger_id:
+            raise ValueError("Không có Challenger đang chờ promote.")
+        challenger = _load_evaluation(connection, challenger_id)
+        champion = _load_evaluation(connection, roles["champion_evaluation_id"])
+        comparison = _promotion_comparison(connection, champion, challenger or {}, float(tolerance))
+        if not comparison["can_promote"]:
+            raise ValueError("Chưa thể promote: " + " ".join(comparison["blockers"][:6]))
+        created_at = _now()
+        decision = {**comparison, "created_at": created_at, "reason": "Người dùng xác nhận promote Challenger."}
+        _record_model_decision(connection, "promoted", roles["champion_evaluation_id"], challenger_id, challenger_id, decision)
+        connection.execute(
+            "UPDATE model_roles SET champion_evaluation_id=?, challenger_evaluation_id=NULL, updated_at=? WHERE role_id='default'",
+            (challenger_id, created_at),
+        )
+        connection.commit()
+    except sqlite3.Error as error:
+        connection.rollback()
+        raise ValueError("Không thể lưu quyết định promote: {0}".format(error)) from error
+    except (OSError, TypeError, ValueError):
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_model_promotion_state()
+
+
+def rollback_model_promotion() -> Dict[str, Any]:
+    connection = _registry_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO model_roles(role_id, champion_evaluation_id, challenger_evaluation_id, updated_at) "
+            "VALUES('default', NULL, NULL, ?)",
+            (_now(),),
+        )
+        roles = _promotion_role(connection)
+        latest = connection.execute(
+            "SELECT action, champion_before_id, champion_after_id FROM model_decisions "
+            "WHERE action IN ('promoted', 'rolled_back') ORDER BY decision_id DESC LIMIT 1"
+        ).fetchone()
+        if latest is None or latest["action"] != "promoted" or roles["champion_evaluation_id"] != latest["champion_after_id"]:
+            raise ValueError("Không có lần promote gần nhất để rollback.")
+        previous_id = latest["champion_before_id"]
+        previous = _load_evaluation(connection, previous_id)
+        if previous:
+            issue = _evaluation_checkpoint_error(previous, connection)
+            if issue:
+                raise ValueError("Không thể khôi phục Champion trước: " + issue)
+        current_id = roles["champion_evaluation_id"]
+        created_at = _now()
+        decision = {
+            "created_at": created_at,
+            "reason": "Người dùng yêu cầu rollback về Champion trước.",
+        }
+        _record_model_decision(connection, "rolled_back", current_id, previous_id, current_id, decision)
+        connection.execute(
+            "UPDATE model_roles SET champion_evaluation_id=?, challenger_evaluation_id=?, updated_at=? WHERE role_id='default'",
+            (previous_id, current_id, created_at),
+        )
+        connection.commit()
+    except sqlite3.Error as error:
+        connection.rollback()
+        raise ValueError("Không thể lưu quyết định rollback: {0}".format(error)) from error
+    except (OSError, TypeError, ValueError):
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_model_promotion_state()
+
+
+def get_model_promotion_state() -> Dict[str, Any]:
+    connection = _registry_connection()
+    try:
+        existing_roles = connection.execute(
+            "SELECT 1 FROM model_roles WHERE role_id='default'"
+        ).fetchone()
+        connection.execute(
+            "INSERT OR IGNORE INTO model_roles(role_id, champion_evaluation_id, challenger_evaluation_id, updated_at) "
+            "VALUES('default', NULL, NULL, ?)",
+            (_now(),),
+        )
+        roles = _promotion_role(connection)
+        if existing_roles is None and not roles["challenger_evaluation_id"]:
+            legacy_rows = connection.execute(
+                "SELECT evaluation_id, record_json FROM model_evaluations ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+            legacy_candidate_id = None
+            for legacy_row in legacy_rows:
+                try:
+                    legacy_record = json.loads(legacy_row["record_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(legacy_record, dict) and legacy_record.get("split") == "val":
+                    legacy_candidate_id = legacy_row["evaluation_id"]
+                    break
+            if legacy_candidate_id:
+                connection.execute(
+                    "UPDATE model_roles SET challenger_evaluation_id=?, updated_at=? WHERE role_id='default'",
+                    (legacy_candidate_id, _now()),
+                )
+                roles["challenger_evaluation_id"] = legacy_candidate_id
+        champion = _load_evaluation(connection, roles["champion_evaluation_id"])
+        challenger = _load_evaluation(connection, roles["challenger_evaluation_id"])
+        rows = connection.execute(
+            "SELECT decision_id, action, record_json FROM model_decisions ORDER BY decision_id DESC LIMIT 30"
+        ).fetchall()
+        latest_state_change = connection.execute(
+            "SELECT action, champion_after_id FROM model_decisions "
+            "WHERE action IN ('promoted', 'rolled_back') ORDER BY decision_id DESC LIMIT 1"
+        ).fetchone()
+        connection.commit()
+    except sqlite3.Error as error:
+        raise ValueError("Không thể đọc trạng thái Champion/Challenger: {0}".format(error)) from error
+    finally:
+        connection.close()
+    history: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            record = json.loads(row["record_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict):
+            record["decision_id"] = row["decision_id"]
+            record["action"] = row["action"]
+            history.append(record)
+    can_rollback = bool(
+        latest_state_change
+        and latest_state_change["action"] == "promoted"
+        and roles["champion_evaluation_id"] == latest_state_change["champion_after_id"]
+    )
+    return {
+        "champion": champion,
+        "challenger": challenger,
+        "history": history,
+        "can_rollback": can_rollback,
+    }
 
 
 def list_training_runs() -> Dict[str, Any]:

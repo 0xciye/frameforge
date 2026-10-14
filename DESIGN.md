@@ -22,12 +22,18 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
 - Có thể đóng băng val/test khi cả hai split đều có ảnh và mọi ảnh đã được review. Khi tạo child version, chọn parent manifest và replay policy train (`all`, `balanced`, `new`); ảnh và label val/test được giữ nguyên, còn nhóm của chúng không đi vào train. Report hiển thị ảnh mới, replay và fixed-set counts.
 
+## Lọc frame gần giống
+
+- Thanh dHash biểu thị khoảng cách Hamming tối đa giữa hash 64-bit. Giá trị mặc định 5 nghĩa là bỏ crop có khoảng cách ≤5 bit so với crop đã giữ gần đây; đây không phải số lượng crop cần xóa.
+- Engine chỉ so sánh với tối đa 4.096 hash của crop được giữ gần nhất. Sau khi extraction xong, gallery hiển thị số crop gần giống thực tế đã bị lọc.
+
 ## Huấn luyện
 
 - Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Mỗi imgsz chạy thành run riêng từ cùng checkpoint nền; fine-tune chỉ bắt đầu từ checkpoint YOLO11n nội bộ đã đăng ký, được người dùng chọn và có checksum hợp lệ.
 - Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data. Giữ `cache=False` cho dataset lớn; nhập Patience = 0 để tắt early stopping và chạy đủ epoch đã đặt.
 - Card “Đánh giá model trên fixed set” chọn checkpoint registry, validation/test đã đóng băng, `imgsz`, batch, confidence, NMS IoU và thiết bị. Chỉ bật khi split hiện tại có fixed-set ID. Đánh giá có thể hủy giữa các batch; tác vụ dở dang không được ghi thành kết quả.
 - Hiển thị Precision/Recall/F1/mAP50/mAP50–95 tổng thể và theo class cùng mục tiêu người dùng đặt. Để trống là không đặt ngưỡng. Kèm dataset/fixed-set/checkpoint fingerprint, thiết bị/framework và cảnh báo tập nhỏ/thiếu class; latency/FPS/throughput/RAM ghi “Chưa đo” cho đến khi có benchmark triển khai.
+- Hiển thị Champion hiện tại, Challenger mới nhất, bảng delta metric, blockers/target và lịch sử. Chỉ dùng fixed validation có cùng fingerprint/schema/điều kiện; mặc định không chấp nhận regression. Promote và rollback đều cần xác nhận rõ, model cũ được giữ trong registry.
 
 ## Quét thư mục dự án
 

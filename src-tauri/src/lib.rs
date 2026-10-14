@@ -304,7 +304,22 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
         "training_capabilities"
         | "list_training_runs"
         | "get_evaluation_targets"
+        | "get_model_promotion_state"
+        | "rollback_model_promotion"
         | "load_session" => Ok(()),
+        "compare_model_challenger" | "promote_model_challenger" => {
+            let tolerance = match arguments.get("max_regression") {
+                None => 0.0,
+                Some(value) => value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or("Tolerance regression phải là số hữu hạn từ 0 đến 1.")?,
+            };
+            if !(0.0..=1.0).contains(&tolerance) {
+                return Err("Tolerance regression phải nằm trong khoảng 0–1.".to_string());
+            }
+            Ok(())
+        }
         "list_model_evaluations" => {
             if let Some(run_id) = arguments.get("run_id").filter(|value| !value.is_null()) {
                 if run_id

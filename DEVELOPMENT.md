@@ -8,24 +8,25 @@
 | Python JSON-lines IPC | TESTED_MACOS | Bản app bundle hiện tại chuyển từ `Đang kết nối` sang `Engine sẵn sàng`; health JSON-lines trực tiếp trả `status: ok` |
 | Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; video tối đa 1920×1080, nguồn lớn hơn bị từ chối; seek bằng tác vụ nền |
 | Exact Center Crop, preview overlay | TESTED_MACOS | Preview dùng frame nguồn tối đa FHD và vẽ khung cam liền nét 320×320 tại tọa độ nguồn x=800, y=380 trên fixture 1920×1080 |
-| Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên vùng crop nguồn; progress/hủy |
+| Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; dHash dùng Hamming distance ≤ ngưỡng trên hash 64-bit, bounded 4.096 hash gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2/v3 migrate lên v4 khi ghi; annotation và negative candidate AI lưu provenance/fingerprint; autosave bảo toàn provenance |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | YOLO11n inference adapter | TESTED_MACOS | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive; smoke một ảnh tổng hợp trên MPS |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; nằm trong suite 75 engine tests pass |
-| Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa smoke bằng checkpoint thật hoặc click-through app bundle vì registry local không có model usable. |
+| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 81 engine tests pass |
+| Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
+| Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
 | Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Smoke một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro. Kiểm tra synthetic 20.003 ảnh 320×320 và chuyển cấu hình 301 epoch tới hai imgsz bằng fake runtime; chưa xác nhận throughput/độ ổn định YOLO thật ở quy mô đầy đủ. |
 | Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký, nằm trong run và khớp checksum ở tệp, record và registry; từ chối `.pt` ngoài hoặc chưa đăng ký. |
 | Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
-| Benchmark triển khai, Champion/Challenger và model export | PARTIAL | Fixed-set quality evaluation đã có; latency/FPS/throughput/memory benchmark, comparison/promotion và deployment export chưa triển khai. Video extraction test một giờ không phải model benchmark. |
+| Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Video extraction test một giờ không phải model benchmark. |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự tiếp theo: chạy fixed-set evaluator với checkpoint thật → Champion/Challenger → deployment benchmark/export → resume/recovery training → session recovery UI → Windows validation. Dataset lineage/replay đã được triển khai và có kiểm tra engine; controls chưa click-through bằng app bundle. Inference hàng loạt và evaluation chưa click-through với checkpoint thật vì registry local không có model usable. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao.
+Thứ tự tiếp theo: xác minh evaluation/Champion-Challenger bằng checkpoint nội bộ thật khi có model phù hợp → deployment benchmark/export → resume/recovery training → session recovery UI → Windows validation. Dataset lineage/replay và Champion-Challenger đã qua engine tests; panel so sánh chưa được click-through với model thật do registry local chưa có checkpoint usable. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
 
 ## Công cụ và cài đặt
 
@@ -66,7 +67,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Frame gốc không bị sửa. Ảnh đầu ra được ghi atomically qua tệp tạm; collisions có lựa chọn bỏ qua, đổi tên hoặc ghi đè.
 - Video chỉ được nhận khi chiều rộng ≤1920 và chiều cao ≤1080. Import, preview và extraction đều kiểm tra frame giải mã; video vượt một trong hai giới hạn bị từ chối và không tự scale. Video nhỏ hơn giữ nguyên độ phân giải.
 - Hạn mức frame áp dụng tổng trên các nguồn đã chọn. Danh sách file/thumbnail trả về cho gallery hiện giới hạn 500 ảnh mỗi request để tránh giữ lượng dữ liệu không giới hạn trong frontend.
-- Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; bộ lọc là heuristic và không đảm bảo phát hiện mọi ảnh gần giống.
+- Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; ngưỡng là khoảng cách Hamming tối đa giữa hai hash 64-bit (5 không phải số ảnh), crop có khoảng cách ≤ ngưỡng bị loại và gallery đếm số crop thực tế bị lọc;
 - Center crop dùng `floor((frame - crop) / 2)` và half-open slicing; crop vượt frame trả lỗi rõ ràng. Full-frame letterbox và grid tiếp tục resize/padding theo mode riêng.
 - Blur/Laplacian và dHash đo source crop trước output resize/padding. `candidate_crops`, `blurry_crops` và `duplicate_crops` là số liệu crop-level; `candidate_frames` giữ nghĩa frame-level.
 - Mỗi ảnh lưu source identity (SHA-256 từ path/size/mtime), frame/timestamp, crop rectangle, sharpness score và extraction settings. Đây là identity fingerprint, không phải content hash.
@@ -136,6 +137,20 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
+
+### 2026-10-14 — Làm rõ ngưỡng dHash
+
+- **Thay đổi:** Giải thích ngay dưới thanh trượt rằng ngưỡng là số bit Hamming tối đa giữa hai hash 64-bit, không phải số ảnh. Hiển thị số crop gần giống thực tế bị lọc trong gallery. Không đổi thuật toán: so sánh với tối đa 4.096 crop đã giữ gần nhất.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 81 passed trong 11,34 giây; TypeScript + Vite production build qua Node runtime đóng gói — thành công, 1.922 modules.
+- **Giới hạn:** Số lượng bị lọc phụ thuộc nội dung video và tần suất lấy mẫu; 5 chỉ là ngưỡng giống nhau. Không thêm độ phân giải video cao hơn FHD.
+
+### 2026-10-14 — Champion/Challenger và xác nhận giới hạn FHD
+
+- **Thay đổi:** Thêm state Champion/Challenger trong training registry; validation mới thành Challenger, test không được promote. So sánh yêu cầu cùng fixed validation/fingerprint, class schema, inference/runtime/hardware; xác minh checksum, target tổng/theo class và regression (mặc định tolerance 0). Promote cần thao tác xác nhận; rollback khôi phục Champion trước và lưu lịch sử. Giữ video nguồn tối đa FHD 1920×1080, từ chối nguồn lớn hơn và không scale; `imgsz` training vẫn độc lập.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 81 passed trong 10,65 giây; `pnpm build` qua Node runtime đóng gói — thành công (1.922 modules); `cargo fmt --check`, `cargo check` qua Rust toolchain local — thành công; `git diff --check` — thành công.
+- **UI/chưa xác minh:** Mở tab Huấn luyện trong app macOS dev, xác nhận PyTorch 2.14.1, Ultralytics 8.4.177 và MPS sẵn sàng. Registry local có 0 checkpoint nội bộ; do đó chưa click-through đánh giá/promote model thật. Benchmark video hiện có là một lượt trên fixture FHD tổng hợp một giờ (3.600 crop/132,27 giây, RSS lấy mẫu cao nhất 807,3 MiB), chưa phải soak test nhiều giờ.
+- **Git:** Commit local (`feat: add champion challenger model promotion`) trên `feature/manual-labeling`. Push lên `origin/feature/manual-labeling` bị chặn: `could not read Username for 'https://github.com': Device not configured`.
+- **Bước tiếp:** Xác minh trên checkpoint nội bộ thật khi có model khả dụng; sau đó triển khai benchmark/export deployment. Không thêm tuỳ chọn video vượt FHD.
 
 ### 2026-10-14 — Fixed-set model evaluation
 
