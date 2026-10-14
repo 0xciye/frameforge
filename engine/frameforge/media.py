@@ -553,7 +553,7 @@ def extract_frames(
     }
     exported: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
-    duplicate_threshold = max(0, min(64, int(options.get("duplicate_threshold", 5))))
+    duplicate_threshold = max(0, min(64, int(options.get("duplicate_threshold", 1))))
     recent_hashes = _RecentHashes(duplicate_threshold)
     started = time.monotonic()
     selected_paths, _ = _candidate_paths(source_paths)

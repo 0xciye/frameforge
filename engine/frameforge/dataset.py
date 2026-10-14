@@ -298,7 +298,7 @@ def _sample_negative_images(
         fixed_negatives = [sample for sample in negatives if sample.get("fixed_evaluation")]
         selected = {id(sample) for sample in fixed_negatives}
         quota = max(0, target - len(fixed_negatives))
-        recent_hashes = _RecentHashes(threshold=5)
+        recent_hashes = _RecentHashes(threshold=1)
         for sample in sorted(fixed_negatives, key=lambda item: item["sha256"]):
             recent_hashes.add(_negative_hash(sample))
 
@@ -333,7 +333,7 @@ def _sample_negative_images(
         )
     elif excluded_count:
         warnings.append(
-            "Áp dụng giới hạn negative {0:.1%} trên dataset cuối: giữ {1}/{2} ảnh đã review, loại {3} ảnh do vượt quota hoặc gần giống (dHash ≤5).".format(
+            "Áp dụng giới hạn negative {0:.1%} trên dataset cuối: giữ {1}/{2} ảnh đã review, loại {3} ảnh do vượt quota hoặc gần như trùng (dHash ≤1).".format(
                 ratio, retained_negative_count, len(negatives), excluded_count
             )
         )

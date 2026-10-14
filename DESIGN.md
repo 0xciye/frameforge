@@ -25,7 +25,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 
 ## Lọc frame gần giống
 
-- Thanh dHash biểu thị khoảng cách Hamming tối đa giữa hash 64-bit. Giá trị mặc định 5 nghĩa là bỏ crop có khoảng cách ≤5 bit so với crop đã giữ gần đây; đây không phải số lượng crop cần xóa.
+- Thanh dHash biểu thị khoảng cách Hamming tối đa giữa hash cảm nhận 64-bit. Mặc định 1 nghĩa là chỉ bỏ crop gần như trùng (khoảng cách ≤1) so với một trong tối đa 4.096 crop đã giữ gần nhất; ngưỡng cao hơn lọc mạnh hơn, không phải số lượng crop cần xóa.
 - Engine chỉ so sánh với tối đa 4.096 hash của crop được giữ gần nhất. Sau khi extraction xong, gallery hiển thị số crop gần giống thực tế đã bị lọc.
 
 ## Huấn luyện

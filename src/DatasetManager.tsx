@@ -300,7 +300,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
                 </select>
                 {config.negativeRatioCustom && <input type="number" min="0" max="100" step="1" value={config.negativeRatio} aria-label="Tỷ lệ negative tùy chỉnh từ 0 đến 100 phần trăm" aria-invalid={!negativeRatioValid} onChange={(event) => updateConfig({ negativeRatio: Number(event.target.value) })} />}
               </div>
-              <small>Tính trên dataset cuối; lấy mẫu tái lập theo seed và bỏ ảnh gần giống (dHash ≤5). Chọn 100% để giữ mọi ảnh negative.</small>
+              <small>Tính trên dataset cuối; mặc định giữ tối đa 10%, lấy mẫu tái lập theo seed và bỏ ảnh gần như trùng (dHash ≤1). Chọn 100% để giữ mọi ảnh negative đủ điều kiện.</small>
               {!negativeRatioValid && <small className="dataset-negative-error" role="alert">Nhập tỷ lệ từ 0 đến 100%.</small>}
             </div>
             {!parentManifestPath && <label className="dataset-freeze-control">
