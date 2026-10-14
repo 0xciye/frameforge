@@ -18,10 +18,20 @@ import numpy as np
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+FHD_WIDTH = 1920
+FHD_HEIGHT = 1080
 
 
 def _finite(value: float) -> Optional[float]:
     return float(value) if math.isfinite(value) and value > 0 else None
+
+
+def _require_fhd_video(frame: np.ndarray) -> None:
+    height, width = frame.shape[:2]
+    if width > FHD_WIDTH or height > FHD_HEIGHT:
+        raise ValueError(
+            "Video {0}×{1} vượt giới hạn FHD 1920 × 1080 px; chỉ nhận video tối đa FHD.".format(width, height)
+        )
 
 
 def _candidate_paths(selected_paths: Iterable[str]) -> Tuple[List[Path], int]:
@@ -83,21 +93,21 @@ def probe_media(path_value: str) -> Dict[str, Any]:
         fps = _finite(capture.get(cv2.CAP_PROP_FPS))
         frame_count_value = capture.get(cv2.CAP_PROP_FRAME_COUNT)
         frame_count = int(frame_count_value) if math.isfinite(frame_count_value) and frame_count_value > 0 else None
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        ok, first_frame = capture.read()
+        if not ok or first_frame is None:
+            raise ValueError("Video không có frame đọc được.")
+        _require_fhd_video(first_frame)
+        height, width = first_frame.shape[:2]
         duration = frame_count / fps if frame_count and fps else None
         if frame_count is None:
             duration_ms = _finite(capture.get(cv2.CAP_PROP_POS_MSEC))
             duration = duration_ms / 1000 if duration_ms else None
-        ok, first_frame = capture.read()
-        if not ok or first_frame is None:
-            raise ValueError("Video không có frame đọc được.")
         return {
             "path": str(path),
             "name": path.name,
             "kind": "video",
-            "width": width or int(first_frame.shape[1]),
-            "height": height or int(first_frame.shape[0]),
+            "width": width,
+            "height": height,
             "fps": fps,
             "frame_count": frame_count,
             "duration_seconds": duration,
@@ -134,27 +144,40 @@ def _read_frame(path: Path, frame_index: int) -> np.ndarray:
         ok, frame = capture.read()
         if not ok or frame is None:
             raise ValueError("Không đọc được frame {0} trong video.".format(frame_index))
+        _require_fhd_video(frame)
         return frame
     finally:
         capture.release()
 
 
 def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -> Dict[str, Any]:
-    frame = _read_frame(Path(path_value).expanduser().resolve(strict=True), frame_index)
+    source_path = Path(path_value).expanduser().resolve(strict=True)
+    is_image = source_path.suffix.lower() in IMAGE_EXTENSIONS
+    fingerprint_before = hashlib.sha256(source_path.read_bytes()).hexdigest() if is_image else None
+    frame = _read_frame(source_path, frame_index)
+    image_fingerprint = hashlib.sha256(source_path.read_bytes()).hexdigest() if is_image else None
+    if fingerprint_before != image_fingerprint:
+        raise ValueError("Ảnh đang được thay đổi; hãy mở preview lại sau khi cập nhật xong.")
     source_height, source_width = frame.shape[:2]
-    scale = min(1.0, max_edge / max(source_width, source_height))
+    height, width = frame.shape[:2]
+    scale = min(1.0, max_edge / max(width, height))
     if scale < 1:
-        frame = cv2.resize(frame, (round(source_width * scale), round(source_height * scale)), interpolation=cv2.INTER_AREA)
+        frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
     if not ok:
         raise ValueError("Không tạo được ảnh preview.")
     data_url = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
-    return {
+    result = {
         "data_url": data_url,
-        "width": source_width,
-        "height": source_height,
+        "width": width,
+        "height": height,
+        "source_width": source_width,
+        "source_height": source_height,
         "frame_index": max(0, int(frame_index)),
     }
+    if image_fingerprint is not None:
+        result["image_fingerprint"] = image_fingerprint
+    return result
 
 
 def preview_center_crop(
@@ -164,8 +187,14 @@ def preview_center_crop(
     height: int,
     max_edge: int = 1600,
 ) -> Dict[str, Any]:
-    frame = _read_frame(Path(path_value).expanduser().resolve(strict=True), frame_index)
+    width = int(width)
+    height = int(height)
+    if not 1 <= width <= FHD_WIDTH or not 1 <= height <= FHD_HEIGHT:
+        raise ValueError("Kích thước crop tối đa là 1920 × 1080 px (FHD).")
+    source_path = Path(path_value).expanduser().resolve(strict=True)
+    frame = _read_frame(source_path, frame_index)
     source_height, source_width = frame.shape[:2]
+    frame_height, frame_width = frame.shape[:2]
     cropped, crop_rect = _center_crop(frame, width, height)
     scale = min(1.0, max_edge / max(width, height))
     if scale < 1:
@@ -180,6 +209,8 @@ def preview_center_crop(
         "frame_index": max(0, int(frame_index)),
         "source_width": source_width,
         "source_height": source_height,
+        "frame_width": frame_width,
+        "frame_height": frame_height,
         "crop_rect": crop_rect,
     }
 
@@ -422,6 +453,7 @@ def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Di
         ok, frame = capture.read()
         if not ok or frame is None:
             break
+        _require_fhd_video(frame)
         reported = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         fallback = frame_index / fps if fps else float(frame_index)
         timestamp = reported if math.isfinite(reported) and reported > last_timestamp else fallback
@@ -496,8 +528,8 @@ def extract_frames(
     if mode not in {"center", "letterbox", "grid"}:
         raise ValueError("Chế độ crop chưa khả dụng.")
     minimum_size = 1 if mode == "center" else 16
-    if not minimum_size <= width <= 4096 or not minimum_size <= height <= 4096:
-        raise ValueError("Kích thước crop phải nằm trong khoảng {0}–4096 px.".format(minimum_size))
+    if not minimum_size <= width <= FHD_WIDTH or not minimum_size <= height <= FHD_HEIGHT:
+        raise ValueError("Kích thước ảnh đầu ra tối đa là 1920 × 1080 px (FHD).")
     image_format = options.get("image_format", "jpg")
     if image_format not in {"jpg", "png"}:
         raise ValueError("Định dạng đầu ra chỉ hỗ trợ JPG hoặc PNG.")
@@ -540,7 +572,14 @@ def extract_frames(
                 **totals,
             })
 
-    def process_frame(source_index: int, source: Path, source_id: str, frame_index: int, timestamp: float, frame: np.ndarray) -> None:
+    def process_frame(
+        source_index: int,
+        source: Path,
+        source_id: str,
+        frame_index: int,
+        timestamp: float,
+        frame: np.ndarray,
+    ) -> None:
         totals["candidate_frames"] += 1
         accepted_frame = False
         for crop, suffix, crop_rect, filter_crop in _crop_frames(frame, options):

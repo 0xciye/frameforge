@@ -16,9 +16,11 @@
 
 **FIRST VIEWPORT:** 52px toolbar and 42px workflow tabs. Three columns: 226px source list, flexible preview, 320px settings at the default 1440px window. A 174px gallery spans below, followed by a 28px status line. Six-pixel splitters resize all three regions with pointer or arrow keys and persist locally. Minimum window is 1024×700; CSS reduces panel widths and keeps settings/gallery scrollable.
 
+Accept video sources only up to 1920×1080. Larger videos are rejected during import, preview, and extraction without scaling; smaller sources keep their original resolution. Crop/output dimensions are capped at FHD.
+
 **FORM:** The user screenshot is the visual source of truth. The UI Pro Max searchable styles returned landing-page patterns and were discarded; the Operate guidance supplied accessibility and dense-control considerations. Impeccable written references guided the UI review; its CLI audit did not run because the local checksum sidecar was unavailable.
 
-**CROP:** The orange dashed overlay represents the exact W×H source-pixel rectangle centered with floor-based coordinates. `Xem crop` shows the engine-generated crop itself; preset sizes are shortcuts and custom integer dimensions remain available. Out-of-frame dimensions are explained before extraction. Blur and near-duplicate filtering inspect the source crop.
+**CROP:** The solid orange overlay represents the exact W×H source-pixel rectangle centered with floor-based coordinates while keeping the decoded source frame visible. The crop output appears in the gallery after extraction. Preset sizes are shortcuts and custom integer dimensions remain available. Out-of-frame dimensions are explained before extraction. Blur and near-duplicate filtering inspect the source crop.
 
 **FINISH:** Disabled/loading/error/empty states, reduced motion, keyboard focus and panel bounds are present. Inference, label editing and export stay visibly unavailable until their real workflows exist.
 

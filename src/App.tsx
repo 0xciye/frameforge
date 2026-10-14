@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import {
+  Activity,
   AlertCircle,
   Check,
   ChevronDown,
@@ -12,12 +13,12 @@ import {
   ChevronsLeft,
   ChevronsRight,
   CircleHelp,
-  Crop,
+  Database,
+  Download,
   FileImage,
   FileVideo2,
   FolderOpen,
   FolderPlus,
-  HardDrive,
   ImagePlus,
   LoaderCircle,
   Pause,
@@ -30,6 +31,9 @@ import {
   X,
 } from "lucide-react";
 import "./App.css";
+import DatasetManager from "./DatasetManager";
+import ManualLabeling, { type Annotation, type NegativeCandidate } from "./ManualLabeling";
+import TrainingWorkspace from "./TrainingWorkspace";
 
 type MediaSource = {
   path: string;
@@ -55,7 +59,8 @@ type ProjectImage = {
   width: number;
   height: number;
   status: string;
-  annotations?: unknown[];
+  annotations?: Annotation[];
+  negative_candidates?: NegativeCandidate[];
 };
 
 type ExtractionOptions = {
@@ -88,19 +93,25 @@ type ProjectState = {
   class_names: string[];
 };
 
+type WorkspaceTab = "extract" | "label" | "dataset" | "training";
+type SessionSnapshot = {
+  available: boolean;
+  project?: ProjectState;
+  session?: Record<string, unknown>;
+  original_project_exists?: boolean;
+  original_project_unchanged?: boolean;
+};
+
 type FramePreview = {
   data_url: string;
   width: number;
   height: number;
+  source_width?: number;
+  source_height?: number;
   frame_index: number;
 };
 
 type CropRect = { x: number; y: number; width: number; height: number };
-type CenterCropPreview = FramePreview & {
-  source_width: number;
-  source_height: number;
-  crop_rect: CropRect;
-};
 
 type EngineProgress = {
   source_index: number;
@@ -141,6 +152,9 @@ type ModelInfo = {
 type PanelLayout = { sourceWidth: number; settingsWidth: number; galleryHeight: number };
 type ResizeKind = "source" | "settings" | "gallery";
 type ResizeDrag = { kind: ResizeKind; startX: number; startY: number; initialValue: number };
+
+const FHD_WIDTH = 1920;
+const FHD_HEIGHT = 1080;
 
 const DEFAULT_OPTIONS: ExtractionOptions = {
   interval: 10,
@@ -214,18 +228,16 @@ function App() {
     sources: [],
     settings: DEFAULT_OPTIONS,
     images: [],
-    class_names: [],
+    class_names: ["head", "body"],
   });
   const [projectPath, setProjectPath] = useState<string | null>(null);
+  const projectPathRef = useRef(projectPath);
+  useEffect(() => { projectPathRef.current = projectPath; }, [projectPath]);
   const [dirty, setDirty] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [frameIndex, setFrameIndex] = useState(0);
   const [preview, setPreview] = useState<FramePreview | null>(null);
-  const [cropPreview, setCropPreview] = useState<CenterCropPreview | null>(null);
-  const [showCropPreview, setShowCropPreview] = useState(false);
-  const [cropPreviewLoading, setCropPreviewLoading] = useState(false);
-  const [cropPreviewError, setCropPreviewError] = useState<string | null>(null);
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -236,12 +248,17 @@ function App() {
   const [fileListTruncated, setFileListTruncated] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [engineStatus, setEngineStatus] = useState<"checking" | "ready" | "error">("checking");
+  const [sessionReady, setSessionReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [inspectingModel, setInspectingModel] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [activeTab, setActiveTab] = useState<"extract" | "label" | "export">("extract");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("extract");
+  const [trainingDatasetSeed, setTrainingDatasetSeed] = useState<string | null>(null);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
+  const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const annotationSaveFailed = useRef(false);
+  const sessionSaveErrorShown = useRef(false);
   const previewSequence = useRef(0);
   const activeExtractionId = useRef<string | null>(null);
   const progressSubscription = useRef<Promise<void>>(Promise.resolve());
@@ -250,6 +267,11 @@ function App() {
   const settingsPanelRef = useRef<HTMLElement | null>(null);
   const galleryPanelRef = useRef<HTMLElement | null>(null);
   const previewStageRef = useRef<HTMLDivElement | null>(null);
+  const useDiscoveredDataset = useCallback((path: string) => {
+    setTrainingDatasetSeed(path);
+    setActiveTab("training");
+  }, []);
+  const clearTrainingDatasetSeed = useCallback(() => setTrainingDatasetSeed(null), []);
 
   const selectedSource = useMemo(
     () => project.sources.find((source) => source.path === selectedPath) ?? null,
@@ -269,11 +291,10 @@ function App() {
       ? frameIndex / selectedSource.fps
       : null;
   const duration = selectedSource?.duration_seconds ?? null;
-  const displayPreview = showCropPreview ? cropPreview : preview;
   const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
   const cropSizeValid = Number.isInteger(options.output_width) && Number.isInteger(options.output_height)
-    && options.output_width >= minimumOutputSize && options.output_width <= 4096
-    && options.output_height >= minimumOutputSize && options.output_height <= 4096;
+    && options.output_width >= minimumOutputSize && options.output_width <= FHD_WIDTH
+    && options.output_height >= minimumOutputSize && options.output_height <= FHD_HEIGHT;
   const cropFitsPreview = Boolean(cropSizeValid && preview && options.output_width <= preview.width && options.output_height <= preview.height);
   const cropRect = preview
     ? {
@@ -284,10 +305,10 @@ function App() {
       }
     : null;
   const previewFrameBox = useMemo(() => {
-    if (!displayPreview || !previewStageSize.width || !previewStageSize.height) return null;
-    const scale = Math.min(1, previewStageSize.width / displayPreview.width, previewStageSize.height / displayPreview.height);
-    return { width: displayPreview.width * scale, height: displayPreview.height * scale };
-  }, [displayPreview, previewStageSize]);
+    if (!preview || !previewStageSize.width || !previewStageSize.height) return null;
+    const scale = Math.min(1, previewStageSize.width / preview.width, previewStageSize.height / preview.height);
+    return { width: preview.width * scale, height: preview.height * scale };
+  }, [preview, previewStageSize]);
 
   async function callEngine<T>(command: string, args: Record<string, unknown> = {}) {
     return invoke<T>("engine_request", {
@@ -295,17 +316,275 @@ function App() {
     });
   }
 
+  function serializeProjectWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = projectWriteQueue.current.then(operation, operation);
+    projectWriteQueue.current = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+
+  const loadLabelPreview = useCallback((path: string) => (
+    callEngine<{ data_url: string; width: number; height: number; image_fingerprint?: string }>(
+      "preview_frame",
+      { path, frame_index: 0 },
+    )
+  ), []);
+
+  const saveLabelImage = useCallback(async (
+    imagePath: string,
+    annotations: Annotation[],
+    status: "ready" | "reviewed",
+    fingerprint: string,
+  ): Promise<Annotation[]> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi chỉnh sửa nhãn.");
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === imagePath
+        ? { ...image, annotations: annotations.map((annotation) => ({ ...annotation })), status }
+        : image),
+    }));
+    try {
+      const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[] }>("save_annotations", {
+        path,
+        image_path: imagePath,
+        annotations,
+        status,
+        image_fingerprint: fingerprint,
+      }));
+      setProject((current) => ({
+        ...current,
+        images: current.images.map((image) => image.path === imagePath
+          ? { ...image, annotations: saved.annotations, status }
+          : image),
+      }));
+      annotationSaveFailed.current = false;
+      return saved.annotations;
+    } catch (reason) {
+      annotationSaveFailed.current = true;
+      setDirty(true);
+      throw reason;
+    }
+  }, [projectPath]);
+
+  const saveLabelSuggestions = useCallback(async (
+    imagePath: string,
+    predictions: { class_id: number; confidence: number; bbox_xyxy: number[] }[],
+    checkpoint: string,
+    fingerprint: string,
+  ): Promise<{ annotations: Annotation[]; negative_candidate?: NegativeCandidate | null }> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi tạo gợi ý AI.");
+    const saved = await serializeProjectWrite(() => callEngine<{
+      annotations: Annotation[];
+      negative_candidate?: NegativeCandidate | null;
+      status?: string;
+    }>("save_ai_suggestions", {
+      path,
+      image_path: imagePath,
+      predictions,
+      checkpoint,
+      image_fingerprint: fingerprint,
+    }));
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === imagePath
+        ? {
+            ...image,
+            annotations: [...(image.annotations ?? []), ...saved.annotations],
+            negative_candidates: saved.negative_candidate
+              ? [...(image.negative_candidates ?? []), saved.negative_candidate]
+              : image.negative_candidates,
+            status: saved.status ?? image.status,
+          }
+        : image),
+    }));
+    return saved;
+  }, [projectPath]);
+
+  const reviewLabelNegativeCandidate = useCallback(async (
+    candidateId: string,
+    action: "confirmed_negative" | "rejected",
+    fingerprint?: string,
+  ): Promise<void> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi review candidate.");
+    const saved = await serializeProjectWrite(() => callEngine<{
+      image_path: string;
+      status: string;
+      negative_candidate: NegativeCandidate;
+    }>("review_ai_negative_candidate", {
+      path,
+      candidate_id: candidateId,
+      action,
+      ...(fingerprint ? { image_fingerprint: fingerprint } : {}),
+    }));
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === saved.image_path
+        ? {
+            ...image,
+            status: saved.status,
+            negative_candidates: (image.negative_candidates ?? []).map((candidate) => (
+              candidate.id === candidateId ? saved.negative_candidate : candidate
+            )),
+          }
+        : image),
+    }));
+  }, [projectPath]);
+
+  const runProjectInference = useCallback(async (checkpoint: string, requestId: string) => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi chạy inference hàng loạt.");
+    try {
+      return await serializeProjectWrite(() => invoke<{
+        status: string;
+        processed_images: number;
+        images_with_detections: number;
+        candidate_negative_count: number;
+        annotation_count: number;
+        skipped_changed: number;
+        skipped_large_objects: number;
+      }>("engine_request", {
+        request: {
+          id: requestId,
+          command: "auto_label_project",
+          arguments: { path, checkpoint, confidence_threshold: 0.25 },
+        },
+      }));
+    } finally {
+      const loaded = await serializeProjectWrite(() => callEngine<ProjectState>("load_project", { path }));
+      if (projectPathRef.current === path) {
+        const savedImages = new Map(loaded.images.map((image) => [image.path, image]));
+        setProject((current) => ({
+          ...current,
+          images: current.images.map((image) => {
+            const saved = savedImages.get(image.path);
+            return saved ? {
+              ...image,
+              annotations: saved.annotations,
+              negative_candidates: saved.negative_candidates,
+              status: saved.status,
+            } : image;
+          }),
+        }));
+      }
+    }
+  }, [projectPath]);
+
   useEffect(() => {
     let alive = true;
+    let interacted = false;
+    const noteInteraction = () => { interacted = true; };
+    window.addEventListener("pointerdown", noteInteraction, true);
+    window.addEventListener("keydown", noteInteraction, true);
     if (!isTauri()) {
       setEngineStatus("error");
-      return () => { alive = false; };
+      setSessionReady(true);
+      return () => {
+        alive = false;
+        window.removeEventListener("pointerdown", noteInteraction, true);
+        window.removeEventListener("keydown", noteInteraction, true);
+      };
     }
-    void callEngine<{ status: string }>("health", {})
-      .then(() => alive && setEngineStatus("ready"))
-      .catch(() => alive && setEngineStatus("error"));
-    return () => { alive = false; };
+    void (async () => {
+      let engineReady = false;
+      try {
+        await callEngine<{ status: string }>("health", {});
+        if (!alive) return;
+        engineReady = true;
+        setEngineStatus("ready");
+        const snapshot = await callEngine<SessionSnapshot>("load_session", {});
+        if (!alive || interacted || !snapshot.available || !snapshot.project || !snapshot.session) return;
+
+        const restoredProject = {
+          ...snapshot.project,
+          settings: { ...DEFAULT_OPTIONS, ...(snapshot.project.settings as Partial<ExtractionOptions>) },
+        };
+        const sourcePaths = new Set(restoredProject.sources.map((source) => source.path));
+        const requestedSelectedPaths = snapshot.session.selected_paths;
+        const restoredSelectedPaths = Array.isArray(requestedSelectedPaths)
+          ? requestedSelectedPaths.filter((path): path is string => typeof path === "string" && sourcePaths.has(path))
+          : restoredProject.sources.map((source) => source.path);
+        const requestedSelectedPath = snapshot.session.selected_path;
+        const restoredSelectedPath = typeof requestedSelectedPath === "string" && sourcePaths.has(requestedSelectedPath)
+          ? requestedSelectedPath
+          : restoredProject.sources[0]?.path ?? null;
+        const selectedSource = restoredProject.sources.find((source) => source.path === restoredSelectedPath);
+        const requestedFrame = snapshot.session.frame_index;
+        const restoredFrame = typeof requestedFrame === "number" && Number.isFinite(requestedFrame)
+          ? Math.max(0, Math.min(selectedSource?.frame_count ? selectedSource.frame_count - 1 : Number.MAX_SAFE_INTEGER, Math.floor(requestedFrame)))
+          : 0;
+        const requestedTab = snapshot.session.active_tab;
+        const restoredTab: WorkspaceTab = requestedTab === "label" || requestedTab === "dataset" || requestedTab === "training"
+          ? requestedTab
+          : "extract";
+        const requestedProjectPath = snapshot.session.project_path;
+        const originalIsSafeToResume = snapshot.original_project_exists === true
+          && snapshot.original_project_unchanged === true
+          && typeof requestedProjectPath === "string";
+
+        setProject(restoredProject);
+        setOptions(restoredProject.settings);
+        setProjectPath(originalIsSafeToResume ? requestedProjectPath : null);
+        setDirty(snapshot.session.dirty === true || !originalIsSafeToResume);
+        setSelectedPaths(restoredSelectedPaths);
+        setSelectedPath(restoredSelectedPath);
+        setFrameIndex(restoredFrame);
+        setOutputDirectory(typeof snapshot.session.output_directory === "string" ? snapshot.session.output_directory : "");
+        setActiveTab(restoredTab);
+        setGallery([]);
+        setFileListTruncated(false);
+        annotationSaveFailed.current = false;
+      } catch (reason) {
+        if (alive && engineReady && !interacted) {
+          setError(`Không khôi phục được phiên trước. Mở dự án thủ công để tiếp tục. ${String(reason)}`);
+        }
+        if (alive && !engineReady) setEngineStatus("error");
+      } finally {
+        if (alive) setSessionReady(true);
+      }
+    })();
+    return () => {
+      alive = false;
+      window.removeEventListener("pointerdown", noteInteraction, true);
+      window.removeEventListener("keydown", noteInteraction, true);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!sessionReady || !isTauri()) return;
+    const hasSessionState = Boolean(
+      projectPath
+      || project.sources.length
+      || project.images.length
+      || activeTab !== "extract"
+      || outputDirectory
+      || JSON.stringify(options) !== JSON.stringify(DEFAULT_OPTIONS),
+    );
+    if (!hasSessionState) return;
+    const timer = window.setTimeout(() => {
+      void serializeProjectWrite(() => callEngine("save_session", {
+        project: { ...project, settings: options },
+        session: {
+          project_path: projectPath,
+          selected_paths: selectedPaths,
+          selected_path: selectedPath,
+          frame_index: frameIndex,
+          output_directory: outputDirectory,
+          active_tab: activeTab,
+          dirty,
+        },
+      })).then(() => {
+        sessionSaveErrorShown.current = false;
+      }).catch((reason) => {
+        if (!sessionSaveErrorShown.current) {
+          setError(`Không lưu được bản khôi phục phiên: ${String(reason)}`);
+          sessionSaveErrorShown.current = true;
+        }
+      });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [sessionReady, project, projectPath, selectedPaths, selectedPath, frameIndex, outputDirectory, activeTab, dirty, options]);
 
   useEffect(() => {
     try {
@@ -376,56 +655,27 @@ function App() {
   useEffect(() => {
     if (!selectedSource) {
       setPreview(null);
-      setCropPreview(null);
       setPreviewError(null);
-      setCropPreviewError(null);
-      setCropPreviewLoading(false);
       return;
     }
     const sequence = ++previewSequence.current;
     const path = selectedSource.path;
     const index = selectedSource.kind === "image" ? 0 : frameIndex;
     setPreviewError(null);
-    setCropPreviewError(null);
-    const shouldPreviewCrop = showCropPreview && options.crop_mode === "center" && cropSizeValid;
-    setCropPreview(null);
-    setCropPreviewLoading(shouldPreviewCrop);
     const timer = window.setTimeout(() => {
-      if (!showCropPreview) {
-        void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
-          .then((result) => {
-            if (sequence === previewSequence.current) setPreview(result);
-          })
-          .catch((reason) => {
-            if (sequence === previewSequence.current) {
-              setPreview(null);
-              setPreviewError(String(reason));
-            }
-          });
-      }
-      if (showCropPreview && options.crop_mode === "center" && cropSizeValid) {
-        void callEngine<CenterCropPreview>("preview_center_crop", {
-          path,
-          frame_index: index,
-          width: options.output_width,
-          height: options.output_height,
+      void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
+        .then((result) => {
+          if (sequence === previewSequence.current) setPreview(result);
         })
-          .then((result) => {
-            if (sequence === previewSequence.current) setCropPreview(result);
-          })
-          .catch((reason) => {
-            if (sequence === previewSequence.current) {
-              setCropPreview(null);
-              setCropPreviewError(String(reason));
-            }
-          })
-          .finally(() => {
-            if (sequence === previewSequence.current) setCropPreviewLoading(false);
-          });
-      }
+        .catch((reason) => {
+          if (sequence === previewSequence.current) {
+            setPreview(null);
+            setPreviewError(String(reason));
+          }
+        });
     }, 90);
     return () => window.clearTimeout(timer);
-  }, [selectedSource?.path, selectedSource?.kind, frameIndex, showCropPreview, options.crop_mode, options.output_width, options.output_height]);
+  }, [selectedSource?.path, selectedSource?.kind, frameIndex]);
 
   useEffect(() => {
     if (!playing || !selectedSource || selectedSource.kind !== "video") return;
@@ -439,7 +689,6 @@ function App() {
   }, [playing, selectedSource?.path, selectedSource?.fps, selectedSource?.kind, sourceFrameCount, frameIndex]);
 
   function updateOptions(patch: Partial<ExtractionOptions>) {
-    if (patch.crop_mode && patch.crop_mode !== "center") setShowCropPreview(false);
     setOptions((current) => ({ ...current, ...patch }));
     setProject((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
     setDirty(true);
@@ -547,10 +796,16 @@ function App() {
       setSelectedPaths((selected) => [...new Set([...selected, ...result.sources.map((source) => source.path)])]);
       if (!selectedPath && added[0]) setSelectedPath(added[0].path);
       setDirty(true);
-      if (result.unsupported_count) {
-        setError(`${result.unsupported_count} tệp không thuộc định dạng media được hỗ trợ đã bị bỏ qua.`);
-      } else if (result.errors.length) {
-        setError(`${result.sources.length} nguồn đã thêm; ${result.errors.length} tệp không đọc được.`);
+      const importNotices = [
+        result.unsupported_count
+          ? `${result.unsupported_count} tệp không thuộc định dạng media được hỗ trợ đã bị bỏ qua.`
+          : "",
+        result.errors.length
+          ? `${result.errors.length} tệp bị từ chối hoặc không đọc được. ${result.errors[0]?.message ?? ""}`
+          : "",
+      ].filter(Boolean);
+      if (importNotices.length) {
+        setError(importNotices.join(" "));
       }
     } catch (reason) {
       setError(String(reason));
@@ -602,7 +857,7 @@ function App() {
         sources: [],
         settings: DEFAULT_OPTIONS,
         images: [],
-        class_names: [],
+        class_names: ["head", "body"],
       };
       setProject(empty);
       setProjectPath(path);
@@ -645,7 +900,11 @@ function App() {
     }
   }
 
-  async function saveProject() {
+  async function saveProject(): Promise<boolean> {
+    if (annotationSaveFailed.current) {
+      setError("Một số nhãn chưa được tự lưu. Quay lại Gán nhãn, tải lại ảnh và thử lưu nhãn trước.");
+      return false;
+    }
     try {
       let path = projectPath;
       if (!path) {
@@ -655,18 +914,36 @@ function App() {
           filters: [{ name: "Dự án FrameForge", extensions: ["ffproj"] }],
         });
       }
-      if (!path) return;
-      const saved = await callEngine<{ id: string; name: string; modified_at: string }>("save_project", {
+      if (!path) return false;
+      const saved = await serializeProjectWrite(() => callEngine<{ id: string; name: string; modified_at: string }>("save_project", {
         path,
         project: { ...project, settings: options },
-      });
+      }));
       setProject((current) => ({ ...current, id: saved.id, name: saved.name }));
       setProjectPath(path);
       setDirty(false);
       setError(null);
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     }
+  }
+
+  async function openLabelWorkspace() {
+    setError(null);
+    if (project.images.length > 0 && (!projectPath || dirty)) {
+      if (!(await saveProject())) return;
+    }
+    setActiveTab("label");
+  }
+
+  async function openDatasetWorkspace() {
+    setError(null);
+    if (project.images.length > 0 && (!projectPath || dirty)) {
+      if (!(await saveProject())) return;
+    }
+    setActiveTab("dataset");
   }
 
   async function inspectModel() {
@@ -708,9 +985,9 @@ function App() {
     }
     const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
     if (!Number.isInteger(options.output_width) || !Number.isInteger(options.output_height)
-      || options.output_width < minimumOutputSize || options.output_width > 4096
-      || options.output_height < minimumOutputSize || options.output_height > 4096) {
-      setError(`Chiều rộng và chiều cao phải là số nguyên từ ${minimumOutputSize} đến 4096 px.`);
+      || options.output_width < minimumOutputSize || options.output_width > FHD_WIDTH
+      || options.output_height < minimumOutputSize || options.output_height > FHD_HEIGHT) {
+      setError(`Kích thước tối đa là ${FHD_WIDTH} × ${FHD_HEIGHT} px (FHD).`);
       return;
     }
     let destination = outputDirectory;
@@ -841,8 +1118,8 @@ function App() {
           <button className="tool-button tool-button-disabled" type="button" disabled title="Suy luận chưa được triển khai">
             <Sparkles size={15} /><span>Auto label</span>
           </button>
-          <button className="tool-button tool-button-disabled" type="button" disabled title="Xuất YOLO sẽ có ở giai đoạn sau">
-            <Scissors size={15} /><span>Xuất YOLO</span>
+          <button className="tool-button" type="button" onClick={() => void openDatasetWorkspace()} disabled={engineStatus !== "ready"} title="Kiểm tra và xuất dataset YOLO">
+            <Download size={15} /><span>Xuất YOLO</span>
           </button>
         </div>
         <div className={`engine-badge engine-${engineStatus}`} title={engineStatus === "error" ? "Không kết nối được Python engine" : "Trạng thái Python engine"}>
@@ -866,11 +1143,14 @@ function App() {
         <button className={activeTab === "extract" ? "workflow-tab active" : "workflow-tab"} onClick={() => setActiveTab("extract")} type="button">
           <Scissors size={15} /><span>Trích xuất</span>
         </button>
-        <button className="workflow-tab unavailable" type="button" disabled title="Cần hoàn tất inference và trình sửa nhãn">
-          <Settings2 size={15} /><span>Gán nhãn</span><small>Sắp có</small>
+        <button className={activeTab === "label" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openLabelWorkspace()}>
+          <Settings2 size={15} /><span>Gán nhãn</span>
         </button>
-        <button className="workflow-tab unavailable" type="button" disabled title="Cần hoàn tất trình gán nhãn">
-          <HardDrive size={15} /><span>Xuất dữ liệu</span><small>Sắp có</small>
+        <button className={activeTab === "dataset" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openDatasetWorkspace()}>
+          <Database size={15} /><span>Dataset</span>
+        </button>
+        <button className={activeTab === "training" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => setActiveTab("training")}>
+          <Activity size={15} /><span>Huấn luyện</span>
         </button>
         <div className="tab-spacer" />
         <span className="workflow-hint"><CircleHelp size={13} /> Dữ liệu xử lý trên máy này</span>
@@ -883,6 +1163,21 @@ function App() {
         </div>
       ) : null}
 
+      {activeTab === "label" ? (
+        <ManualLabeling
+          images={project.images}
+          classNames={project.class_names}
+          loadPreview={loadLabelPreview}
+          saveImage={saveLabelImage}
+          saveSuggestions={saveLabelSuggestions}
+          reviewNegativeCandidate={reviewLabelNegativeCandidate}
+          runBatchInference={runProjectInference}
+        />
+      ) : activeTab === "dataset" ? (
+        <DatasetManager projectPath={projectPath} imageCount={project.images.length} onUseDiscoveredDataset={useDiscoveredDataset} />
+      ) : activeTab === "training" ? (
+        <TrainingWorkspace initialDataYaml={trainingDatasetSeed} onInitialDataYamlConsumed={clearTrainingDatasetSeed} />
+      ) : (
       <section
         className={`workspace-layout ${dropActive ? "drop-active" : ""}`}
         aria-label="Không gian trích xuất frame"
@@ -919,7 +1214,10 @@ function App() {
                     <Icon size={16} />
                     <span className="source-details">
                       <strong title={source.name}>{source.name}</strong>
-                      <small>{source.width} × {source.height} · {source.kind === "video" ? formatTime(source.duration_seconds) : "Ảnh"} · {formatBytes(source.size_bytes)}</small>
+                      <small>
+                        {source.width} × {source.height}
+                        {` · ${source.kind === "video" ? formatTime(source.duration_seconds) : "Ảnh"} · ${formatBytes(source.size_bytes)}`}
+                      </small>
                     </span>
                   </button>
                   <button type="button" className="source-remove icon-button" onClick={() => removeSource(source.path)} aria-label={`Gỡ ${source.name}`} title="Gỡ khỏi dự án"><X size={13} /></button>
@@ -950,32 +1248,24 @@ function App() {
             </div>
             <div className="preview-tools">
               <span className="preview-resolution">
-                {displayPreview ? `${displayPreview.width} × ${displayPreview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
+                {preview
+                  ? preview.source_width && preview.source_height
+                    && (preview.source_width !== preview.width || preview.source_height !== preview.height)
+                    ? `${preview.source_width} × ${preview.source_height} → ${preview.width} × ${preview.height}`
+                    : `${preview.width} × ${preview.height}`
+                  : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
               </span>
-              {options.crop_mode === "center" && <button
-                type="button"
-                className="preview-mode-button"
-                aria-pressed={showCropPreview}
-                disabled={!preview || (!showCropPreview && !cropFitsPreview) || !selectedSource}
-                title={showCropPreview ? "Trở lại khung nguồn" : cropFitsPreview ? "Xem ảnh crop thực tế từ frame hiện tại" : "Kích thước crop phải vừa với frame nguồn"}
-                onClick={() => {
-                  setPlaying(false);
-                  setShowCropPreview((current) => !current);
-                }}
-              >
-                <Crop size={13} aria-hidden="true" />{showCropPreview ? "Xem nguồn" : "Xem crop"}
-              </button>}
             </div>
           </div>
           <div className="preview-stage" ref={previewStageRef}>
-            {displayPreview && previewFrameBox ? (
+            {preview && previewFrameBox ? (
               <div className="preview-frame" style={{ width: previewFrameBox.width, height: previewFrameBox.height }}>
                 <img
                   className="preview-image"
-                  src={displayPreview.data_url}
-                  alt={showCropPreview ? `Crop ${displayPreview.width} × ${displayPreview.height} từ ${selectedSource?.name ?? "nguồn"}` : `Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`}
+                  src={preview.data_url}
+                  alt={`Frame ${frameIndex + 1} từ ${selectedSource?.name ?? "nguồn"}`}
                 />
-                {!showCropPreview && options.crop_mode === "center" && cropRect && preview && <div
+                {options.crop_mode === "center" && cropRect && <div
                   className={`crop-overlay${cropFitsPreview ? "" : " invalid"}`}
                   style={{
                     left: `${cropRect.x / preview.width * 100}%`,
@@ -984,22 +1274,18 @@ function App() {
                     height: `${cropRect.height / preview.height * 100}%`,
                   }}
                   aria-hidden="true"
-                ><span>Khóa · {options.output_width} × {options.output_height}</span></div>}
+                ><span>Vùng crop · {options.output_width} × {options.output_height} px</span></div>}
               </div>
-            ) : showCropPreview && cropPreviewLoading ? (
-              <div className="preview-empty"><LoaderCircle className="spin" size={25} /><p>Đang tạo preview crop…</p><small>Frame gốc không bị thay đổi.</small></div>
             ) : previewError ? (
               <div className="preview-empty preview-error"><AlertCircle size={26} /><p>Không tải được frame</p><small>{previewError}</small></div>
             ) : (
               <div className="preview-empty">
                 {selectedSource ? <LoaderCircle className="spin" size={25} /> : <FilmGlyph />}
                 <p>{selectedSource ? "Đang đọc frame nguồn…" : "Chọn hoặc thêm video / ảnh"}</p>
-                <small>{selectedSource ? "Frame được đọc trực tiếp từ tệp gốc." : "Preview hiển thị nội dung media thật, không có dữ liệu minh họa."}</small>
+                <small>{selectedSource?.kind === "video" ? "Chỉ nhận video tối đa FHD (1920 × 1080); video lớn hơn sẽ bị từ chối." : selectedSource ? "Đang tải ảnh nguồn thật, không có dữ liệu minh họa." : "Preview hiển thị nội dung media thật, không có dữ liệu minh họa."}</small>
                 {!selectedSource && <button type="button" className="primary-button" onClick={() => void chooseMedia(false)}><Plus size={15} /> Thêm media</button>}
               </div>
             )}
-            {showCropPreview && cropPreviewLoading && <div className="crop-preview-loading" role="status"><LoaderCircle className="spin" size={13} />Đang cập nhật crop…</div>}
-            {showCropPreview && cropPreviewError && <div className="crop-preview-error" role="status"><AlertCircle size={14} />{cropPreviewError}</div>}
           </div>
           <div className="player-controls">
             <div className="transport-controls">
@@ -1046,7 +1332,10 @@ function App() {
               </div>
               <label className="field-label max-frames-field">Giới hạn tổng frame <span>0 = không giới hạn</span><input type="number" min="0" step="1" value={options.max_frames} onChange={(event) => updateOptions({ max_frames: Number(event.target.value) })} /></label>
               <SettingToggle label="Lọc frame gần giống" checked={options.filter_duplicates} onChange={(checked) => updateOptions({ filter_duplicates: checked })} />
-              {options.filter_duplicates && <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />}
+              {options.filter_duplicates && <>
+                <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />
+                <p className="setting-note">{options.duplicate_threshold} bit là độ chênh tối đa giữa hai hash 64-bit, không phải số ảnh. Crop lệch ≤ {options.duplicate_threshold} bit so với crop đã giữ gần đây sẽ bị bỏ; số crop bị lọc hiện trong tổng kết sau khi trích.</p>
+              </>}
               <SettingToggle label="Lọc ảnh mờ" checked={options.filter_blurry} onChange={(checked) => updateOptions({ filter_blurry: checked })} />
               {options.filter_blurry && <ThresholdControl label="Độ nét Laplacian" value={options.blur_threshold} min={0} max={250} suffix="" onChange={(value) => updateOptions({ blur_threshold: value })} />}
               <p className="setting-note">Ngưỡng độ nét phụ thuộc độ phân giải và nội dung video.</p>
@@ -1056,7 +1345,7 @@ function App() {
               <div className="section-title-row"><h3>Chế độ crop</h3></div>
               <label className={`radio-option ${options.crop_mode === "center" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="center" checked={options.crop_mode === "center"} onChange={() => updateOptions({ crop_mode: "center" })} />
-                <span><strong>Exact Center Crop</strong><small>Cắt đúng pixel tại tâm, không resize</small></span>
+                <span><strong>Exact Center Crop</strong><small>Cắt đúng pixel tại tâm frame đã xử lý</small></span>
               </label>
               <label className={`radio-option ${options.crop_mode === "letterbox" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="letterbox" checked={options.crop_mode === "letterbox"} onChange={() => updateOptions({ crop_mode: "letterbox" })} />
@@ -1082,18 +1371,18 @@ function App() {
                 {[192, 256, 320, 416, 512, 640].map((size) => <button key={size} type="button" className={options.output_width === size && options.output_height === size ? "size-preset active" : "size-preset"} aria-pressed={options.output_width === size && options.output_height === size} onClick={() => updateOptions({ output_width: size, output_height: size })}>{size}</button>)}
               </div>
               <div className="form-grid two-col dimension-row">
-                <label className="field-label">Rộng<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
-                <label className="field-label">Cao<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
+                <label className="field-label">Rộng<input type="number" min={minimumOutputSize} max={FHD_WIDTH} step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
+                <label className="field-label">Cao<input type="number" min={minimumOutputSize} max={FHD_HEIGHT} step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
               </div>
               <div className="form-grid two-col output-options">
                 <label className="field-label">Định dạng<select value={options.image_format} onChange={(event) => updateOptions({ image_format: event.target.value as ExtractionOptions["image_format"] })}><option value="jpg">JPG</option><option value="png">PNG</option></select></label>
                 {options.crop_mode !== "center" && <label className="field-label">Viền<input type="color" value={options.padding_color} onChange={(event) => updateOptions({ padding_color: event.target.value })} /></label>}
               </div>
               {options.crop_mode === "center" && !cropSizeValid
-                ? <p className="crop-validation" role="alert">Nhập chiều rộng và chiều cao là số nguyên từ 1 đến 4096 px.</p>
+                ? <p className="crop-validation" role="alert">Kích thước tối đa là 1920 × 1080 px (FHD).</p>
                 : options.crop_mode === "center" && preview && !cropFitsPreview
                   ? <p className="crop-validation" role="alert">Crop {options.output_width} × {options.output_height} vượt khung nguồn {preview.width} × {preview.height}. Hãy giảm kích thước crop.</p>
-                  : options.crop_mode === "center" && <p className="crop-helper">Tâm crop dùng floor((khung − kích thước) / 2). Ảnh giữ nguyên pixel nguồn.</p>}
+                  : options.crop_mode === "center" && <p className="crop-helper">Chỉ nhận video tối đa FHD; tâm crop dùng floor((khung − kích thước) / 2) và không resize vùng crop.</p>}
               {options.image_format === "jpg" && <label className="quality-row">JPEG quality <input type="range" min="50" max="100" value={options.jpeg_quality} onChange={(event) => updateOptions({ jpeg_quality: Number(event.target.value) })} /><strong>{options.jpeg_quality}</strong></label>}
             </section>
 
@@ -1126,7 +1415,7 @@ function App() {
             <div><h2>Frame vừa trích</h2><span>{project.images.length} trong dự án{fileListTruncated ? " · đang hiển thị tối đa 500 ảnh gần nhất" : ""}</span></div>
             <div className="gallery-summary">
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
-              {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop trùng</span>}
+              {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop gần giống đã lọc</span>}
               {progress && progress.blurry_crops > 0 && <span>{progress.blurry_crops} crop mờ</span>}
               {progress && <span>{progress.elapsed_seconds}s</span>}
             </div>
@@ -1148,6 +1437,7 @@ function App() {
           </div>
         </section>
       </section>
+      )}
 
       <footer className="statusbar">
         <div className="status-left">
@@ -1159,7 +1449,7 @@ function App() {
         <div className="status-right">
           <span>{outputDirectory || "Đầu ra chưa chọn"}</span>
           <span className="status-separator">/</span>
-          <span>FrameForge · Trích xuất</span>
+          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : activeTab === "training" ? "Huấn luyện" : "Trích xuất"}</span>
         </div>
       </footer>
     </main>

@@ -1,8 +1,14 @@
 # FrameForge
 
-FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, huấn luyện YOLO11n và tiếp tục cải thiện model đã huấn luyện. Workspace hiện hỗ trợ nhập video/ảnh, preview media thật, lấy mẫu theo frame/giây, Exact Center Crop đúng pixel, lọc blur/dHash trên crop, crop letterbox/grid và lưu JPG/PNG cùng dự án SQLite `.ffproj`.
+FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, gán nhãn và huấn luyện YOLO11n. Workspace hỗ trợ nhập video/ảnh, preview frame thật, Exact Center Crop đúng pixel, quét thư mục tìm dataset/run/model, xuất YOLO và queue training riêng theo từng imgsz. Chỉ nhận video tối đa FHD 1920×1080; nguồn lớn hơn bị từ chối ở import, preview và extraction, không có tuỳ chọn video độ phân giải cao hơn và không tự scale. Nguồn nhỏ hơn giữ nguyên độ phân giải gốc.
 
-Huấn luyện YOLO11n, fine-tuning, inference, gán nhãn, quản lý dataset, benchmarking và export model là mục tiêu của sản phẩm nhưng **chưa triển khai**. Hiện ứng dụng chỉ đọc tensor/metadata của tệp ONNX bằng ONNX Runtime CPU; không tạo detection hay kết quả huấn luyện giả.
+Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận; dataset trên 20.000 ảnh và cấu hình trên 300 epoch cho từng `imgsz` được hỗ trợ. `imgsz` chỉ đổi kích thước ảnh trong training, không thay đổi giới hạn video nguồn FHD. Mỗi kích thước train chạy thành một job riêng, không nạp toàn bộ dataset vào RAM (`cache=False`). Đặt Patience = 0 để tắt early stopping. Fixture 20.003 ảnh và queue 301 epoch đã qua kiểm tra fake trainer; chưa đo throughput YOLO thật ở quy mô đó.
+
+Fine-tune và inference nhận checkpoint YOLO11n đã đăng ký, xác minh checksum và class schema. Có thể nhập `.pt` tương thích sau khi xác nhận tin cậy; FrameForge kiểm tra task/kiến trúc YOLO11n, giới hạn file 2 GiB, lưu bản sao quản lý riêng và giữ provenance. `.pt` có thể chứa mã thực thi, nên chỉ nhập nguồn bạn tin cậy. Checkpoint được phát hiện khi quét thư mục vẫn chưa tin cậy cho đến khi nhập riêng. Box AI và candidate ảnh âm tính phải được người dùng duyệt; ảnh còn box thủ công chưa review cũng bị loại khỏi dataset mặc định.
+
+Inference bỏ box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung. Nếu mọi box đều bị bỏ qua theo quy tắc này, ảnh không bị đánh dấu âm tính và vẫn cần người dùng review.
+
+Tab Huấn luyện có fixed-set evaluation và Champion/Challenger: chỉ so sánh cùng fixed validation, fingerprint/class schema và điều kiện inference/runtime/phần cứng; kiểm tra checksum, mục tiêu chất lượng và regression theo class; promote cần thao tác xác nhận và có thể rollback. Engine có fake-runtime coverage cho luồng này, nhưng máy hiện chưa có checkpoint nội bộ để xác minh với model thật. Benchmark inference triển khai và ONNX/TensorRT/OpenVINO export chưa khả dụng; ONNX Runtime hiện chỉ đọc tensor/metadata.
 
 ## Yêu cầu
 
@@ -23,6 +29,8 @@ pnpm install
 
 Trên Windows, dùng `.venv\Scripts\python.exe` thay cho `.venv/bin/python`. Có thể đặt `FRAMEFORGE_PYTHON` để chọn một Python interpreter khác đã cài các dependency trong `engine/pyproject.toml`.
 
+Để dùng tab Huấn luyện, cài PyTorch, Ultralytics và psutil bằng `.venv/bin/python -m pip install -e "engine[train]"` (Windows: `.venv\Scripts\python.exe -m pip install -e "engine[train]"`).
+
 ## Chạy ứng dụng
 
 ```sh
@@ -30,6 +38,8 @@ pnpm tauri dev
 ```
 
 Vite sử dụng cổng `1420`. Tauri gọi tiến trình Python qua JSON-lines và kiểm tra đường dẫn/lệnh ở Rust trước khi chạy.
+
+App bundle hiện đóng gói các module Python của `frameforge` cùng engine. Python runtime và dependencies vẫn cần có sẵn trên máy; standalone sidecar chưa được triển khai.
 
 ## Kiểm tra và build
 
@@ -47,10 +57,44 @@ pnpm tauri build
 
 - `src/` — React/TypeScript workspace
 - `src-tauri/` — ứng dụng Tauri 2 và cầu nối Rust an toàn
-- `engine/` — Python/OpenCV/ONNX Runtime, trích xuất và lưu dự án
+- engine/ — Python/OpenCV/ONNX Runtime, trích xuất, lưu dự án, kiểm tra dataset và YOLO11n training
 - `docs/design/` — hợp đồng giao diện cho workspace trích xuất
 - `PRODUCT.md`, `DESIGN.md`, `DEVELOPMENT.md` — phạm vi, hướng thiết kế và trạng thái phát triển
 
+## Đẩy nhánh lên GitHub
+
+Trước khi publish, kiểm tra `git status` và remote. Đăng nhập GitHub CLI bằng `gh auth login`, cấu hình Git dùng credential đó bằng `gh auth setup-git`, rồi đẩy nhánh làm việc:
+
+```sh
+git push --set-upstream origin feature/manual-labeling
+```
+
+Chỉ xem là đã publish khi lệnh push hoàn tất thành công.
+
 ## Trạng thái
 
-Đã triển khai media inspection/preview, trích frame có progress và hủy, Exact Center Crop, lọc dHash/Laplacian trên vùng crop, crop letterbox/grid, lưu provenance crop trong SQLite `.ffproj` và kiểm tra metadata ONNX bằng CPU. Inference, biên tập annotation, export dataset, YOLO11n training/fine-tuning, benchmarking, đóng gói Python sidecar và xác nhận Windows vẫn còn ở roadmap.
+Đã triển khai media preview/trích xuất, Exact Center Crop, gán nhãn, dataset validation/grouped split/YOLO export với negative sampling, lineage/replay, Smart Folder Discovery, YOLO11n training, inference, nhập checkpoint YOLO11n có xác nhận tin cậy, fixed-set evaluation và Champion/Challenger. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale hay thêm lựa chọn độ phân giải cao hơn. Video nhỏ hơn giữ nguyên độ phân giải. Kích thước `imgsz` trong training là cấu hình riêng.
+
+Preview giữ frame nguồn và vẽ viền cam đúng vùng crop tại tâm; với video 1920×1080 và crop 320×320, góc trái là `(800, 380)`. Checkpoint fine-tune/inference/evaluation phải được đăng ký và còn khớp SHA-256; checkpoint ngoài chỉ vào registry sau xác nhận tin cậy và kiểm tra tương thích. Dataset có thể đóng băng val/test sau khi review; child version giữ nguyên ảnh/nhãn evaluation và hỗ trợ replay train `all`, `balanced`, `new`. Evaluation lưu metric, target và điều kiện; Champion/Challenger chỉ dùng fixed validation tương thích, có xác nhận promote và lịch sử rollback. Phiên làm việc tự lưu và tự khôi phục im lặng khi mở app, không hiện hộp thoại phục hồi; nếu dự án gốc đã mất hoặc bị sửa ngoài app, bản khôi phục mở thành dự án chưa lưu để tránh ghi đè. Benchmark extraction tổng hợp 4 giờ nguồn chưa phải soak test trên video thực. Chưa có checkpoint thật để click-through luồng model nhập. Deployment benchmark/export, resume training, Python sidecar và Windows validation còn chờ.
+
+### Negative sampling cho dataset
+
+Mặc định giữ tối đa 10% ảnh negative đã review trong dataset cuối. Có preset 0%, 5%, 10%, 25% và tỷ lệ tùy chỉnh 0–100%; cùng seed cho kết quả tái lập, ảnh gần giống (dHash ≤5) bị loại khỏi mẫu. Ảnh negative thuộc fixed validation/test của parent luôn được giữ; nếu chúng vượt quota, report nêu tỷ lệ thực tế và cảnh báo.
+
+### Lọc frame gần giống bằng dHash
+
+Ngưỡng dHash là khoảng cách Hamming tối đa giữa hai hash 64-bit. Giá trị mặc định 5 bỏ crop có khoảng cách ≤5 bit so với một crop đã giữ gần đây; số 5 không phải số ảnh sẽ bị lọc. Engine so với tối đa 4.096 crop được giữ gần nhất. Sau khi trích xuất, gallery báo số crop gần giống thực tế đã bị loại. Tăng ngưỡng sẽ lọc nhiều crop gần giống hơn.
+
+### Đánh giá model trên fixed set
+
+Trong tab Huấn luyện, chọn checkpoint nội bộ đã xác minh và split validation/test đã đóng băng. Evaluator xác minh lại manifest, hash ảnh và nhãn của fixed set, class schema, split membership và rò rỉ fingerprint/group giữa train với evaluation. Kết quả gồm Precision, Recall, F1, mAP50, mAP50–95, metric từng class, cảnh báo tập nhỏ/thiếu class, checksum và điều kiện chạy; lịch sử được lưu cùng registry.
+
+Mục tiêu tổng thể và theo class để trống mặc định, do người dùng cấu hình. Kích thước model đo từ checkpoint; latency, FPS, throughput và RAM không được suy ra từ thời gian train/validation, nên hiện `not_measured` cho đến khi có benchmark triển khai riêng. Kết quả evaluator đã qua fake-runtime tests; chưa chạy model thật trong lượt này do registry local không có checkpoint usable.
+
+
+### Champion / Challenger
+
+Đánh giá validation mới nhất trở thành Challenger. Test chỉ dùng làm holdout cuối. So sánh yêu cầu cùng fixed validation/fingerprint, class schema, `imgsz`, confidence/NMS, batch, runtime/framework và phần cứng; checkpoint phải còn khớp SHA-256. Mức regression mặc định là 0; mọi target đã đặt phải đạt. Promote luôn do người dùng xác nhận, lịch sử được lưu và model trước có thể rollback. Luồng engine/UI đã qua engine tests bằng fake runtime; chưa được xác minh bằng checkpoint thật trên máy này.
+### Đo hiệu năng video dài
+
+Một batch benchmark gồm bốn bản sao của cùng fixture H.264 FHD một giờ (1920×1080, 30 fps; tổng 432.000 frame nguồn) lấy mẫu mỗi giây và xuất đủ 14.400 crop 320×320 trong 519,16 giây, tương đương 27,74× tổng thời lượng video; không có lỗi. RSS process đỉnh là 892,3 MiB, tổng ảnh JPG khoảng 48,1 MB. Đây là fixture tổng hợp ít chuyển động, chạy liên tục khoảng 8,7 phút; chưa đại diện video thực, nhiều nội dung hoặc codec khác. Xem [DEVELOPMENT.md](DEVELOPMENT.md) để biết điều kiện và giới hạn phép đo.
