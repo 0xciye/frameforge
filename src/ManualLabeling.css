@@ -143,6 +143,7 @@
 .label-ai-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 7px; }
 .label-ai-heading h3 { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
 .label-ai-heading h3 svg { color: #8eb7e4; }
+.label-ai-heading-actions { display: inline-flex; align-items: center; gap: 5px; }
 .label-ai-model { display: flex; flex-direction: column; gap: 5px; color: #b8bec8; font-size: 8px; }
 .label-ai-model select { width: 100%; min-height: 29px; padding: 0 7px; border: 1px solid #3b3d43; border-radius: 3px; color: #d9dee6; background: #191a1d; font-size: 9px; }
 .label-ai-model select:focus-visible, .label-box-row select:focus-visible { outline: 2px solid #78b2ff; outline-offset: 2px; }

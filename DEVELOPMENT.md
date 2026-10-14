@@ -11,23 +11,23 @@
 | Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; dHash dùng Hamming distance ≤ ngưỡng trên hash 64-bit, bounded 4.096 hash gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2/v3 migrate lên v4 khi ghi; annotation và negative candidate AI lưu provenance/fingerprint; autosave bảo toàn provenance |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
-| YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
+| YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 83 engine tests pass |
+| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 91 engine tests pass |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
-| Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
-| Import model YOLO bên ngoài | NOT_IMPLEMENTED | Chưa có trust flow, xác minh kiến trúc/class schema, sao chép quản lý hoặc đăng ký checkpoint cho inference/fine-tune |
+| Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint được phát hiện giữ `checkpoint_trusted=false` cho đến khi nhập riêng qua trust flow |
+| Import model YOLO bên ngoài | TESTED_ENGINE | Native dialog cảnh báo `.pt` có thể thực thi mã và yêu cầu xác nhận; kiểm tra detection/YOLO11n/class, giới hạn 2 GiB, xác minh checksum trước/sau khi nạp và sao chép; file riêng quyền hạn chế, provenance và registry được lưu; fake-runtime regression tests pass |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Smoke một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro. Kiểm tra synthetic 20.003 ảnh 320×320 và chuyển cấu hình 301 epoch tới hai imgsz bằng fake runtime; chưa xác nhận throughput/độ ổn định YOLO thật ở quy mô đầy đủ. |
-| Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký, nằm trong run và khớp checksum ở tệp, record và registry; từ chối `.pt` ngoài hoặc chưa đăng ký. |
+| Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection đã đăng ký, khớp checksum tệp/record/registry và class schema dataset; nguồn được phép gồm run FrameForge và checkpoint đã nhập qua xác nhận tin cậy. |
 | Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
 | Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Media batch benchmark FHD 4 giờ là phép đo extraction, không phải model benchmark. |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự tiếp theo: xác minh evaluation/Champion-Challenger bằng checkpoint nội bộ thật khi có model phù hợp → deployment benchmark/export → resume/recovery training → session recovery UI → Windows validation. Dataset lineage/replay và Champion-Challenger đã qua engine tests; panel so sánh chưa được click-through với model thật do registry local chưa có checkpoint usable. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
+Thứ tự tiếp theo: dùng checkpoint YOLO11n thật đã nhập hoặc train để click-through inference → manual review → dataset export → fixed-set evaluation/Champion-Challenger. Sau đó tiếp tục deployment benchmark/export, resume/recovery training, session recovery UI và Windows validation. Engine suite xác minh trust flow; registry local hiện chưa có checkpoint thật để kiểm tra luồng end-to-end. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
 
 ## Đo hiệu năng media
 
@@ -59,7 +59,7 @@ Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `v
 
 Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Các command được allowlist gồm health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, training_capabilities, inspect_training_dataset, list_training_runs, evaluate_yolo_checkpoint, list_model_evaluations, get_evaluation_targets, save_evaluation_targets, register_discovered_run, scan_project_folder, train_yolo_queue và predict_crops. Rust kiểm tra command, phần mở rộng, kích thước và đường dẫn trước khi gọi Python. Train có thể dừng tại ranh giới epoch; extraction, discovery, inference ảnh đơn/batch và evaluation hủy theo lô. Evaluation chỉ persist sau khi hoàn tất.
+Các command được allowlist gồm health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, training_capabilities, inspect_training_dataset, list_training_runs, import_yolo_checkpoint, evaluate_yolo_checkpoint, list_model_evaluations, get_evaluation_targets, save_evaluation_targets, register_discovered_run, scan_project_folder, train_yolo_queue và predict_crops. Rust kiểm tra command, phần mở rộng, kích thước và đường dẫn trước khi gọi Python. Import `.pt` cần `trust_source=true`; Python giới hạn file 2 GiB, xác minh SHA-256 trước/sau khi nạp và sao chép, rồi chỉ đăng ký YOLO11n detection có class hợp lệ. Train có thể dừng tại ranh giới epoch; extraction, discovery, inference ảnh đơn/batch và evaluation hủy theo lô. Evaluation chỉ persist sau khi hoàn tất.
 
 Ví dụ:
 
@@ -144,6 +144,13 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
+
+### 2026-10-14 — Nhập checkpoint YOLO11n có xác nhận tin cậy
+
+- **Thay đổi:** Thêm import `.pt` cho YOLO11n detection sau xác nhận cảnh báo mã thực thi. Engine kiểm tra kích thước không quá 2 GiB, task, kiến trúc/scale, class names và SHA-256 trước/sau khi nạp/copy; lưu file trong thư mục riêng, hạn chế quyền, giữ tên/hash/đường dẫn nguồn và đăng ký vào model registry. UI Gán nhãn hiển thị tên checkpoint nhập; Huấn luyện cho phép fine-tune khi class schema trùng dataset. Run tìm thấy bằng Smart Folder Discovery vẫn không được nạp tự động.
+- **Kiểm tra:** `pnpm test:engine` — 91 passed; `pnpm build` — thành công; `cargo fmt --check` — thành công; `cargo check` — thành công; `git diff --check` — sạch.
+- **Giới hạn:** Importer/fine-tune integration dùng fake Ultralytics runtime; chưa có tệp YOLO11n ngoài phù hợp để click-through inference hoặc training model thật. UI chỉ được kiểm tra bằng TypeScript/Vite build trong lượt này. Giới hạn video giữ nguyên ở FHD 1920×1080; không thêm tùy chọn video độ phân giải cao.
+- **Bước tiếp:** Dùng checkpoint YOLO11n thật đã nhập hoặc train để kiểm tra luồng inference/review/export/evaluation trong app.
 
 ### 2026-10-14 — Bỏ qua object vượt biên crop trong inference
 

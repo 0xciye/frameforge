@@ -27,6 +27,7 @@ import yaml
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 DEFAULT_MODEL = "yolo11n.pt"
 MAX_IMAGE_SIZE = 2048
+MAX_IMPORTED_CHECKPOINT_BYTES = 2 * 1024 * 1024 * 1024
 _PROMOTION_METRICS = ("precision", "recall", "f1", "map50", "map50_95")
 _PROMOTION_CLASS_METRICS = ("precision", "recall", "map50", "map50_95")
 _PROMOTION_CONDITION_KEYS = (
@@ -159,7 +160,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _is_internal_training_record(record: Dict[str, Any], checkpoint: Path) -> bool:
-    """Accept only YOLO11n detection checkpoints produced by a FrameForge run."""
+    """Accept only managed YOLO11n detection checkpoints or explicit trusted imports."""
     if record.get("source") == "external_discovery" or record.get("checkpoint_trusted") is False:
         return False
     if record.get("model") != "YOLO11n" or record.get("architecture") != "yolo11n" or record.get("task") != "detect":
@@ -369,6 +370,114 @@ def _class_names(value: Any) -> List[str]:
     if len({name.casefold() for name in normalized}) != len(normalized):
         raise ValueError("Tên class trong data.yaml bị trùng nhau.")
     return normalized
+
+
+def import_yolo_checkpoint(path_value: str, trust_source: Any) -> Dict[str, Any]:
+    """Validate and copy a user-trusted YOLO11n detection checkpoint into FrameForge."""
+    if trust_source is not True:
+        raise ValueError("Hãy xác nhận bạn tin cậy nguồn checkpoint trước khi nạp tệp `.pt`.")
+    if not isinstance(path_value, str) or not path_value:
+        raise ValueError("Chọn tệp checkpoint YOLO11n `.pt`.")
+    try:
+        source = Path(path_value).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("Không tìm thấy checkpoint đã chọn.") from error
+    if not source.is_file() or source.suffix.casefold() != ".pt":
+        raise ValueError("Chỉ nhận checkpoint YOLO11n detection dạng `.pt`.")
+    if source.stat().st_size <= 0 or source.stat().st_size > MAX_IMPORTED_CHECKPOINT_BYTES:
+        raise ValueError("Checkpoint phải có kích thước lớn hơn 0 và không vượt quá 2 GiB.")
+
+    source_sha256 = _sha256_file(source)
+    try:
+        from ultralytics import YOLO
+    except ImportError as error:
+        raise RuntimeError("Import checkpoint cần PyTorch và Ultralytics trong Python engine.") from error
+    try:
+        model = YOLO(str(source))
+    except Exception as error:
+        raise ValueError("Không nạp được checkpoint đã xác nhận tin cậy: {0}".format(error)) from error
+
+    if getattr(model, "task", None) != "detect":
+        raise ValueError("Checkpoint chỉ hỗ trợ task object detection.")
+    model_config = getattr(getattr(model, "model", None), "yaml", None)
+    if not isinstance(model_config, dict):
+        raise ValueError("Không xác định được kiến trúc trong checkpoint.")
+    config_name = Path(str(model_config.get("yaml_file", ""))).stem.casefold()
+    model_scale = model_config.get("scale")
+    is_yolo11n = (
+        (config_name == "yolo11" and model_scale == "n")
+        or config_name == "yolo11n"
+        or config_name.startswith("yolo11n-")
+    )
+    if not is_yolo11n:
+        raise ValueError("Chỉ hỗ trợ kiến trúc YOLO11n; checkpoint khác không được đăng ký.")
+    class_names = _class_names(getattr(model, "names", None))
+
+    if _sha256_file(source) != source_sha256:
+        raise ValueError("Checkpoint nguồn thay đổi trong khi xác minh; hãy chọn lại tệp.")
+
+    run_id = str(uuid.uuid4())
+    display_name = "".join(character for character in source.name if character.isprintable()).strip()[:120]
+    import_root = _training_root() / "imported"
+    import_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_dir = import_root / run_id
+    weights_dir = run_dir / "weights"
+    weights_dir.mkdir(parents=True, mode=0o700)
+    temporary = weights_dir / ".best.pt.partial"
+    checkpoint = weights_dir / "best.pt"
+    try:
+        with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+        os.chmod(temporary, 0o600)
+        if _sha256_file(source) != source_sha256 or _sha256_file(temporary) != source_sha256:
+            raise ValueError("Checksum nguồn hoặc bản sao checkpoint không khớp.")
+        os.replace(temporary, checkpoint)
+        overrides = getattr(model, "overrides", {})
+        requested_imgsz = overrides.get("imgsz", 640) if isinstance(overrides, dict) else 640
+        if isinstance(requested_imgsz, bool) or not isinstance(requested_imgsz, int) or not 1 <= requested_imgsz <= MAX_IMAGE_SIZE:
+            requested_imgsz = 640
+        now = _now()
+        record = {
+            "run_id": run_id,
+            "source": "frameforge_import",
+            "checkpoint_trusted": True,
+            "queue_id": "import-{0}".format(run_id),
+            "created_at": now,
+            "imported_at": now,
+            "completed_at": now,
+            "status": "completed",
+            "model": "YOLO11n",
+            "architecture": "yolo11n",
+            "task": "detect",
+            "display_name": display_name or "YOLO11n",
+            "requested_imgsz": requested_imgsz,
+            "effective_imgsz": requested_imgsz,
+            "base_model": "external checkpoint",
+            "parent_model_id": None,
+            "class_names": class_names,
+            "output_dir": str(run_dir),
+            "checkpoint_path": str(checkpoint),
+            "best_checkpoint": str(checkpoint),
+            "last_checkpoint": None,
+            "checkpoint_sha256": source_sha256,
+            "origin_path": str(source),
+            "origin_sha256": source_sha256,
+            "settings": {},
+            "metrics": {},
+            "error": None,
+        }
+        _persist_run(record)
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
+    return {
+        "run_id": run_id,
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": source_sha256,
+        "class_names": class_names,
+        "architecture": "yolo11n",
+        "display_name": display_name or "YOLO11n",
+    }
 
 
 def _resolve_dataset_root(data_file: Path, config: Dict[str, Any]) -> Path:
@@ -1941,9 +2050,12 @@ def train_yolo_queue(arguments: Dict[str, Any], progress: ProgressCallback = Non
         checkpoint = Path(base_model).expanduser().resolve(strict=True)
         if not checkpoint.is_file() or checkpoint.suffix.lower() != ".pt":
             raise ValueError("Checkpoint fine-tune phải là tệp .pt local hợp lệ.")
-        parent_model_id = _registered_checkpoint_run_id(checkpoint)
-        if parent_model_id is None:
+        parent_record = verified_checkpoint_record(checkpoint)
+        if parent_record is None:
             raise ValueError("Chỉ có thể fine-tune từ checkpoint YOLO11n nội bộ đã đăng ký, còn nguyên checksum.")
+        if parent_record.get("class_names") != dataset["class_names"]:
+            raise ValueError("Class schema của checkpoint fine-tune phải khớp với dataset.")
+        parent_model_id = parent_record["run_id"]
         base_model = str(checkpoint)
     else:
         parent_model_id = None

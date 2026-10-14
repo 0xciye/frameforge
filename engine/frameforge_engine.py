@@ -20,6 +20,7 @@ from frameforge.training import (
     get_model_promotion_state,
     get_evaluation_targets,
     inspect_training_dataset,
+    import_yolo_checkpoint,
     list_model_evaluations,
     list_training_runs,
     promote_model_challenger,
@@ -69,6 +70,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "project_batch_inference",
                     "candidate_negative_review",
                     "training_registry",
+                    "trusted_model_import",
                     "fixed_set_evaluation",
                     "evaluation_targets",
                     "champion_challenger_management",
@@ -174,6 +176,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = inspect_training_dataset(arguments["data_yaml"], progress)
         elif command == "list_training_runs":
             result = list_training_runs()
+        elif command == "import_yolo_checkpoint":
+            result = import_yolo_checkpoint(arguments.get("path"), arguments.get("trust_source"))
         elif command == "evaluate_yolo_checkpoint":
             result = evaluate_yolo_checkpoint(arguments, progress)
         elif command == "list_model_evaluations":

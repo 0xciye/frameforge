@@ -4,9 +4,7 @@ FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu obj
 
 Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận; dataset trên 20.000 ảnh và cấu hình trên 300 epoch cho từng `imgsz` được hỗ trợ. `imgsz` chỉ đổi kích thước ảnh trong training, không thay đổi giới hạn video nguồn FHD. Mỗi kích thước train chạy thành một job riêng, không nạp toàn bộ dataset vào RAM (`cache=False`). Đặt Patience = 0 để tắt early stopping. Fixture 20.003 ảnh và queue 301 epoch đã qua kiểm tra fake trainer; chưa đo throughput YOLO thật ở quy mô đó.
 
-Fine-tune/inference chỉ nhận checkpoint YOLO11n nội bộ có registry và checksum còn khớp. Gợi ý AI và candidate ảnh âm tính phải được người dùng duyệt trước khi vào dataset.
-
-Nạp checkpoint `.pt` bên ngoài để dùng inference/fine-tune chưa triển khai; model được phát hiện trong thư mục ngoài vẫn chưa tin cậy và không tự động được nạp.
+Fine-tune và inference nhận checkpoint YOLO11n đã đăng ký, xác minh checksum và class schema. Có thể nhập `.pt` tương thích sau khi xác nhận tin cậy; FrameForge kiểm tra task/kiến trúc YOLO11n, giới hạn file 2 GiB, lưu bản sao quản lý riêng và giữ provenance. `.pt` có thể chứa mã thực thi, nên chỉ nhập nguồn bạn tin cậy. Checkpoint được phát hiện khi quét thư mục vẫn chưa tin cậy cho đến khi nhập riêng. Gợi ý AI và candidate ảnh âm tính phải được người dùng duyệt trước khi vào dataset.
 
 Inference bỏ box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung. Nếu mọi box đều bị bỏ qua theo quy tắc này, ảnh không bị đánh dấu âm tính và vẫn cần người dùng review.
 
@@ -65,9 +63,9 @@ pnpm tauri build
 
 ## Trạng thái
 
-Đã triển khai media preview/trích xuất, Exact Center Crop, gán nhãn, dataset validation/grouped split/YOLO export, lineage/replay, Smart Folder Discovery, YOLO11n training, inference, fixed-set evaluation và Champion/Challenger. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale hay thêm lựa chọn độ phân giải cao hơn. Video nhỏ hơn giữ nguyên độ phân giải. Kích thước `imgsz` trong training là cấu hình riêng.
+Đã triển khai media preview/trích xuất, Exact Center Crop, gán nhãn, dataset validation/grouped split/YOLO export, lineage/replay, Smart Folder Discovery, YOLO11n training, inference, nhập checkpoint YOLO11n có xác nhận tin cậy, fixed-set evaluation và Champion/Challenger. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale hay thêm lựa chọn độ phân giải cao hơn. Video nhỏ hơn giữ nguyên độ phân giải. Kích thước `imgsz` trong training là cấu hình riêng.
 
-Preview giữ frame nguồn và vẽ viền cam đúng vùng crop tại tâm; với video 1920×1080 và crop 320×320, góc trái là `(800, 380)`. Checkpoint fine-tune/inference/evaluation phải thuộc run YOLO11n nội bộ đã đăng ký và còn khớp SHA-256. Dataset có thể đóng băng val/test sau khi review; child version giữ nguyên ảnh/nhãn evaluation và hỗ trợ replay train `all`, `balanced`, `new`. Evaluation lưu metric, target và điều kiện; Champion/Challenger chỉ dùng fixed validation tương thích, có xác nhận promote và lịch sử rollback. Video benchmark một giờ là fixture tổng hợp; chưa phải soak test nhiều giờ. Chưa có checkpoint nội bộ để click-through luồng model thật. Deployment benchmark/export, UI session recovery, resume training, Python sidecar và Windows validation còn chờ.
+Preview giữ frame nguồn và vẽ viền cam đúng vùng crop tại tâm; với video 1920×1080 và crop 320×320, góc trái là `(800, 380)`. Checkpoint fine-tune/inference/evaluation phải được đăng ký và còn khớp SHA-256; checkpoint ngoài chỉ vào registry sau xác nhận tin cậy và kiểm tra tương thích. Dataset có thể đóng băng val/test sau khi review; child version giữ nguyên ảnh/nhãn evaluation và hỗ trợ replay train `all`, `balanced`, `new`. Evaluation lưu metric, target và điều kiện; Champion/Challenger chỉ dùng fixed validation tương thích, có xác nhận promote và lịch sử rollback. Benchmark extraction tổng hợp 4 giờ nguồn chưa phải soak test trên video thực. Chưa có checkpoint thật để click-through luồng model nhập. Deployment benchmark/export, UI session recovery, resume training, Python sidecar và Windows validation còn chờ.
 
 ### Lọc frame gần giống bằng dHash
 

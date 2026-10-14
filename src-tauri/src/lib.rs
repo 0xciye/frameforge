@@ -826,6 +826,29 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 Err("Hãy chọn một tệp model .onnx hợp lệ.".to_string())
             }
         }
+        "import_yolo_checkpoint" => {
+            let path = canonical_existing_path(
+                arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu đường dẫn checkpoint YOLO11n.")?,
+            )?;
+            if !path.is_file()
+                || !path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+            {
+                return Err("Chọn một checkpoint YOLO `.pt` hợp lệ.".to_string());
+            }
+            if arguments.get("trust_source").and_then(Value::as_bool) != Some(true) {
+                return Err(
+                    "Hãy xác nhận bạn tin cậy nguồn checkpoint trước khi nạp tệp `.pt`."
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
         "extract_frames" => {
             let paths = arguments
                 .get("paths")

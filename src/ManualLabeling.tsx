@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   ArrowRight,
@@ -16,6 +17,7 @@ import {
   Redo2,
   Sparkles,
   Trash2,
+  Upload,
   Undo2,
   X,
   ZoomIn,
@@ -67,6 +69,8 @@ type SaveImage = (path: string, annotations: Annotation[], status: "ready" | "re
 type LoadPreview = (path: string) => Promise<LabelPreview>;
 type RegisteredModel = {
   run_id: string;
+  source?: string;
+  display_name?: string;
   checkpoint_path?: string | null;
   checkpoint_usable?: boolean;
   checkpoint_sha256?: string | null;
@@ -178,6 +182,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const [saveStates, setSaveStates] = useState<Record<string, SaveState>>({});
   const [models, setModels] = useState<RegisteredModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelImportBusy, setModelImportBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState("");
   const [inferenceBusy, setInferenceBusy] = useState(false);
@@ -245,6 +250,44 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       setModelsLoading(false);
     }
   }, []);
+
+  async function importModelCheckpoint() {
+    setModelError(null);
+    setModelImportBusy(true);
+    try {
+      const selected = await open({
+        title: "Chọn checkpoint YOLO11n",
+        multiple: false,
+        filters: [{ name: "YOLO checkpoint", extensions: ["pt"] }],
+      });
+      if (typeof selected !== "string") return;
+      const trusted = await confirm(
+        "Checkpoint .pt có thể chứa dữ liệu thực thi mã khi được nạp. Chỉ tiếp tục nếu bạn tự tạo tệp hoặc tin tưởng nguồn của nó. FrameForge sẽ kiểm tra task, kiến trúc YOLO11n và class, rồi sao chép checkpoint vào thư mục quản lý riêng.",
+        { title: "Xác nhận tin cậy checkpoint", kind: "warning", okLabel: "Tin cậy và nạp", cancelLabel: "Hủy" },
+      );
+      if (!trusted) return;
+      setInferenceError(null);
+      setInferenceMessage(null);
+      const imported = await engineRequest<{
+        run_id: string;
+        checkpoint_path: string;
+        class_names: string[];
+        architecture: string;
+        display_name: string;
+      }>("import_yolo_checkpoint", { path: selected, trust_source: true });
+      await refreshModels();
+      const matchesProject = imported.class_names.length === classes.length
+        && imported.class_names.every((name, index) => name === classes[index]);
+      if (matchesProject) setSelectedModelId(imported.run_id);
+      setInferenceMessage(matchesProject
+        ? `Đã nhập ${imported.architecture} với class ${imported.class_names.join(", ")}. Model sẵn sàng để gợi ý box.`
+        : `Đã nhập ${imported.architecture} (${imported.class_names.join(", ")}), nhưng class chưa khớp project hiện tại nên chưa thể dùng inference.`);
+    } catch (reason) {
+      setModelError(String(reason));
+    } finally {
+      setModelImportBusy(false);
+    }
+  }
 
   useEffect(() => { void refreshModels(); }, [refreshModels]);
 
@@ -819,17 +862,21 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
           <section className="label-tool-section label-ai-section" aria-label="Gợi ý nhãn bằng AI">
             <div className="label-ai-heading">
               <h3><Sparkles size={13} /> Gợi ý AI</h3>
-              <button type="button" className="label-icon-button" aria-label="Làm mới checkpoint" title="Làm mới checkpoint" disabled={modelsLoading || inferenceBusy} onClick={() => void refreshModels()}><RefreshCw size={12} /></button>
+              <div className="label-ai-heading-actions">
+                <button type="button" className="label-icon-button" aria-label="Nhập checkpoint YOLO11n" title="Nhập checkpoint YOLO11n" disabled={modelsLoading || inferenceBusy || modelImportBusy} onClick={() => void importModelCheckpoint()}><Upload size={12} /></button>
+                <button type="button" className="label-icon-button" aria-label="Làm mới checkpoint" title="Làm mới checkpoint" disabled={modelsLoading || inferenceBusy || modelImportBusy} onClick={() => void refreshModels()}><RefreshCw size={12} /></button>
+              </div>
             </div>
             <label className="label-ai-model">
-              <span>Checkpoint nội bộ</span>
-              <select aria-label="Checkpoint inference" value={selectedModelId} disabled={modelsLoading || inferenceBusy || usableModels.length === 0} onChange={(event) => setSelectedModelId(event.target.value)}>
+              <span>Checkpoint YOLO11n</span>
+              <select aria-label="Checkpoint inference" value={selectedModelId} disabled={modelsLoading || inferenceBusy || modelImportBusy || usableModels.length === 0} onChange={(event) => setSelectedModelId(event.target.value)}>
                 <option value="">{modelsLoading ? "Đang tải checkpoint…" : "Chọn checkpoint"}</option>
                 {usableModels.map((model) => <option key={model.run_id} value={model.run_id}>
-                  YOLO11n · {model.effective_imgsz ?? model.requested_imgsz ?? "—"} px · {model.run_id.slice(0, 8)}
+                  {model.source === "frameforge_import" ? model.display_name ?? "Đã nhập YOLO11n" : "YOLO11n"} · {model.effective_imgsz ?? model.requested_imgsz ?? "—"} px · {model.run_id.slice(0, 8)}
                 </option>)}
               </select>
             </label>
+            {modelImportBusy && <small className="label-ai-note">Đang chọn hoặc xác minh checkpoint…</small>}
             {inferenceBusy ? (
               <button type="button" className="subtle-button label-ai-run-button" disabled={inferenceCancelling} onClick={() => void cancelInference()}>
                 <X size={13} /> {inferenceCancelling ? "Đang dừng…" : "Dừng inference"}
@@ -845,7 +892,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
               </>
             )}
             {modelsLoading && <small className="label-ai-note">Đang đọc registry checkpoint…</small>}
-            {!modelsLoading && usableModels.length === 0 && <small className="label-ai-note">Chưa có checkpoint YOLO11n nội bộ khớp class của dự án.</small>}
+            {!modelsLoading && usableModels.length === 0 && <small className="label-ai-note">Chưa có checkpoint YOLO11n khớp class của dự án. Dùng nút mũi tên lên để nhập tệp .pt từ nguồn bạn tin tưởng.</small>}
             {alreadySuggestedByModel && <small className="label-ai-note">Ảnh đã có gợi ý từ checkpoint này. Duyệt hoặc loại chúng trước khi chạy lại.</small>}
             {inferenceBusy && <small className="label-ai-progress" aria-live="polite"><LoaderCircle className="spin" size={12} /> {inferenceCancelling
               ? "Đang dừng an toàn và lưu phần đã xử lý…"
@@ -853,9 +900,9 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                 ? `Đang xử lý project: ${inferenceProgress.completed_images ?? 0}/${inferenceProgress.total_images ?? inferenceProgress.eligible_images ?? 0} ảnh${inferenceProgress.saved_images ? ` · đã lưu ${inferenceProgress.saved_images}` : ""}`
                 : inferenceProgress?.stage === "inference_started" ? "Đang chạy YOLO trên ảnh hiện tại…" : "Đang khởi tạo inference…"}</small>}
             {inferenceMessage && <small className="label-ai-note" aria-live="polite">{inferenceMessage}</small>}
-            {modelError && <small className="label-ai-error" role="alert">Không đọc được registry checkpoint: {modelError}</small>}
+            {modelError && <small className="label-ai-error" role="alert">Không thể xử lý checkpoint: {modelError}</small>}
             {inferenceError && <small className="label-ai-error" role="alert">Inference chưa hoàn tất: {inferenceError}</small>}
-            <small className="label-ai-note">Box AI chỉ vào dataset sau khi được duyệt. Ảnh không có detection thành candidate âm tính và phải được xác nhận riêng.</small>
+            <small className="label-ai-note">Box AI chỉ vào dataset sau khi được duyệt. Object có box chạm biên crop sẽ bị bỏ qua; ảnh không có detection thực sự thành candidate âm tính và phải được xác nhận riêng.</small>
           </section>
 
           <section className="label-tool-section" aria-label="Chọn class để vẽ box">

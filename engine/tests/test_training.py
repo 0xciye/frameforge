@@ -36,6 +36,149 @@ def create_yolo_dataset(root: Path, with_validation: bool = True) -> Path:
     return data_yaml
 
 
+def install_fake_import_model(monkeypatch: pytest.MonkeyPatch, *, task="detect", yaml_file="yolo11.yaml", scale="n"):
+    class FakeYOLO:
+        calls = []
+
+        def __init__(self, source):
+            self.calls.append(source)
+            self.task = task
+            self.names = {0: "head", 1: "body"}
+            self.model = SimpleNamespace(yaml={"yaml_file": yaml_file, "scale": scale})
+            self.overrides = {"imgsz": 320}
+
+    module = ModuleType("ultralytics")
+    module.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", module)
+    return FakeYOLO
+
+
+def test_import_yolo_checkpoint_requires_explicit_trust_and_registers_verified_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"trusted YOLO11n checkpoint fixture")
+    FakeYOLO = install_fake_import_model(monkeypatch)
+
+    with pytest.raises(ValueError, match="xác nhận bạn tin cậy"):
+        training.import_yolo_checkpoint(str(checkpoint), False)
+    assert FakeYOLO.calls == []
+
+    imported = training.import_yolo_checkpoint(str(checkpoint), True)
+
+    managed = Path(imported["checkpoint_path"])
+    assert imported["display_name"] == checkpoint.name
+    assert managed.is_file()
+    assert managed.read_bytes() == checkpoint.read_bytes()
+    record = training.verified_checkpoint_record(managed)
+    assert record is not None
+    assert record["source"] == "frameforge_import"
+    assert record["display_name"] == checkpoint.name
+    assert record["class_names"] == ["head", "body"]
+    assert record["origin_sha256"] == imported["checkpoint_sha256"]
+    listed = training.list_training_runs()["runs"]
+    imported_run = next(item for item in listed if item["run_id"] == imported["run_id"])
+    assert imported_run["checkpoint_usable"] is True
+    assert imported_run["checkpoint_checksum_matches"] is True
+
+
+@pytest.mark.parametrize(
+    ("task", "yaml_file", "scale", "message"),
+    [
+        ("segment", "yolo11.yaml", "n", "task object detection"),
+        ("detect", "yolov8n.yaml", "n", "kiến trúc YOLO11n"),
+        ("detect", "yolo11.yaml", "s", "kiến trúc YOLO11n"),
+        ("detect", "yolo11x.yaml", "n", "kiến trúc YOLO11n"),
+    ],
+)
+def test_import_yolo_checkpoint_rejects_wrong_task_or_architecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task, yaml_file, scale, message,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = tmp_path / "unsupported.pt"
+    checkpoint.write_bytes(b"unsupported checkpoint fixture")
+    install_fake_import_model(monkeypatch, task=task, yaml_file=yaml_file, scale=scale)
+
+    with pytest.raises(ValueError, match=message):
+        training.import_yolo_checkpoint(str(checkpoint), True)
+
+    assert training.list_training_runs()["runs"] == []
+
+
+def test_imported_checkpoint_is_fine_tune_parent_only_when_class_schema_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    data_yaml = create_yolo_dataset(tmp_path / "dataset")
+    checkpoint = tmp_path / "custom-model.pt"
+    checkpoint.write_bytes(b"trusted YOLO11n checkpoint fixture")
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    install_fake_import_model(monkeypatch)
+    imported = training.import_yolo_checkpoint(str(checkpoint), True)
+    output_dir = tmp_path / "fine-tune-output"
+    output_dir.mkdir()
+    FakeYOLO = install_fake_training_runtime(monkeypatch)
+    arguments = {
+        "data_yaml": str(data_yaml),
+        "output_dir": str(output_dir),
+        "sizes": [128],
+        "device": "auto",
+        "base_model": imported["checkpoint_path"],
+        "settings": {"epochs": 1, "batch": 2, "workers": 0},
+    }
+
+    with pytest.raises(ValueError, match="Class schema"):
+        training.train_yolo_queue(arguments)
+    assert FakeYOLO.sources == []
+
+    config = yaml.safe_load(data_yaml.read_text(encoding="utf-8"))
+    config["names"] = {0: "head", 1: "body"}
+    data_yaml.write_text(yaml.safe_dump(config), encoding="utf-8")
+    fine_tune = training.train_yolo_queue(arguments)
+
+    assert fine_tune["status"] == "completed"
+    assert fine_tune["jobs"][0]["parent_model_id"] == imported["run_id"]
+    assert FakeYOLO.sources == [imported["checkpoint_path"]]
+
+
+def test_import_yolo_checkpoint_rejects_oversized_file_before_model_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    checkpoint = tmp_path / "oversized.pt"
+    with checkpoint.open("wb") as stream:
+        stream.truncate(training.MAX_IMPORTED_CHECKPOINT_BYTES + 1)
+    FakeYOLO = install_fake_import_model(monkeypatch)
+
+    with pytest.raises(ValueError, match="không vượt quá 2 GiB"):
+        training.import_yolo_checkpoint(str(checkpoint), True)
+
+    assert FakeYOLO.calls == []
+
+
+def test_import_yolo_checkpoint_rejects_source_changed_during_model_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = tmp_path / "changing.pt"
+    checkpoint.write_bytes(b"original checkpoint")
+
+    class MutatingYOLO:
+        def __init__(self, source):
+            Path(source).write_bytes(b"changed during load")
+            self.task = "detect"
+            self.names = {0: "head"}
+            self.model = SimpleNamespace(yaml={"yaml_file": "yolo11.yaml", "scale": "n"})
+
+    module = ModuleType("ultralytics")
+    module.YOLO = MutatingYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", module)
+
+    with pytest.raises(ValueError, match="nguồn thay đổi trong khi xác minh"):
+        training.import_yolo_checkpoint(str(checkpoint), True)
+
+    assert training.list_training_runs()["runs"] == []
+
+
 def test_training_dataset_preflight_checks_images_labels_and_fingerprint(tmp_path: Path):
     data_yaml = create_yolo_dataset(tmp_path / "dataset")
 

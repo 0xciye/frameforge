@@ -36,7 +36,7 @@ type TrainingRun = {
   source?: string; name?: string; training_imgsz?: number | number[] | null;
   architecture_claimed?: string | null; task_claimed?: string | null; checkpoint_trusted?: boolean;
   checkpoint_path?: string | null; checkpoint_exists?: boolean; checkpoint_checksum_matches?: boolean | null;
-  checkpoint_usable?: boolean; device_actual?: string | null; base_model?: string; parent_model_id?: string | null;
+  checkpoint_usable?: boolean; device_actual?: string | null; base_model?: string; parent_model_id?: string | null; display_name?: string;
   dataset_id?: string | null; class_names?: string[]; completed_at?: string | null; metrics?: Record<string, unknown>;
   best_checkpoint?: string | null; error?: string | null; elapsed_seconds?: number | null;
 };
@@ -670,7 +670,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
             <label className="train-field">Checkpoint khởi tạo
               <select value={baseModel} onChange={(event) => setBaseModel(event.target.value)} disabled={running}>
                 <option value="yolo11n.pt">YOLO11n pretrained · yolo11n.pt</option>
-                {bestRuns.map((run) => <option value={run.checkpoint_path!} key={run.run_id}>YOLO11n · {run.effective_imgsz ?? run.requested_imgsz}px · {run.run_id.slice(0, 8)}{run.checkpoint_checksum_matches === false ? " · checksum mismatch" : ""}</option>)}
+                {bestRuns.map((run) => <option value={run.checkpoint_path!} key={run.run_id}>{run.source === "frameforge_import" ? `Đã nhập · ${run.display_name ?? "YOLO11n"}` : "YOLO11n"} · {run.effective_imgsz ?? run.requested_imgsz}px · {run.run_id.slice(0, 8)}{run.checkpoint_checksum_matches === false ? " · checksum mismatch" : ""}</option>)}
               </select>
               <small>{selectedParent ? "Tạo fine-tune mới; checkpoint cha được giữ nguyên." : "Mỗi độ phân giải nạp lại cùng model pretrained, không kế thừa weights của job trước."}</small>
             </label>
@@ -947,13 +947,13 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
 
           <section className="train-card train-registry-card">
             <div className="train-card-heading"><div><Database size={15} /><h2>Checkpoint đã đăng ký</h2></div><button className="train-text-button" type="button" onClick={() => void refreshRuns()} disabled={running}><RefreshCw size={12} /> Làm mới</button></div>
-            <p className="train-registry-note">Có {bestRuns.length} checkpoint nội bộ đủ điều kiện fine-tune. Run quét từ thư mục ngoài được lưu metadata riêng và không nạp checkpoint trước khi xác minh nguồn.</p>
+            <p className="train-registry-note">Có {bestRuns.length} checkpoint nội bộ hoặc đã nhập đủ điều kiện fine-tune. Run quét từ thư mục ngoài vẫn cần được xác minh và nhập riêng.</p>
             {runs.length === 0 ? <small className="train-empty-note">Chưa có checkpoint hoặc run lịch sử.</small> : <div className="train-result-list">{runs.slice(0, 8).map((run) => {
               const imageSize = run.training_imgsz ?? (run.requested_imgsz > 0 ? run.requested_imgsz : null);
               const imageSizeLabel = Array.isArray(imageSize) ? `${imageSize.join("×")} px` : imageSize ? `${imageSize} px` : "imgsz chưa ghi";
               return <article className="train-result-row" key={run.run_id}>
-              <div><strong>{run.source === "external_discovery" ? run.name ?? "Run bên ngoài" : `YOLO11n · ${run.effective_imgsz ?? run.requested_imgsz}px`}</strong><span className={run.checkpoint_usable ? "available" : "unavailable"}>{run.source === "external_discovery" ? "Metadata · checkpoint chưa tin cậy" : run.checkpoint_usable ? "Sẵn sàng" : "Thiếu hoặc checksum đổi"}</span></div>
-              <small>{run.source === "external_discovery" ? `${run.architecture_claimed ?? "Model chưa rõ"} · ${run.task_claimed ?? "task chưa rõ"} · ${imageSizeLabel}` : `${run.status} · ${run.device_actual ?? "thiết bị chưa ghi"}`} · {run.run_id.slice(0, 8)}</small>
+              <div><strong>{run.source === "external_discovery" ? run.name ?? "Run bên ngoài" : run.source === "frameforge_import" ? `Đã nhập · ${run.display_name ?? "YOLO11n"}` : `YOLO11n · ${run.effective_imgsz ?? run.requested_imgsz}px`}</strong><span className={run.checkpoint_usable ? "available" : "unavailable"}>{run.source === "external_discovery" ? "Metadata · checkpoint chưa tin cậy" : run.checkpoint_usable ? "Sẵn sàng" : "Thiếu hoặc checksum đổi"}</span></div>
+              <small>{run.source === "external_discovery" ? `${run.architecture_claimed ?? "Model chưa rõ"} · ${run.task_claimed ?? "task chưa rõ"} · ${imageSizeLabel}` : run.source === "frameforge_import" ? `${run.class_names?.join(", ") ?? "Class chưa ghi"} · imgsz ${run.effective_imgsz ?? run.requested_imgsz}px` : `${run.status} · ${run.device_actual ?? "thiết bị chưa ghi"}`} · {run.run_id.slice(0, 8)}</small>
               {run.checkpoint_path && <code title={run.checkpoint_path}>{run.checkpoint_path}</code>}
             </article>;
             })}</div>}
