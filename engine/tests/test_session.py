@@ -1,3 +1,4 @@
+import os
 import stat
 import sys
 from pathlib import Path
@@ -33,9 +34,10 @@ def test_session_restores_project_state_and_detects_external_project_changes(tmp
     assert restored["original_project_unchanged"] is True
     assert restored["project"]["settings"]["output_width"] == 320
     assert restored["session"]["frame_index"] == 24
-    assert stat.S_IMODE((app_data / "session" / "last-session.ffproj").stat().st_mode) == 0o600
-    assert stat.S_IMODE((app_data / "session" / "last-session.json").stat().st_mode) == 0o600
-    assert stat.S_IMODE((app_data / "session").stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE((app_data / "session" / "last-session.ffproj").stat().st_mode) == 0o600
+        assert stat.S_IMODE((app_data / "session" / "last-session.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE((app_data / "session").stat().st_mode) == 0o700
 
     project["settings"]["output_width"] = 640
     save_project(str(project_path), project)

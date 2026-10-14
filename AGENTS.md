@@ -25,9 +25,10 @@
 - Tự lưu snapshot workspace cục bộ và tự khôi phục sau health check, không hiện hộp thoại phục hồi. Ghi qua hàng đợi project để không đảo thứ tự với annotation/save; nếu `.ffproj` gốc mất hoặc checksum đổi, mở snapshot thành dự án chưa lưu để tránh ghi đè âm thầm.
 - Giữ cầu nối Tauri an toàn: allowlist command, xác thực đường dẫn/argument và gọi tiến trình trực tiếp; không chạy lệnh qua shell.
 - Giao thức engine là JSON-lines UTF-8: mỗi request và response chiếm một dòng.
+- Image I/O phải hỗ trợ đường dẫn Unicode trên Windows bằng đọc/ghi byte; ghi label YOLO bằng byte UTF-8 để checksum khớp chính xác, không phụ thuộc newline translation của hệ điều hành.
 - Khi thêm module được import từ `engine/frameforge_engine.py`, thêm module đó vào resource list trong `src-tauri/tauri.conf.json` và kiểm tra import/health từ engine trong app bundle.
 - Chạy kiểm thử phù hợp sau thay đổi; không ghi kết quả kiểm thử chưa chạy.
 - Trạng thái production release phải nêu rõ Python runtime/dependencies, ký/notarize macOS, ký Windows, kiểm chứng Windows và test với dữ liệu/model thật. Không gắn nhãn 1.0.0 hoặc tuyên bố production-ready khi một trong các cổng phát hành này còn mở.
 - Trước khi commit/push, kiểm tra `git status`, nhánh và remote; không đưa cache, media, model weights hoặc credentials vào Git. Chỉ ghi đã publish khi lệnh push thành công.
 - Sau mỗi lượt hoàn thành, cập nhật `README.md`, `AGENTS.md` và `DEVELOPMENT.md`; đồng bộ `PRODUCT.md`, `DESIGN.md` và `CHANGELOG.md` khi có thay đổi liên quan. Dùng `AGENTS.md` làm hướng dẫn agent chuẩn, không tạo file hướng dẫn hoặc task ledger trùng lặp.
-- Không khẳng định hỗ trợ Windows trước khi build/test Windows; DirectML và RX 6600 còn chờ máy Windows.
+- Ghi đúng trạng thái Windows CI/build trong tài liệu; không khẳng định hỗ trợ trên máy người dùng trước khi xác nhận cài/chạy thực tế. DirectML và RX 6600 còn chờ kiểm chứng trên phần cứng Windows.

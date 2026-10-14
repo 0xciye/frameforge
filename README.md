@@ -57,7 +57,7 @@ Media, gán nhãn, dataset, inference và workflow YOLO11n đã được triển
 
 ## Tình trạng phát hành v1.0
 
-FrameForge hiện vẫn là bản tiền phát hành `0.1.0`; chưa xác nhận production-ready. App yêu cầu Python 3.10+ và engine dependencies cài riêng; PyTorch/Ultralytics là phần cài thêm cho training/inference. Bản phát hành cài được trên máy sạch, ký/notarize cho macOS và ký MSI Windows vẫn chưa hoàn tất. Không phát hành hoặc gắn nhãn `1.0.0` cho đến khi các cổng này và kiểm thử Windows được xác nhận. Xem bảng cổng phát hành trong [DEVELOPMENT.md](DEVELOPMENT.md).
+FrameForge hiện vẫn là bản tiền phát hành `0.1.0`; chưa xác nhận production-ready. App yêu cầu Python 3.10+ và engine dependencies cài riêng; PyTorch/Ultralytics là phần cài thêm cho training/inference. Bản phát hành cài được trên máy sạch, ký/notarize cho macOS và ký MSI Windows vẫn chưa hoàn tất. CI lần đầu trên Windows phát hiện lỗi đường dẫn Unicode, checksum label do newline và assertion permission Unix; các sửa lỗi đã chạy local và đang chờ CI xác nhận lại. Không phát hành hoặc gắn nhãn `1.0.0` cho đến khi các cổng này được đóng. Xem [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Giấy phép
 

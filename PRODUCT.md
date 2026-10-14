@@ -7,7 +7,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 ## Đã triển khai
 
 - Workspace desktop Tauri 2, React và TypeScript bằng tiếng Việt.
-- Nhập video/ảnh bằng dialog, kéo thả hoặc quét thư mục; đọc metadata và preview frame thật. Chỉ nhận video tối đa 1920×1080; video lớn hơn bị từ chối thay vì scale.
+- Nhập video/ảnh bằng dialog, kéo thả hoặc quét thư mục; đọc metadata và preview frame thật. Image I/O hỗ trợ đường dẫn Unicode trên Windows; checksum label được tính trên đúng byte đã ghi. Chỉ nhận video tối đa 1920×1080; video lớn hơn bị từ chối thay vì scale.
 - Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian. dHash là dấu vân tay cảm nhận 64-bit; mặc định ngưỡng Hamming ≤1 chỉ bỏ crop gần như trùng, so với tối đa 4.096 crop được giữ gần nhất. Ngưỡng cao hơn lọc mạnh hơn; gallery báo số crop thực tế bị lọc.
 - Exact Center Crop cắt đúng vùng W×H từ tâm frame nguồn, không resize/padding vùng crop; preview phủ overlay đúng pixel. Video lớn hơn 1920×1080 bị từ chối. Full-frame letterbox và grid vẫn khả dụng; kích thước crop/output tối đa 1920×1080.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.

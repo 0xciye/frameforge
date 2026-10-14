@@ -34,6 +34,29 @@ def _require_fhd_video(frame: np.ndarray) -> None:
         )
 
 
+def _read_image(path: Path, flags: int) -> Optional[np.ndarray]:
+    """Decode image bytes through Python's Unicode-aware file handling."""
+    try:
+        encoded = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if encoded.size == 0:
+        return None
+    return cv2.imdecode(encoded, flags)
+
+
+def _write_encoded_image(path: Path, frame: np.ndarray, params: Optional[List[int]] = None) -> bool:
+    """Encode image bytes through Python's Unicode-aware file handling."""
+    ok, encoded = cv2.imencode(path.suffix, frame, params or [])
+    if not ok:
+        return False
+    try:
+        path.write_bytes(encoded.tobytes())
+    except OSError:
+        return False
+    return True
+
+
 def _candidate_paths(selected_paths: Iterable[str]) -> Tuple[List[Path], int]:
     paths: List[Path] = []
     unsupported = 0
@@ -67,7 +90,7 @@ def probe_media(path_value: str) -> Dict[str, Any]:
     suffix = path.suffix.lower()
 
     if suffix in IMAGE_EXTENSIONS:
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        image = _read_image(path, cv2.IMREAD_UNCHANGED)
         if image is None:
             raise ValueError("Không đọc được ảnh hoặc định dạng ảnh không hợp lệ.")
         height, width = image.shape[:2]
@@ -131,7 +154,7 @@ def inspect_sources(selected_paths: Iterable[str]) -> Dict[str, Any]:
 
 def _read_frame(path: Path, frame_index: int) -> np.ndarray:
     if path.suffix.lower() in IMAGE_EXTENSIONS:
-        frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        frame = _read_image(path, cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("Không đọc được ảnh nguồn.")
         return frame
@@ -491,7 +514,7 @@ def _write_image(frame: np.ndarray, destination: Path, image_format: str, qualit
     target = destination.with_suffix(extension)
     temporary = target.with_name(target.stem + ".partial" + target.suffix)
     try:
-        if not cv2.imwrite(str(temporary), frame, params):
+        if not _write_encoded_image(temporary, frame, params):
             return False
         os.replace(str(temporary), str(target))
         return True
@@ -637,7 +660,7 @@ def extract_frames(
             info = probe_media(str(source))
             source_id = _source_identity(source)
             if info["kind"] == "image":
-                frame = cv2.imread(str(source), cv2.IMREAD_COLOR)
+                frame = _read_image(source, cv2.IMREAD_COLOR)
                 if frame is None:
                     raise ValueError("Không đọc được ảnh nguồn.")
                 process_frame(source_index, source, source_id, 0, 0.0, frame)

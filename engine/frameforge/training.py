@@ -23,6 +23,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO
 import cv2
 import yaml
 
+from frameforge.media import _read_image
+
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 DEFAULT_MODEL = "yolo11n.pt"
@@ -831,7 +833,7 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
     all_images = [(split, image) for split, images in split_images.items() for image in images]
     for index, (split_name, image_path) in enumerate(all_images, start=1):
         try:
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            image = _read_image(image_path, cv2.IMREAD_COLOR)
             if image is None:
                 errors.append("Ảnh không giải mã được: {0}".format(image_path))
                 continue
@@ -1059,7 +1061,7 @@ def _inspect_fixed_evaluation_set(
             errors.append("Ảnh trong fixed set chưa được review: {0}".format(row.get("exported_image")))
         if _label_path(image_path).resolve() != label_path:
             errors.append("Đường dẫn label không khớp quy ước YOLO: {0}".format(row.get("exported_label")))
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image = _read_image(image_path, cv2.IMREAD_COLOR)
         if image is None:
             errors.append("Ảnh fixed set không giải mã được: {0}".format(image_path))
         elif image.shape[1] != row.get("width") or image.shape[0] != row.get("height"):

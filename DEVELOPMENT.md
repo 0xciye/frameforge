@@ -27,10 +27,10 @@
 | Khôi phục phiên làm việc | TESTED_ENGINE + BUILT_UI | Snapshot riêng tư lưu project và trạng thái workspace; frontend tự lưu sau debounce, tự khôi phục không hiện hộp thoại. Nếu dự án gốc mất hoặc checksum đổi, snapshot mở thành dự án chưa lưu. Engine có regression tests; UI đã build nhưng chưa click-through trên app bundle mới. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
 | Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Media batch benchmark FHD 4 giờ là phép đo extraction, không phải model benchmark. |
-| Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
-| CI frontend/engine/Rust đa nền tảng | WORKFLOW_CONFIGURED_AWAITING_RUN | Workflow kiểm tra Ubuntu/macOS/Windows; kết quả trên remote sẽ được xác nhận sau khi push. CI không xác nhận GPU/DirectML hoặc phần cứng người dùng. |
+| Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | CI dùng runner Windows thật nhưng chưa chứng minh tương thích trên máy người dùng/GPU. DirectML và RX 6600 chưa được kiểm chứng. |
+| CI frontend/engine/Rust đa nền tảng | WINDOWS_FIX_RERUN_PENDING | Run `38562287683`: Ubuntu/macOS pass; Windows 105 pass, 5 fail. Đã sửa permission assertion chỉ dành cho POSIX, I/O ảnh Unicode và newline translation làm lệch SHA-256 label; bản sửa local pass, đang chờ workflow mới. CI không xác nhận GPU/DirectML hoặc phần cứng người dùng. |
 | Đóng gói macOS | TESTED_MACOS | `pnpm tauri build --bundles app` tạo `FrameForge.app` 4,50 MiB; health JSON-lines từ Python engine trong bundle trả `status: ok` khi chạy bằng `.venv`. Chưa thử cài trên máy sạch. |
-| Đóng gói Windows MSI | PENDING_GITHUB_ACTIONS | Workflow có bước build MSI trên Windows runner; chưa có kết quả runner trong lượt này và chưa click-through/cài đặt trên máy Windows. |
+| Đóng gói Windows MSI | PENDING_GITHUB_ACTIONS | Run đầu dừng ở engine tests nên MSI step chưa chạy; rerun cần qua trước khi xác nhận build, sau đó cần click-through/cài trên máy Windows. |
 | Python runtime và dependencies trong installer | RELEASE_BLOCKER | Bundle hiện chỉ mang mã nguồn engine; người dùng phải tự cài Python cùng dependencies, và `engine[train]` cho training/inference. |
 | Ký phát hành macOS/Windows | RELEASE_BLOCKER | Chưa cấu hình notarization macOS hoặc ký MSI Windows; app bundle vừa build không phải installer đã ký để phân phối công khai. |
 
@@ -46,7 +46,7 @@ Thứ tự tiếp theo: dùng checkpoint YOLO11n thật đã nhập hoặc train
 - Click-through inference/review/export/evaluation bằng checkpoint YOLO11n thật và dataset đã review; không dùng fixture để kết luận chất lượng model.
 - Chạy soak extraction bằng video FHD thực, nhiều codec/nội dung và thời lượng dài hơn batch fixture tổng hợp đã ghi ở trên.
 
-Thay đổi trong lượt rà soát này: nhập checkpoint `.pt` bằng bản sao riêng đã xác minh trước khi nạp, kiểm tra lại sau khi nạp và giới hạn đọc/sao chép 2 GiB; Rust chỉ giữ tối đa 256 KiB stderr cho mỗi request nhưng vẫn drain pipe. Engine tests: 110 passed; Rust unit test chặn log không giới hạn: 1 passed; frontend production build và Rust compile đã qua.
+Thay đổi trong lượt rà soát này: nhập checkpoint `.pt` bằng bản sao riêng đã xác minh trước khi nạp, kiểm tra lại sau khi nạp và giới hạn đọc/sao chép 2 GiB; Rust chỉ giữ tối đa 256 KiB stderr cho mỗi request nhưng vẫn drain pipe. Sửa Windows để ghi hash label trên đúng byte UTF-8 và dùng đường dẫn Unicode khi đọc/ghi ảnh. Local sau sửa: engine tests 110 passed, Rust format/check pass, frontend production build pass; `FrameForge.app` 4,50 MiB dựng thành công và engine trong bundle trả `status: ok`. CI run đầu Ubuntu/macOS pass, Windows fail 5/110 trước MSI; đang chờ rerun. Runtime Python, ký/notarize, checkpoint thật và soak footage thật vẫn là cổng mở.
 
 ## Đo hiệu năng media
 
