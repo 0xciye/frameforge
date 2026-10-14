@@ -2,12 +2,13 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
-- Thêm negative sampling cho dataset: mặc định 10%, preset 0/5/10/25% hoặc tùy chỉnh 0–100%, chọn lặp lại theo seed và lọc ảnh gần giống dHash ≤5. Giữ nguyên negative trong fixed validation/test của parent và cảnh báo nếu vượt quota.
+- Giảm ngưỡng dHash mặc định từ 5 xuống 1 bit để chỉ lọc crop gần như trùng; áp dụng tương tự khi negative sampling. Quota negative 10% là quy tắc riêng, không phải ngưỡng dHash.
+- Thêm negative sampling cho dataset: mặc định 10%, preset 0/5/10/25% hoặc tùy chỉnh 0–100%, chọn lặp lại theo seed và bỏ ảnh gần như trùng dHash ≤1. Giữ nguyên negative trong fixed validation/test của parent và cảnh báo nếu vượt quota.
 - Tự lưu snapshot project và trạng thái workspace; tự khôi phục khi mở app mà không hiện hộp thoại. Nếu `.ffproj` nguồn mất hoặc checksum thay đổi, khôi phục thành dự án chưa lưu để tránh ghi đè.
 - Dataset validation/export loại ảnh còn box thủ công `unreviewed`; báo số ảnh bị loại. Replay parent bỏ ảnh train cũ chưa review và từ chối dùng nhãn thủ công chưa review trong fixed validation/test.
 - Thêm nhập checkpoint `.pt` YOLO11n detection có xác nhận tin cậy; kiểm tra task/kiến trúc/class, giới hạn 2 GiB, SHA-256 và lưu bản sao quản lý riêng. Model đã nhập xuất hiện trong inference/fine-tune theo class schema; discovered checkpoint vẫn chưa tin cậy. Đã kiểm tra bằng fake runtime, chưa click-through với checkpoint thật.
 - Bỏ qua detection box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung; báo số box bị bỏ qua và không tạo negative candidate nếu tất cả box đều bị bỏ qua.
-- Làm rõ dHash ngay dưới thanh trượt: giá trị 5 là số bit khác tối đa giữa hai hash 64-bit, không phải số ảnh; tổng kết gallery báo số crop gần giống thực tế bị lọc.
+- Làm rõ dHash ngay dưới thanh trượt: giải thích ngưỡng là số bit Hamming tối đa giữa hai hash 64-bit, không phải số ảnh; tổng kết gallery báo số crop bị lọc thực tế.
 - Thêm Champion/Challenger: so sánh evaluation trên cùng fixed validation và điều kiện, kiểm tra checksum/target/regression toàn cục và theo class, lưu lịch sử compare/promote/rollback; promote cần xác nhận. Test engine dùng fake runtime, chưa xác minh bằng checkpoint thật.
 - Thêm đánh giá YOLO11n trên fixed validation/test: chỉ dùng checkpoint nội bộ đã xác minh; kiểm tra manifest, hash ảnh/nhãn, class schema và chống leakage; lưu metric tổng/per-class, mục tiêu người dùng, điều kiện, cảnh báo và lịch sử. Có thể huỷ giữa các batch mà không lưu kết quả dở dang. Latency/FPS/throughput/RAM tiếp tục hiện `not_measured` đến khi có benchmark deployment.
 - Thêm dataset lineage: đóng băng val/test sau review, tạo phiên bản con xác minh parent và checksum, giữ nguyên ảnh/label evaluation, replay dữ liệu train theo `all`/`balanced`/`new`; truyền lineage vào training queue/run.

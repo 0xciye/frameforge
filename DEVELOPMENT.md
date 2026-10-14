@@ -8,13 +8,13 @@
 | Python JSON-lines IPC | TESTED_MACOS | Bản app bundle hiện tại chuyển từ `Đang kết nối` sang `Engine sẵn sàng`; health JSON-lines trực tiếp trả `status: ok` |
 | Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; video tối đa 1920×1080, nguồn lớn hơn bị từ chối; seek bằng tác vụ nền |
 | Exact Center Crop, preview overlay | TESTED_MACOS | Preview dùng frame nguồn tối đa FHD và vẽ khung cam liền nét 320×320 tại tọa độ nguồn x=800, y=380 trên fixture 1920×1080 |
-| Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; dHash dùng Hamming distance ≤ ngưỡng trên hash 64-bit, bounded 4.096 hash gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
+| Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; ngưỡng dHash mặc định ≤1 bit để chỉ bỏ crop gần như trùng, so với tối đa 4.096 crop được giữ gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2/v3 migrate lên v4 khi ghi; annotation và negative candidate AI lưu provenance/fingerprint; autosave bảo toàn provenance |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, negative sampling, grouped splits, YOLO export and lineage | TESTED_ENGINE | Negative sampling theo seed (mặc định 10%, 0–100%), lọc dHash ≤5; fixed val/test giữ negative kể cả khi vượt quota; export loại box/candidate AI đang chờ hoặc bị loại |
+| Dataset validation, negative sampling, grouped splits, YOLO export and lineage | TESTED_ENGINE | Negative sampling theo seed (mặc định 10%, 0–100%), loại ảnh gần như trùng bằng dHash ≤1; fixed val/test giữ negative kể cả khi vượt quota; export loại box/candidate AI đang chờ hoặc bị loại |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
@@ -74,7 +74,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Frame gốc không bị sửa. Ảnh đầu ra được ghi atomically qua tệp tạm; collisions có lựa chọn bỏ qua, đổi tên hoặc ghi đè.
 - Video chỉ được nhận khi chiều rộng ≤1920 và chiều cao ≤1080. Import, preview và extraction đều kiểm tra frame giải mã; video vượt một trong hai giới hạn bị từ chối và không tự scale. Video nhỏ hơn giữ nguyên độ phân giải.
 - Hạn mức frame áp dụng tổng trên các nguồn đã chọn. Danh sách file/thumbnail trả về cho gallery hiện giới hạn 500 ảnh mỗi request để tránh giữ lượng dữ liệu không giới hạn trong frontend.
-- Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; ngưỡng là khoảng cách Hamming tối đa giữa hai hash 64-bit (5 không phải số ảnh), crop có khoảng cách ≤ ngưỡng bị loại và gallery đếm số crop thực tế bị lọc;
+- Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; ngưỡng là khoảng cách Hamming tối đa giữa hai hash cảm nhận 64-bit (không phải số ảnh cần giữ). Mặc định ≤1 chỉ loại crop gần như trùng; ngưỡng cao hơn lọc mạnh hơn và gallery đếm số crop thực tế bị lọc;
 - Center crop dùng `floor((frame - crop) / 2)` và half-open slicing; crop vượt frame trả lỗi rõ ràng. Full-frame letterbox và grid tiếp tục resize/padding theo mode riêng.
 - Blur/Laplacian và dHash đo source crop trước output resize/padding. `candidate_crops`, `blurry_crops` và `duplicate_crops` là số liệu crop-level; `candidate_frames` giữ nghĩa frame-level.
 - Mỗi ảnh lưu source identity (SHA-256 từ path/size/mtime), frame/timestamp, crop rectangle, sharpness score và extraction settings. Đây là identity fingerprint, không phải content hash.
@@ -159,6 +159,11 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `pnpm test:engine` — 83 passed trong 10,71 giây; `pnpm build` — thành công với TypeScript/Vite; `git diff --check` — thành công. Lệnh dùng Node và Python runtime đóng gói workspace.
 - **Giới hạn:** Kiểm tra biên là heuristic; object hợp lệ thực sự chạm mép ảnh cũng bị bỏ qua. Engine behavior được kiểm tra bằng fake YOLO runtime; chưa click-through với checkpoint thật vì registry local không có checkpoint usable.
 - **Git:** Commit local `d129744` (`fix(inference): skip crop-edge detections`). Push tới `origin/feature/manual-labeling` thất bại: `could not read Username for 'https://github.com': Device not configured`.
+
+### 2026-10-14 — Siết lọc ảnh gần trùng bằng dHash
+
+- **Thay đổi:** Hạ ngưỡng mặc định từ 5 xuống 1 bit trong extraction và negative sampling. Chỉ bỏ crop gần như trùng; tăng ngưỡng mới lọc mạnh hơn. Quota negative 10% là quy tắc lấy mẫu riêng, không do dHash đặt ra.
+- **Kiểm tra:** `git diff --check` — thành công. Không chạy test hoặc build trong lượt này.
 
 ### 2026-10-14 — Làm rõ ngưỡng dHash
 

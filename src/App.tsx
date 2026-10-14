@@ -163,7 +163,7 @@ const DEFAULT_OPTIONS: ExtractionOptions = {
   end_seconds: null,
   max_frames: 0,
   filter_duplicates: true,
-  duplicate_threshold: 5,
+  duplicate_threshold: 1,
   filter_blurry: true,
   blur_threshold: 60,
   crop_mode: "center",
@@ -1334,7 +1334,7 @@ function App() {
               <SettingToggle label="Lọc frame gần giống" checked={options.filter_duplicates} onChange={(checked) => updateOptions({ filter_duplicates: checked })} />
               {options.filter_duplicates && <>
                 <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />
-                <p className="setting-note">{options.duplicate_threshold} bit là độ chênh tối đa giữa hai hash 64-bit, không phải số ảnh. Crop lệch ≤ {options.duplicate_threshold} bit so với crop đã giữ gần đây sẽ bị bỏ; số crop bị lọc hiện trong tổng kết sau khi trích.</p>
+                <p className="setting-note">dHash là dấu vân tay cảm nhận 64-bit. Mặc định 1 bit chỉ lọc crop gần như trùng; ngưỡng {options.duplicate_threshold} bit sẽ bỏ crop lệch ≤ {options.duplicate_threshold} bit so với một trong tối đa 4.096 crop đã giữ. Ngưỡng cao hơn lọc mạnh hơn.</p>
               </>}
               <SettingToggle label="Lọc ảnh mờ" checked={options.filter_blurry} onChange={(checked) => updateOptions({ filter_blurry: checked })} />
               {options.filter_blurry && <ThresholdControl label="Độ nét Laplacian" value={options.blur_threshold} min={0} max={250} suffix="" onChange={(value) => updateOptions({ blur_threshold: value })} />}
