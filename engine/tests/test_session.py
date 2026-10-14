@@ -49,3 +49,26 @@ def test_load_session_without_snapshot_returns_unavailable(tmp_path: Path, monke
     monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
 
     assert load_session() == {"available": False}
+
+
+def test_session_migrates_legacy_dhash_default_and_keeps_a_new_choice(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path = tmp_path / "project.ffproj"
+    create_project(str(project_path), "Project")
+    project = load_project(str(project_path))
+    project["settings"] = {"duplicate_threshold": 5}
+    project["settings_version"] = 0
+    save_session(project, {"project_path": str(project_path), "dirty": False})
+
+    restored = load_session()
+    assert restored["project"]["settings"]["duplicate_threshold"] == 1
+    assert restored["project"]["settings_migrated"] is True
+
+    migrated_project = restored["project"]
+    migrated_project["settings"]["duplicate_threshold"] = 5
+    migrated_project["settings_version"] = 1
+    save_session(migrated_project, restored["session"])
+    reopened = load_session()
+
+    assert reopened["project"]["settings"]["duplicate_threshold"] == 5
+    assert reopened["project"]["settings_migrated"] is False

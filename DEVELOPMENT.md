@@ -10,6 +10,7 @@
 | Exact Center Crop, preview overlay | TESTED_MACOS | Preview dùng frame nguồn tối đa FHD và vẽ khung cam liền nét 320×320 tại tọa độ nguồn x=800, y=380 trên fixture 1920×1080 |
 | Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; ngưỡng dHash mặc định ≤1 bit để chỉ bỏ crop gần như trùng, so với tối đa 4.096 crop được giữ gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2/v3 migrate lên v4 khi ghi; annotation và negative candidate AI lưu provenance/fingerprint; autosave bảo toàn provenance |
+| Migration ngưỡng dHash project/session | TESTED_ENGINE | Giá trị legacy 5 chuyển về 1 một lần; version marker giữ lựa chọn mới; `extraction_settings` của ảnh không đổi |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
@@ -220,7 +221,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Sửa lỗi:** Engine từ chối fine-tune từ tệp `.pt` chưa đăng ký hoặc run quét ngoài. Checkpoint phải đến từ run YOLO11n detection của FrameForge, nằm trong thư mục run, có trạng thái hoàn tất/đã hủy và khớp SHA-256 trong registry. Bổ sung hồi quy cho checkpoint tùy ý, checkpoint external, fine-tune checkpoint hợp lệ và checksum.
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 47 passed; `pnpm build` — thành công bằng Node.js runtime đi kèm Codex; `cargo fmt --check` và `cargo check` — thành công; benchmark video FHD một giờ được giữ theo phép đo đã ghi ở mục kế tiếp.
 - **Git:** Commit local `85dc842`; push bị chặn vì GitHub HTTPS yêu cầu username nhưng môi trường không cung cấp (`could not read Username for 'https://github.com': Device not configured`).
-- **Chưa xác minh:** Chưa click-through discovery/training trên app bundle mới. Session API chưa nối với autosave/restore trong frontend. Inference, auto-label, đánh giá model, resume, export và Windows còn trong `TASKS.md`.
+- **Chưa xác minh:** Chưa click-through discovery/training trên app bundle mới. Session API chưa nối với autosave/restore trong frontend. Inference, auto-label, đánh giá model, resume, export và Windows còn nằm trong roadmap phát triển.
 - **Bước tiếp:** Tạo YOLO11n inference adapter chỉ nhận checkpoint đã xác minh, kèm test đầu ra box/confidence/class trên fixture ảnh nhỏ.
 
 ### 2026-10-14 — Giới hạn video FHD và benchmark video dài
@@ -290,11 +291,20 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 
 ## Quy trình thay đổi
 
-Đọc `AGENTS.md`, `agent.md`, `PRODUCT.md`, `DESIGN.md` và mục liên quan trong file này trước khi sửa. Sau thay đổi đáng kể, chạy kiểm tra phù hợp, ghi kết quả thật, cập nhật tài liệu và xem lại diff. Không commit môi trường `.venv`, `node_modules`, cache, media người dùng hoặc model weights.
+Đọc `AGENTS.md`, `PRODUCT.md`, `DESIGN.md` và mục liên quan trong file này trước khi sửa. Sau thay đổi đáng kể, chạy kiểm tra phù hợp, ghi kết quả thật, cập nhật tài liệu và xem lại diff. Không commit môi trường `.venv`, `node_modules`, cache, media người dùng hoặc model weights.
 
 ## Windows handoff
 
 Windows chưa được build hoặc xác nhận. Các việc còn lại: xác nhận native dialogs/paths, đóng gói Python và DLL của OpenCV/ONNX Runtime, build Tauri, kiểm tra Windows 10/11, tích hợp DirectML và benchmark trên RX 6600. Chỉ ghi `TESTED_WINDOWS_CI` hoặc `VERIFIED_WINDOWS_HARDWARE` sau đúng loại kiểm thử đó.
+
+## Rà soát repository — 2026-10-14
+
+- Project settings có `settings_version`; khi mở project/session legacy, ngưỡng dHash mặc định 5 được chuyển về 1 đúng một lần. Giá trị người dùng chọn sau đó được giữ qua các lần mở tiếp theo; `extraction_settings` của ảnh cũ không bị thay đổi.
+- Repository dùng GNU AGPL-3.0-or-later do tích hợp Ultralytics; README dẫn tới điều khoản hiện hành cho người cần phân phối thương mại hoặc đóng nguồn.
+- Xóa `agent.md` và `TASKS.md` vì nội dung lặp lại hướng dẫn chuẩn trong `AGENTS.md` và trạng thái/roadmap trong `DEVELOPMENT.md`.
+- GitHub Actions chạy build frontend, engine tests và Rust formatting cho pull request và push lên `main`.
+- Kiểm tra local: `pnpm test:engine` — 100 passed; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` — thành công; `cargo check --manifest-path src-tauri/Cargo.toml` — thành công; `git diff --check` — thành công.
+- Hosted GitHub Actions của PR #3 — `verify` passed trong 51 giây, gồm frontend build, engine tests và Rust formatting.
 
 ### 2026-10-14 — Rà soát source và merge PR #1
 

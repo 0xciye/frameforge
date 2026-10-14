@@ -14,6 +14,7 @@ from typing import Any, Dict
 
 
 SCHEMA_VERSION = 4
+SETTINGS_VERSION = 1
 DEFAULT_CLASS_NAMES = ("head", "body")
 
 
@@ -142,6 +143,10 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
         meta["application"] = "FrameForge"
         meta["name"] = name
         meta["modified_at"] = now
+        settings_version = project.get("settings_version", SETTINGS_VERSION)
+        if type(settings_version) is not int or settings_version < 0 or settings_version > SETTINGS_VERSION:
+            raise ValueError("Phiên bản cài đặt dự án không hợp lệ.")
+        meta["settings_version"] = str(settings_version)
         for key, value in meta.items():
             connection.execute("INSERT OR REPLACE INTO project_meta(key, value) VALUES(?, ?)", (key, value))
 
@@ -252,6 +257,7 @@ def create_project(path_value: str, name: str) -> Dict[str, Any]:
             "name": name,
             "sources": [],
             "settings": {},
+            "settings_version": SETTINGS_VERSION,
             "images": [],
             "class_names": list(DEFAULT_CLASS_NAMES),
         }
@@ -1007,8 +1013,14 @@ def load_project(path_value: str) -> Dict[str, Any]:
         version = int(meta.get("schema_version", 0))
         if version < 1 or version > SCHEMA_VERSION:
             raise ValueError("Phiên bản cấu trúc dự án không được hỗ trợ.")
+        settings_version = int(meta.get("settings_version", 0))
+        if settings_version < 0 or settings_version > SETTINGS_VERSION:
+            raise ValueError("Phiên bản cài đặt dự án không được hỗ trợ.")
         sources = [json.loads(row["metadata_json"]) for row in connection.execute("SELECT metadata_json FROM sources ORDER BY position")]
         settings = {row["key"]: json.loads(row["value_json"]) for row in connection.execute("SELECT key, value_json FROM project_settings")}
+        settings_migrated = settings_version < SETTINGS_VERSION and settings.get("duplicate_threshold") == 5
+        if settings_migrated:
+            settings["duplicate_threshold"] = 1
         annotations = {}
         for row in connection.execute("SELECT * FROM annotations"):
             annotation = {
@@ -1067,6 +1079,8 @@ def load_project(path_value: str) -> Dict[str, Any]:
             "name": meta["name"],
             "created_at": meta.get("created_at"),
             "modified_at": meta.get("modified_at"),
+            "settings_version": settings_version,
+            "settings_migrated": settings_migrated,
             "sources": sources,
             "settings": settings,
             "images": images,

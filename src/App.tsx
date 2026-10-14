@@ -87,6 +87,8 @@ type ExtractionOptions = {
 type ProjectState = {
   id?: string;
   name: string;
+  settings_version: number;
+  settings_migrated?: boolean;
   sources: MediaSource[];
   settings: ExtractionOptions;
   images: ProjectImage[];
@@ -155,6 +157,7 @@ type ResizeDrag = { kind: ResizeKind; startX: number; startY: number; initialVal
 
 const FHD_WIDTH = 1920;
 const FHD_HEIGHT = 1080;
+const PROJECT_SETTINGS_VERSION = 1;
 
 const DEFAULT_OPTIONS: ExtractionOptions = {
   interval: 10,
@@ -225,6 +228,8 @@ function projectNameFromPath(path: string) {
 function App() {
   const [project, setProject] = useState<ProjectState>({
     name: "Dự án chưa lưu",
+    settings_version: PROJECT_SETTINGS_VERSION,
+    settings_migrated: false,
     sources: [],
     settings: DEFAULT_OPTIONS,
     images: [],
@@ -496,8 +501,11 @@ function App() {
         const snapshot = await callEngine<SessionSnapshot>("load_session", {});
         if (!alive || interacted || !snapshot.available || !snapshot.project || !snapshot.session) return;
 
+        const settingsMigrated = snapshot.project.settings_migrated === true;
         const restoredProject = {
           ...snapshot.project,
+          settings_version: PROJECT_SETTINGS_VERSION,
+          settings_migrated: false,
           settings: { ...DEFAULT_OPTIONS, ...(snapshot.project.settings as Partial<ExtractionOptions>) },
         };
         const sourcePaths = new Set(restoredProject.sources.map((source) => source.path));
@@ -526,7 +534,7 @@ function App() {
         setProject(restoredProject);
         setOptions(restoredProject.settings);
         setProjectPath(originalIsSafeToResume ? requestedProjectPath : null);
-        setDirty(snapshot.session.dirty === true || !originalIsSafeToResume);
+        setDirty(snapshot.session.dirty === true || !originalIsSafeToResume || settingsMigrated);
         setSelectedPaths(restoredSelectedPaths);
         setSelectedPath(restoredSelectedPath);
         setFrameIndex(restoredFrame);
@@ -854,6 +862,8 @@ function App() {
       const empty: ProjectState = {
         id: created.id,
         name: created.name,
+        settings_version: PROJECT_SETTINGS_VERSION,
+        settings_migrated: false,
         sources: [],
         settings: DEFAULT_OPTIONS,
         images: [],
@@ -885,7 +895,13 @@ function App() {
       if (typeof path !== "string") return;
       const loaded = await callEngine<ProjectState>("load_project", { path });
       const nextOptions = { ...DEFAULT_OPTIONS, ...(loaded.settings as Partial<ExtractionOptions>) };
-      setProject({ ...loaded, settings: nextOptions });
+      const settingsMigrated = loaded.settings_migrated === true;
+      setProject({
+        ...loaded,
+        settings_version: PROJECT_SETTINGS_VERSION,
+        settings_migrated: false,
+        settings: nextOptions,
+      });
       setOptions(nextOptions);
       setProjectPath(path);
       setSelectedPaths(loaded.sources.map((source) => source.path));
@@ -893,7 +909,7 @@ function App() {
       setFrameIndex(0);
       setGallery([]);
       setFileListTruncated(false);
-      setDirty(false);
+      setDirty(settingsMigrated);
       setError(null);
     } catch (reason) {
       setError(String(reason));
@@ -919,7 +935,14 @@ function App() {
         path,
         project: { ...project, settings: options },
       }));
-      setProject((current) => ({ ...current, id: saved.id, name: saved.name }));
+      setProject((current) => ({
+        ...current,
+        id: saved.id,
+        name: saved.name,
+        settings_version: PROJECT_SETTINGS_VERSION,
+        settings_migrated: false,
+        settings: options,
+      }));
       setProjectPath(path);
       setDirty(false);
       setError(null);

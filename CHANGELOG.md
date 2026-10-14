@@ -1,5 +1,12 @@
 # Nhật ký thay đổi
 
+## Chưa phát hành — Rà soát repository
+
+- Thêm giấy phép GNU AGPL-3.0-or-later, phù hợp với tích hợp Ultralytics; ghi chú điều kiện cấp phép Ultralytics trong README.
+- Chuyển project legacy có ngưỡng dHash mặc định 5 về 1 một lần; version marker giữ nguyên lựa chọn người dùng sau migration và provenance crop cũ.
+- Thêm GitHub Actions cho frontend build, engine tests và Rust formatting.
+- Xóa `agent.md` và `TASKS.md` trùng nội dung với `AGENTS.md` và `DEVELOPMENT.md`.
+
 ## Chưa phát hành — Workspace trích xuất
 
 - Giảm ngưỡng dHash mặc định từ 5 xuống 1 bit để chỉ lọc crop gần như trùng; áp dụng tương tự khi negative sampling. Quota negative 10% là quy tắc riêng, không phải ngưỡng dHash.
