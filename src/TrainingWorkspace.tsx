@@ -26,6 +26,7 @@ type TrainingCapabilities = {
 };
 type DatasetSummary = {
   valid: boolean; data_yaml: string; dataset_root: string; dataset_id: string | null; dataset_fingerprint: string;
+  imported_workspace?: boolean;
   dataset_version?: number | null; parent_dataset_id?: string | null; replay_strategy?: string | null;
   fixed_validation_set_id?: string | null; frozen_test_set_id?: string | null;
   class_names: string[]; class_instance_counts: Record<string, number>; image_counts: Record<string, number>;
@@ -34,6 +35,7 @@ type DatasetSummary = {
 type TrainingRun = {
   run_id: string; status: string; requested_imgsz: number; effective_imgsz?: number; stride?: number;
   source?: string; name?: string; training_imgsz?: number | number[] | null;
+  imgsz_source?: "checkpoint_metadata" | "run_args_yaml" | "ultralytics_default";
   architecture_claimed?: string | null; task_claimed?: string | null; checkpoint_trusted?: boolean;
   checkpoint_path?: string | null; checkpoint_exists?: boolean; checkpoint_checksum_matches?: boolean | null;
   checkpoint_usable?: boolean; device_actual?: string | null; base_model?: string; parent_model_id?: string | null; display_name?: string;
@@ -156,6 +158,15 @@ function metricValue(metrics: Record<string, unknown> | undefined, ...names: str
   return undefined;
 }
 
+function checkpointImgSizeLabel(run: TrainingRun) {
+  const imageSize = run.effective_imgsz ?? run.requested_imgsz;
+  if (run.source !== "frameforge_import") return `${imageSize}px`;
+  if (run.imgsz_source === "checkpoint_metadata") return `${imageSize}px · checkpoint`;
+  if (run.imgsz_source === "run_args_yaml") return `${imageSize}px · args.yaml`;
+  if (run.imgsz_source === "ultralytics_default") return `${imageSize}px · mặc định`;
+  return `${imageSize}px · nguồn chưa ghi`;
+}
+
 function MetricChart({ title, points, field, color }: { title: string; points: MetricPoint[]; field: "loss" | "map50"; color: string }) {
   const values = points.map((point) => point[field]).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   const selected = points.filter((point) => typeof point[field] === "number" && Number.isFinite(point[field]));
@@ -246,7 +257,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
       const report = await engineRequest<DatasetSummary>("inspect_training_dataset", { data_yaml: selected });
       setDataset(report);
       const datasetDir = selected.replace(/[\\/][^\\/]*$/, "");
-      setOutputDir((current) => current || datasetDir.replace(/[\\/][^\\/]*$/, ""));
+      setOutputDir((current) => report.imported_workspace ? "" : current || datasetDir.replace(/[\\/][^\\/]*$/, ""));
     } catch (reason) {
       setDataset(null);
       setOperationError(String(reason));
@@ -510,6 +521,15 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
     setSizes((current) => current.includes(value) ? current.filter((size) => size !== value) : [...current, value].sort((a, b) => a - b));
   }
 
+  function selectBaseModel(value: string) {
+    setBaseModel(value);
+    const parent = runs.find((run) => run.checkpoint_path === value && run.checkpoint_usable);
+    const imageSize = parent?.effective_imgsz ?? parent?.requested_imgsz;
+    if (parent && typeof imageSize === "number" && Number.isInteger(imageSize) && imageSize > 0 && imageSize <= 2048) setSizes([imageSize]);
+    else if (!parent) setSizes([320]);
+    setCustomSize("");
+  }
+
   function addCustomSize() {
     const value = Number(customSize);
     if (!Number.isInteger(value) || value < 1 || value > 2048) {
@@ -620,6 +640,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
   const currentMetrics = activeProgress?.metrics;
   const currentRuntime = activeProgress?.runtime;
   const bestRuns = runs.filter((run) => run.checkpoint_usable && run.checkpoint_path);
+  const selectedParentImgSize = selectedParent?.effective_imgsz ?? selectedParent?.requested_imgsz;
 
   return (
     <main className="training-workspace" aria-label="Workspace huấn luyện YOLO11n">
@@ -668,11 +689,19 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
           <section className="train-card">
             <div className="train-card-heading"><div><Zap size={15} /><h2>Model và độ phân giải</h2></div><button className="train-text-button" type="button" onClick={() => void refreshRuns()} disabled={running}><RefreshCw size={12} /> Làm mới</button></div>
             <label className="train-field">Checkpoint khởi tạo
-              <select value={baseModel} onChange={(event) => setBaseModel(event.target.value)} disabled={running}>
+              <select value={baseModel} onChange={(event) => selectBaseModel(event.target.value)} disabled={running}>
                 <option value="yolo11n.pt">YOLO11n pretrained · yolo11n.pt</option>
-                {bestRuns.map((run) => <option value={run.checkpoint_path!} key={run.run_id}>{run.source === "frameforge_import" ? `Đã nhập · ${run.display_name ?? "YOLO11n"}` : "YOLO11n"} · {run.effective_imgsz ?? run.requested_imgsz}px · {run.run_id.slice(0, 8)}{run.checkpoint_checksum_matches === false ? " · checksum mismatch" : ""}</option>)}
+                {bestRuns.map((run) => <option value={run.checkpoint_path!} key={run.run_id}>{run.source === "frameforge_import" ? `Đã nhập · ${run.display_name ?? "YOLO11n"}` : "YOLO11n"} · {checkpointImgSizeLabel(run)} · {run.run_id.slice(0, 8)}{run.checkpoint_checksum_matches === false ? " · checksum mismatch" : ""}</option>)}
               </select>
-              <small>{selectedParent ? "Tạo fine-tune mới; checkpoint cha được giữ nguyên." : "Mỗi độ phân giải nạp lại cùng model pretrained, không kế thừa weights của job trước."}</small>
+              <small>{selectedParent
+                ? selectedParent.source === "frameforge_import" && selectedParent.imgsz_source === "run_args_yaml"
+                  ? `Checkpoint không ghi imgsz; dùng ${selectedParentImgSize}px từ args.yaml cùng run. Kích thước này được chọn sẵn; có thể đổi.`
+                  : selectedParent.source === "frameforge_import" && selectedParent.imgsz_source === "ultralytics_default"
+                    ? `Checkpoint và args.yaml không ghi imgsz; đang dùng mặc định Ultralytics ${selectedParentImgSize ?? 640}px. Kích thước này được chọn sẵn; có thể đổi.`
+                  : selectedParent.source === "frameforge_import" && !selectedParent.imgsz_source
+                    ? `imgsz ${selectedParentImgSize ?? "chưa ghi"} px đã lưu từ registry cũ, nhưng nguồn chưa được ghi. Hãy xác nhận hoặc chỉnh trước khi chạy.`
+                    : `Fine-tune từ checkpoint đã xác minh; tự chọn imgsz ${selectedParentImgSize ?? "chưa ghi"} px. Checkpoint cha được giữ nguyên.`
+                : "Tạo run mới từ YOLO11n pretrained (yolo11n.pt); mỗi imgsz khởi tạo độc lập, không kế thừa weights của job trước."}</small>
             </label>
             <div className="train-size-heading"><span>Kích thước train · imgsz</span><small>Stride YOLO11n: 32 px</small></div>
             <div className="train-size-grid" role="group" aria-label="Chọn nhiều kích thước train">
@@ -717,7 +746,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
               <span title={outputDir || "Chưa chọn thư mục"}>{outputDir || "Chọn thư mục lưu checkpoint và log"}</span>
               <button className="train-icon-button" type="button" onClick={() => void chooseOutputDir()} disabled={running} aria-label="Chọn thư mục kết quả"><FolderOpen size={15} /></button>
             </div>
-            <small>Mỗi queue tạo thư mục mới; không ghi đè checkpoint cũ.</small>
+            <small>{dataset?.imported_workspace && !outputDir ? "Dataset đã nhập. Chọn thư mục lưu kết quả huấn luyện; thư mục nguồn giữ nguyên." : "Mỗi queue tạo thư mục mới; không ghi đè checkpoint cũ."}</small>
           </section>
         </section>
 
@@ -953,7 +982,7 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
               const imageSizeLabel = Array.isArray(imageSize) ? `${imageSize.join("×")} px` : imageSize ? `${imageSize} px` : "imgsz chưa ghi";
               return <article className="train-result-row" key={run.run_id}>
               <div><strong>{run.source === "external_discovery" ? run.name ?? "Run bên ngoài" : run.source === "frameforge_import" ? `Đã nhập · ${run.display_name ?? "YOLO11n"}` : `YOLO11n · ${run.effective_imgsz ?? run.requested_imgsz}px`}</strong><span className={run.checkpoint_usable ? "available" : "unavailable"}>{run.source === "external_discovery" ? "Metadata · checkpoint chưa tin cậy" : run.checkpoint_usable ? "Sẵn sàng" : "Thiếu hoặc checksum đổi"}</span></div>
-              <small>{run.source === "external_discovery" ? `${run.architecture_claimed ?? "Model chưa rõ"} · ${run.task_claimed ?? "task chưa rõ"} · ${imageSizeLabel}` : run.source === "frameforge_import" ? `${run.class_names?.join(", ") ?? "Class chưa ghi"} · imgsz ${run.effective_imgsz ?? run.requested_imgsz}px` : `${run.status} · ${run.device_actual ?? "thiết bị chưa ghi"}`} · {run.run_id.slice(0, 8)}</small>
+              <small>{run.source === "external_discovery" ? `${run.architecture_claimed ?? "Model chưa rõ"} · ${run.task_claimed ?? "task chưa rõ"} · ${imageSizeLabel}` : run.source === "frameforge_import" ? `${run.class_names?.join(", ") ?? "Class chưa ghi"} · imgsz ${checkpointImgSizeLabel(run)}` : `${run.status} · ${run.device_actual ?? "thiết bị chưa ghi"}`} · {run.run_id.slice(0, 8)}</small>
               {run.checkpoint_path && <code title={run.checkpoint_path}>{run.checkpoint_path}</code>}
             </article>;
             })}</div>}

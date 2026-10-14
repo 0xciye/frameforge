@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,9 +31,26 @@ jobs:
           python-version: "3.12"
 
       - name: Install OpenCV runtime libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libgl1 libglib2.0-0
+          sudo apt-get install --yes \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgl1 \
+            libglib2.0-0 \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            wget
+
+      - name: Install Rust stable and rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -44,6 +65,18 @@ jobs:
         run: python -m pytest engine/tests -q
 
       - name: Check Rust formatting
-        run: |
-          rustup component add rustfmt
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Compile Tauri application
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+
+      - name: Build macOS application bundle
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --bundles app
+
+      - name: Build Windows MSI
+        if: runner.os == 'Windows'
+        run: pnpm tauri build --bundles msi

@@ -315,6 +315,29 @@ def test_discovered_training_run_command_persists_scan_record(monkeypatch: pytes
     assert response["data"] == {"root": "/project", "run_id": "run-123", "checkpoint_trusted": False}
 
 
+def test_prepare_discovered_dataset_command_routes_workspace_paths(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "prepare_discovered_dataset",
+        lambda root, data_yaml: {
+            "source_root": root,
+            "source_data_yaml": data_yaml,
+            "data_yaml": "/app-data/datasets/imported/abc/data.yaml",
+            "paths_rebased": True,
+        },
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "prepare-dataset-1",
+        "command": "prepare_discovered_dataset",
+        "arguments": {"discovery_root": "/project", "data_yaml": "/project/dataset/data.yaml"},
+    })
+
+    assert response["ok"] is True
+    assert response["data"]["source_data_yaml"] == "/project/dataset/data.yaml"
+    assert response["data"]["paths_rebased"] is True
+
+
 def test_yolo_inference_command_routes_threshold_and_cancellation(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         frameforge_engine,

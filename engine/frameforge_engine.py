@@ -9,7 +9,7 @@ import sys
 from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
-from frameforge.discovery import scan_project_folder
+from frameforge.discovery import prepare_discovered_dataset, scan_project_folder
 from frameforge.inference import auto_label_project, predict_crops
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
@@ -76,6 +76,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "champion_challenger_management",
                     "external_training_registry",
                     "smart_folder_discovery",
+                    "workspace_folder_import",
                     "session_recovery",
                 ],
             },
@@ -198,6 +199,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = rollback_model_promotion()
         elif command == "register_discovered_run":
             result = register_discovered_run(arguments["discovery_root"], arguments["run"])
+        elif command == "prepare_discovered_dataset":
+            result = prepare_discovered_dataset(arguments["discovery_root"], arguments["data_yaml"])
         elif command == "scan_project_folder":
             result = scan_project_folder(
                 arguments["path"],
@@ -234,7 +237,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, evaluate_yolo_checkpoint, list_model_evaluations, get_evaluation_targets, save_evaluation_targets, get_model_promotion_state, compare_model_challenger, promote_model_challenger, rollback_model_promotion, register_discovered_run, scan_project_folder, train_yolo_queue, predict_crops.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, evaluate_yolo_checkpoint, list_model_evaluations, get_evaluation_targets, save_evaluation_targets, get_model_promotion_state, compare_model_challenger, promote_model_challenger, rollback_model_promotion, register_discovered_run, prepare_discovered_dataset, scan_project_folder, train_yolo_queue, predict_crops.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:

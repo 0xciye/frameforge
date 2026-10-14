@@ -10,6 +10,31 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const FHD_WIDTH: u64 = 1920;
 const FHD_HEIGHT: u64 = 1080;
+const MAX_ENGINE_DIAGNOSTIC_BYTES: usize = 256 * 1024;
+
+fn read_engine_diagnostics<R: Read>(mut reader: R) -> String {
+    let mut retained = Vec::with_capacity(MAX_ENGINE_DIAGNOSTIC_BYTES);
+    let mut buffer = [0; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                let available = MAX_ENGINE_DIAGNOSTIC_BYTES.saturating_sub(retained.len());
+                let keep = available.min(count);
+                retained.extend_from_slice(&buffer[..keep]);
+                truncated |= keep < count;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let mut diagnostics = String::from_utf8_lossy(&retained).into_owned();
+    if truncated {
+        diagnostics.push_str("\n[Đã rút gọn log engine vượt 256 KiB.]");
+    }
+    diagnostics
+}
 
 #[derive(Clone, Default)]
 struct EngineJobs(Arc<Mutex<HashMap<String, JobHandle>>>);
@@ -204,11 +229,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     }
 
     let result = (|| -> Result<Value, String> {
-        let stderr_reader = thread::spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut text);
-            text
-        });
+        let stderr_reader = thread::spawn(move || read_engine_diagnostics(stderr));
 
         let mut final_response = None;
         let mut read_error = None;
@@ -424,6 +445,37 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                         return Err("Tên thư mục bỏ qua không hợp lệ.".to_string());
                     }
                 }
+            }
+            Ok(())
+        }
+        "prepare_discovered_dataset" => {
+            let root = canonical_existing_path(
+                arguments
+                    .get("discovery_root")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục làm việc đã quét.")?,
+            )?;
+            if !root.is_dir() {
+                return Err("Thư mục làm việc không còn tồn tại.".to_string());
+            }
+            let data_yaml = canonical_existing_path(
+                arguments
+                    .get("data_yaml")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu data.yaml đã phát hiện.")?,
+            )?;
+            if !data_yaml.is_file()
+                || !data_yaml.starts_with(&root)
+                || !data_yaml
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| {
+                        matches!(extension.to_ascii_lowercase().as_str(), "yaml" | "yml")
+                    })
+            {
+                return Err(
+                    "data.yaml phải là tệp YAML bên trong thư mục làm việc đã quét.".to_string(),
+                );
             }
             Ok(())
         }
@@ -1311,4 +1363,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_ENGINE_DIAGNOSTIC_BYTES, read_engine_diagnostics};
+    use std::io::Cursor;
+
+    #[test]
+    fn engine_diagnostics_are_bounded_and_the_pipe_is_drained() {
+        let contents = vec![b'x'; MAX_ENGINE_DIAGNOSTIC_BYTES + 8192];
+        let mut reader = Cursor::new(contents);
+
+        let diagnostics = read_engine_diagnostics(&mut reader);
+
+        assert_eq!(
+            reader.position(),
+            (MAX_ENGINE_DIAGNOSTIC_BYTES + 8192) as u64
+        );
+        assert!(diagnostics.starts_with(&"x".repeat(MAX_ENGINE_DIAGNOSTIC_BYTES)));
+        assert!(diagnostics.ends_with("[Đã rút gọn log engine vượt 256 KiB.]"));
+    }
 }
