@@ -6,26 +6,30 @@
 |---|---|---|
 | Tauri 2 + React/TypeScript workspace | IMPLEMENTED | Giao diện tiếng Việt theo ảnh tham chiếu |
 | Python JSON-lines IPC | TESTED_MACOS | Bản app bundle hiện tại chuyển từ `Đang kết nối` sang `Engine sẵn sàng`; health JSON-lines trực tiếp trả `status: ok` |
-| Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; seek bằng tác vụ nền |
-| Exact Center Crop, preview overlay | TESTED_MACOS | Crop engine giữ pixel; smoke check video FHD xác nhận preview giữ frame nguồn và vẽ overlay vuông 320×320 ở tâm |
+| Nhập media, metadata, preview, timeline | TESTED_MACOS | Dialog, kéo thả, OpenCV đọc ảnh/video thật; video tối đa 1920×1080, nguồn lớn hơn bị từ chối; seek bằng tác vụ nền |
+| Exact Center Crop, preview overlay | TESTED_MACOS | Preview dùng frame nguồn tối đa FHD và vẽ khung cam liền nét 320×320 tại tọa độ nguồn x=800, y=380 trên fixture 1920×1080 |
 | Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên vùng crop nguồn; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_MACOS | Create/save/load; schema v1 nâng cấp lên v2 khi save; giữ provenance crop |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | Inference YOLO, confidence filtering | NOT_STARTED | Chưa có adapter/detection; không sinh kết quả giả |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
 | Dataset validation, grouped splits, YOLO export | TESTED_MACOS | Xác thực ảnh/box/class; loại negative chưa review; chia theo source/segment, giữ byte-identical cùng split; export versioned copy và manifest |
-| YOLO11n training trên MPS/CPU, multi-resolution | NOT_STARTED | Chưa cài PyTorch/Ultralytics; chưa có training job manager |
-| Checkpoint discovery, fine-tuning, resume | NOT_STARTED | Chưa có model registry hoặc checkpoint workflow |
-| Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có metrics/benchmark/export thật |
+| Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
+| Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
+| YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro; checkpoint được lưu/đăng ký; metrics fixture không đại diện đánh giá model. |
+| Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký, nằm trong run và khớp checksum ở tệp, record và registry; từ chối `.pt` ngoài hoặc chưa đăng ký. |
+| Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
+| Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
+| Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có công cụ benchmark model trong app; phép đo hiệu năng xử lý media một lần được ghi bên dưới |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự ưu tiên: Exact Center Crop → filtering → manual labeling → YOLO dataset → YOLO11n training → fine-tuning → confidence-based AI expansion → benchmark → deployment export. Video đầu vào chủ yếu Full HD (1920×1080), nhưng phải đọc kích thước thật và giữ chính xác pixel geometry. Không gộp xác nhận macOS với Windows.
+Thứ tự tiếp theo: inference YOLO cho checkpoint nội bộ → auto-label và review → dataset lineage/replay → đánh giá model → benchmark/so sánh → deployment export → resume training → session recovery UI → Windows validation. Video đầu vào chỉ được nhận tối đa FHD (1920×1080); nguồn vượt giới hạn bị từ chối, không scale.
 
 ## Công cụ và cài đặt
 
 - Node.js, pnpm, Rust stable và toolchain native của hệ điều hành.
 - Python 3.10 trở lên.
-- Từ root: `python3 -m venv .venv`, `.venv/bin/python -m pip install -e "engine[dev]"`, `pnpm install`.
+- Từ root: python3 -m venv .venv, .venv/bin/python -m pip install -e "engine[dev]", cài thêm .venv/bin/python -m pip install -e "engine[train]" khi dùng tab Huấn luyện, rồi pnpm install.
 - Windows dùng `.venv\Scripts\python.exe`; đặt `FRAMEFORGE_PYTHON` nếu cần chọn interpreter khác.
 
 ## Lệnh thường dùng
@@ -45,7 +49,7 @@ Tauri chạy Vite ở cổng `1420`; giữ đồng bộ `tauri.conf.json` và `v
 
 Rust mở trực tiếp `engine/frameforge_engine.py`, gửi một request JSON trên mỗi dòng UTF-8 qua stdin và đọc response/progress từ stdout. Chẩn đoán phải ghi ra stderr. Tiến trình chạy qua `spawn_blocking`; extraction phát `engine-progress` và có thể hủy qua `cancel_engine_request`.
 
-Các command được allowlist: `health`, `inspect_sources`, `inspect_model`, `preview_frame`, `preview_center_crop`, `extract_frames`, `create_project`, `save_project`, `save_annotations`, `validate_dataset`, `export_yolo_dataset`, `load_project`. Rust kiểm tra loại lệnh, phần mở rộng, kích thước và đường dẫn trước khi chạy Python. `save_annotations` chỉ nhận ảnh thuộc `.ffproj` đã lưu, xác minh fingerprint SHA-256 của ảnh và kiểm tra box/class/trạng thái ở engine. ONNX hiện chỉ được nạp qua CPU Execution Provider để đọc tensor và metadata; chưa có decoder YOLO.
+Các command được allowlist gồm health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue. Rust kiểm tra command, phần mở rộng, kích thước và đường dẫn trước khi gọi Python. Train có thể dừng tại ranh giới epoch bằng cancel marker; extraction và discovery hủy qua marker.
 
 Ví dụ:
 
@@ -58,6 +62,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 ## Dữ liệu và giới hạn
 
 - Frame gốc không bị sửa. Ảnh đầu ra được ghi atomically qua tệp tạm; collisions có lựa chọn bỏ qua, đổi tên hoặc ghi đè.
+- Video chỉ được nhận khi chiều rộng ≤1920 và chiều cao ≤1080. Import, preview và extraction đều kiểm tra frame giải mã; video vượt một trong hai giới hạn bị từ chối và không tự scale. Video nhỏ hơn giữ nguyên độ phân giải.
 - Hạn mức frame áp dụng tổng trên các nguồn đã chọn. Danh sách file/thumbnail trả về cho gallery hiện giới hạn 500 ảnh mỗi request để tránh giữ lượng dữ liệu không giới hạn trong frontend.
 - Bộ lọc dHash giữ tối đa 4096 hash gần nhất trong một lần extraction; bộ lọc là heuristic và không đảm bảo phát hiện mọi ảnh gần giống.
 - Center crop dùng `floor((frame - crop) / 2)` và half-open slicing; crop vượt frame trả lỗi rõ ràng. Full-frame letterbox và grid tiếp tục resize/padding theo mode riêng.
@@ -69,16 +74,21 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - Dataset validator đọc lại ảnh thật, kiểm tra kích thước so với project, class ID và box hữu hạn/còn trong biên. Positive được giữ; ảnh trống chỉ được giữ khi `status=reviewed`.
 - Split theo source gom toàn bộ frame/crop cùng video; split theo segment dùng timestamp hoặc frame/FPS. Ảnh có SHA-256 trùng nội dung luôn được gộp cùng nhóm split. Khi số nhóm độc lập ít hơn số split được bật, báo cảnh báo và chỉ gán các nhóm có sẵn.
 - YOLO export tạo thư mục phiên bản mới nguyên tử dưới thư mục người dùng đã chọn, sao chép ảnh gốc và xác minh SHA-256 sau khi sao chép; nhãn dùng `class x_center y_center width height` chuẩn hóa 8 chữ số thập phân. `manifest.json` lưu mapping class, split, fingerprint, hình học crop và provenance nguồn. Export không sửa project/ảnh nguồn.
+- Smart Folder Discovery dùng `yaml.safe_load`, chỉ quét trong root được chọn, bỏ symlink, giới hạn depth/files/metadata/CSV rows, không đọc pixel hoặc nội dung checkpoint. YAML split/data trỏ ra ngoài root bị chặn; ngoại lệ quyền truy cập tạo kết quả partial.
+- Run ngoài chỉ được lưu metadata khi nhấn “Lưu run vào registry”. Registry vẫn đánh dấu checkpoint ngoài chưa tin cậy và không chọn nó làm model fine-tune; xác minh kiến trúc/trust vẫn chưa triển khai.
 - Python engine được đóng gói cùng nguồn, nhưng runtime và dependency Python vẫn cần cài riêng khi chạy ứng dụng. Standalone sidecar packaging chưa làm.
 
 ## Kiểm chứng macOS
 
-- `pnpm test:engine`: 28 pytest engine trên Python 3.12; gồm crop geometry/filters, annotation persistence, dataset validation, split theo nguồn, YOLO labels và versioned export.
-- `pnpm build`: TypeScript strict và Vite production build; lần này thành công với 1.919 module.
-- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` và `cargo check --manifest-path src-tauri/Cargo.toml`: định dạng cùng biên dịch crate Tauri.
-- Exact crop overlay/canvas dùng kích thước preview đã đo để giữ alignment khi resize. Đã mở app bundle macOS và xác nhận startup vào thẳng workspace Trích xuất, không còn màn chào v0.1.0.
+- `./.venv/bin/python -m pytest engine/tests -q`: 44 passed; có discovery fixture, metadata run, metrics, path scope, symlink, limits, cancellation và external registry safety.
+- `pnpm build`: TypeScript strict và Vite production build thành công với 1.922 module.
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --all` và `cargo check --manifest-path src-tauri/Cargo.toml`: định dạng cùng biên dịch crate Tauri thành công.
+- `git diff --check`: thành công.
+- Smart Folder Discovery UI đã được TypeScript/Vite build nhưng chưa click-through trong app bundle macOS.
+- Exact Center Crop: mở app macOS với video fixture FHD 1920×1080; preview giữ frame nguồn và vẽ ô 320×320 đúng tâm. App mở thẳng workspace, không hiện màn chào kiểm tra engine.
 - Bản app bundle trước đó ở `Đang kết nối` trong lúc Python khởi tạo; ở bundle mới UI chuyển sang `Engine sẵn sàng`. Health JSON-lines chạy trực tiếp trong terminal trả `status: ok`.
-- `pnpm tauri build --bundles app` build thành công. Lệnh mặc định `pnpm tauri build` cũng tạo `.app` nhưng lỗi ở bước tạo DMG (`bundle_dmg.sh`).
+- `pnpm tauri build --bundles app`: app bundle macOS 4.29 MiB thành công; engine resources chứa `dataset.py`, `discovery.py`, `media.py`, `project.py`, `session.py`, `training.py` và `frameforge_engine.py`.
+- Smoke training trên MPS: PyTorch 2.14.1 và Ultralytics 8.4.177, YOLO11n 1 epoch ở imgsz 64 trên 4 ảnh train + 4 ảnh val tổng hợp; thiết bị thực tế MPS trên Apple M1 Pro, run completed và best.pt đã được lưu/đăng ký. mAP50=0 chỉ là kết quả fixture kiểm tra pipeline.
 
 ### 2026-10-14 — Dataset validation và YOLO export
 
@@ -105,16 +115,46 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Git:** Commit `2ba33e2` trên nhánh `feature/manual-labeling`; chưa push vì xác thực GitHub vẫn chưa sẵn sàng.
 - **Giới hạn:** Cửa sổ app release hiện tại vẫn giữ asset đã nạp; khởi động lại app để xem viền mới.
 
+### 2026-10-14 — Sửa bundle và kiểm tra lại Exact Center Crop preview
+
+- **Sửa bundle:** Thêm `discovery.py`, `session.py` và `training.py` vào Tauri resources, khắc phục thiếu `frameforge.discovery` trong app bundle cũ. Build `.app` mới thành công; health JSON-lines từ engine trong bundle trả `status: ok`.
+- **Preview:** Trên video fixture 1920×1080, frame nguồn vẫn hiển thị đầy đủ. Ô crop 320×320 ở tâm (x=800, y=380); đổi sang 512×512 làm ô lớn lên và vẫn giữ tâm. Đã khôi phục UI về 320×320.
+- **Kiểm tra:** Xác nhận trực tiếp trên FrameForge qua accessibility tree và screenshot. Lượt này chỉ kiểm tra preview trên fixture FHD; không trích xuất ảnh đầu ra.
+- **Tài liệu:** Cập nhật README.md, AGENTS.md, agent.md, DEVELOPMENT.md và CHANGELOG.md.
+
 ### 2026-10-14 — Manual labeling và startup
 
 - **Thay đổi:** Nối tab Gán nhãn vào workspace; thêm canvas box pixel-coordinate, chọn class, di chuyển/resize/đổi class/xóa, undo/redo, zoom/pan, chuyển ảnh và đánh dấu review. Annotation tự lưu vào dự án SQLite sau khi người dùng lưu dự án; engine xác thực class, bounds, box có diện tích và fingerprint ảnh. Giữ màn chào kiểm tra engine đã gỡ; kiểm tra nền chỉ cập nhật badge trên toolbar.
-- **Tài liệu:** Cập nhật README, AGENTS.md, agent.md, DEVELOPMENT.md và CHANGELOG.md. Video chủ yếu FHD được ghi nhận làm mục tiêu sử dụng, không giới hạn độ phân giải đọc.
+- **Tài liệu:** Cập nhật README, AGENTS.md, agent.md, DEVELOPMENT.md và CHANGELOG.md. Ở thời điểm ghi nhận lượt đó, độ phân giải video chưa bị giới hạn; policy hiện tại tối đa FHD được cập nhật trong nhật ký bên dưới.
 - **Kiểm tra:** `node_modules/typescript/bin/tsc` và `node_modules/vite/bin/vite.js build` chạy bằng Node runtime đóng gói — thành công. `pnpm build` không chạy được khi Node không nằm trên PATH. Bộ engine 25 test đã qua ở lượt trước khi nối UI. Build lại Tauri `.app` đang chạy; chưa chạy UI end-to-end.
 - **Git:** `feature/manual-labeling`; thay đổi chưa commit. Push GitHub còn chờ xác thực.
 - **Giới hạn:** Chưa có YOLO inference, dataset manager/export, training, fine-tuning, benchmark hoặc deployment export. Windows tiếp tục `PENDING_WINDOWS_VALIDATION`.
 - **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
+
+### 2026-10-14 — Audit phục hồi và khóa nguồn checkpoint fine-tune
+
+- **Audit:** Đối chiếu code với master prompt v1.0; tạo `TASKS.md` với sáu nhóm trạng thái, phụ thuộc và thứ tự tiếp theo. Giữ nguyên mọi thay đổi đang có trong working tree. Phạm vi video giữ tối đa FHD 1920×1080, không nhận hoặc scale nguồn lớn hơn.
+- **Sửa lỗi:** Engine từ chối fine-tune từ tệp `.pt` chưa đăng ký hoặc run quét ngoài. Checkpoint phải đến từ run YOLO11n detection của FrameForge, nằm trong thư mục run, có trạng thái hoàn tất/đã hủy và khớp SHA-256 trong registry. Bổ sung hồi quy cho checkpoint tùy ý, checkpoint external, fine-tune checkpoint hợp lệ và checksum.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 47 passed; `pnpm build` — thành công bằng Node.js runtime đi kèm Codex; `cargo fmt --check` và `cargo check` — thành công; benchmark video FHD một giờ được giữ theo phép đo đã ghi ở mục kế tiếp.
+- **Chưa xác minh:** Chưa click-through discovery/training trên app bundle mới. Session API chưa nối với autosave/restore trong frontend. Inference, auto-label, đánh giá model, resume, export và Windows còn trong `TASKS.md`.
+- **Bước tiếp:** Tạo YOLO11n inference adapter chỉ nhận checkpoint đã xác minh, kèm test đầu ra box/confidence/class trên fixture ảnh nhỏ.
+
+### 2026-10-14 — Giới hạn video FHD và benchmark video dài
+
+- **Thay đổi:** Chỉ nhận video có kích thước tối đa 1920×1080. Import, preview và extraction từ chối video lớn hơn, không tự scale; thông báo lỗi đầu tiên được hiển thị trong UI. Giới hạn crop/output FHD được giữ nguyên.
+- **Benchmark:** Trên máy macOS hiện tại, engine giải mã fixture H.264 tổng hợp 1920×1080, 30 fps, dài 3.600 giây (108.000 frame); lấy mẫu mỗi giây và xuất crop tâm 320×320 JPG, tắt blur/duplicate filter. Extraction mất 132,27 giây (27,22× nhanh hơn thời lượng clip), xử lý 3.600/3.600 crop, không lỗi; tổng JPG 16,5 MB. RSS process đo được tăng từ 581,4 lên tối đa 807,3 MiB (182 lần lấy mẫu progress). Tệp fixture 10,7 MB; tạo fixture mất 159,53 giây và không tính vào thời gian extraction.
+- **Kiểm tra:** `pytest engine/tests -q` — 45 passed; TypeScript và Vite production build — thành công; `git diff --check` — thành công.
+- **Giới hạn phép đo:** Nội dung fixture tổng hợp ít chuyển động; kết quả chỉ xác nhận một lượt xử lý video FHD dài một giờ trên máy này, không dự đoán tốc độ cho mọi codec/nội dung và không phải stress test chạy liên tục nhiều giờ. Chưa click-through thông báo từ chối trong app bundle.
+
+### 2026-10-14 — YOLO11n training và xác nhận preview
+
+- Thay đổi: Nối tab Huấn luyện vào workspace; thêm preflight dataset, capability detection, đề xuất cấu hình, queue imgsz độc lập, progress/metrics/runtime, hủy tại epoch boundary, registry SQLite và fine-tune từ checkpoint đã đăng ký. Pretrained yolo11n.pt được cache trong app data. Lọc event epoch trùng do validation cuối và giữ metadata job/queue qua progress event.
+- Preview: App giữ frame nguồn video FHD 1920×1080, vẽ khung crop 320×320 tại x=800, y=380; UI dùng `preview_frame`, không dùng ảnh crop làm frame preview. Khung cam liền nét giúp thấy rõ ranh giới vùng crop.
+- Kiểm tra: pnpm test:engine — 34 passed; pnpm build — thành công; cargo fmt --check, cargo check và git diff --check — thành công; pnpm tauri build --bundles app — thành công. MPS smoke: torch 2.14.1, Ultralytics 8.4.177, Apple M1 Pro, 1 epoch imgsz 64 trên fixture tổng hợp 4 ảnh train + 4 val; run completed, best.pt được lưu và registry ghi thiết bị mps. mAP50=0 trên fixture chỉ phản ánh smoke test, không phải đánh giá chất lượng.
+- Giới hạn: Chưa có resume, inference, benchmark hoặc deployment export. Windows/DirectML/RX 6600 chưa kiểm thử. Smoke chạy trực tiếp engine trên venv và fixture tổng hợp; chưa click-through tab Huấn luyện trên bundle.
+
 
 ### 2026-10-13 — Exact Center Crop
 

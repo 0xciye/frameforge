@@ -1,8 +1,8 @@
 # FrameForge
 
-FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, huấn luyện YOLO11n và tiếp tục cải thiện model đã huấn luyện. Workspace hiện hỗ trợ nhập video/ảnh, preview frame thật, lấy mẫu theo frame/giây, Exact Center Crop đúng pixel với khung crop phủ trên frame nguồn, lọc blur/dHash, crop letterbox/grid, gán nhãn thủ công, kiểm tra/chia dataset và xuất YOLO từ dự án SQLite `.ffproj`.
+FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu object detection, gán nhãn và huấn luyện YOLO11n. Workspace hỗ trợ nhập video/ảnh, preview frame thật, Exact Center Crop đúng pixel, quét thư mục tìm dataset/run/model, xuất YOLO và queue training nhiều độ phân giải. Chỉ nhận video tối đa FHD 1920×1080; video lớn hơn bị từ chối, không tự thu nhỏ.
 
-Huấn luyện YOLO11n, fine-tuning, inference, benchmarking và export model là mục tiêu của sản phẩm nhưng **chưa triển khai**. Hiện ứng dụng chỉ đọc tensor/metadata của tệp ONNX bằng ONNX Runtime CPU; không tạo detection hay kết quả huấn luyện giả.
+Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận, theo dõi queue và checkpoint đã triển khai. Fine-tune chỉ nhận checkpoint YOLO11n nội bộ có registry và checksum còn khớp; `.pt` tìm thấy bên ngoài không được nạp. Inference YOLO, đánh giá model và export model triển khai vẫn chưa khả dụng; ONNX Runtime hiện chỉ đọc tensor/metadata, không tạo detection hoặc metric giả.
 
 ## Yêu cầu
 
@@ -23,6 +23,8 @@ pnpm install
 
 Trên Windows, dùng `.venv\Scripts\python.exe` thay cho `.venv/bin/python`. Có thể đặt `FRAMEFORGE_PYTHON` để chọn một Python interpreter khác đã cài các dependency trong `engine/pyproject.toml`.
 
+Để dùng tab Huấn luyện, cài PyTorch, Ultralytics và psutil bằng `.venv/bin/python -m pip install -e "engine[train]"` (Windows: `.venv\Scripts\python.exe -m pip install -e "engine[train]"`).
+
 ## Chạy ứng dụng
 
 ```sh
@@ -30,6 +32,8 @@ pnpm tauri dev
 ```
 
 Vite sử dụng cổng `1420`. Tauri gọi tiến trình Python qua JSON-lines và kiểm tra đường dẫn/lệnh ở Rust trước khi chạy.
+
+App bundle hiện đóng gói các module Python của `frameforge` cùng engine. Python runtime và dependencies vẫn cần có sẵn trên máy; standalone sidecar chưa được triển khai.
 
 ## Kiểm tra và build
 
@@ -47,10 +51,14 @@ pnpm tauri build
 
 - `src/` — React/TypeScript workspace
 - `src-tauri/` — ứng dụng Tauri 2 và cầu nối Rust an toàn
-- `engine/` — Python/OpenCV/ONNX Runtime, trích xuất và lưu dự án
+- engine/ — Python/OpenCV/ONNX Runtime, trích xuất, lưu dự án, kiểm tra dataset và YOLO11n training
 - `docs/design/` — hợp đồng giao diện cho workspace trích xuất
 - `PRODUCT.md`, `DESIGN.md`, `DEVELOPMENT.md` — phạm vi, hướng thiết kế và trạng thái phát triển
 
 ## Trạng thái
 
-Đã triển khai media inspection/preview, trích frame có progress và hủy, Exact Center Crop, lọc dHash/Laplacian trên vùng crop, crop letterbox/grid, lưu provenance crop trong SQLite `.ffproj`, kiểm tra metadata ONNX bằng CPU, gán nhãn thủ công và quản lý/xuất dataset YOLO. Preview Exact Center Crop giữ frame thật lấy từ video (ví dụ nguồn FHD 1920×1080) và vẽ viền cam nét đứt quanh vùng W×H đúng tâm; preset vuông như 320×320 hiện thành ô vuông, còn crop tùy chỉnh không vuông hiện đúng hình chữ nhật. Ảnh crop thật được tạo khi trích xuất và xuất hiện trong gallery. Dataset validator loại ảnh trống chưa review, kiểm tra class/box/kích thước, chia nhóm theo video hoặc đoạn thời gian, giữ ảnh trùng byte cùng split; YOLO exporter sao chép ảnh không resize, ghi label chuẩn hóa, `data.yaml` và manifest vào thư mục phiên bản mới. Màn chào bắt buộc kiểm tra engine đã được bỏ; app mở thẳng workspace và tự kiểm tra Python engine ở trạng thái nhỏ trên toolbar. Video đầu vào chủ yếu là Full HD, nhưng app đọc kích thước thực tế và giữ tọa độ theo pixel. Inference, YOLO11n training/fine-tuning, benchmarking, đóng gói Python sidecar và xác nhận Windows vẫn còn ở roadmap.
+Đã triển khai media preview/trích xuất, Exact Center Crop, lọc crop, gán nhãn, dataset validation/grouped split/YOLO export, Smart Folder Discovery và YOLO11n training. Chỉ nhận video có chiều rộng tối đa 1920 và chiều cao tối đa 1080; video vượt giới hạn bị từ chối ở import, preview và extraction, không scale. Video nhỏ hơn giữ nguyên độ phân giải. Crop/output tùy chỉnh giới hạn rộng 1920, cao 1080 px. Preview giữ frame nguồn và vẽ viền cam liền nét quanh vùng W×H đúng tâm; khi W=H, viền là hình vuông. Với video FHD và crop 320×320, vùng bắt đầu tại x=800, y=380. Đổi preset chỉ đổi kích thước ô trên cùng frame; preview không thay frame bằng ảnh crop, ảnh crop đầu ra chỉ được tạo khi trích xuất. Quét thư mục đọc metadata trong phạm vi người dùng chọn, có giới hạn/progress/hủy; `.pt` không được nạp và run ngoài chỉ lưu vào registry khi người dùng bấm lưu. Checkpoint ngoài không được dùng fine-tune; checkpoint nội bộ phải thuộc run YOLO11n detection đã đăng ký và còn khớp SHA-256. Tab Huấn luyện kiểm tra dataset và backend CPU/MPS/CUDA thật, chạy mỗi imgsz thành run độc lập, ghi progress/metrics/log/checkpoint, hỗ trợ dừng tại ranh giới epoch và fine-tune checkpoint đã xác minh. Model pretrained cache trong app data; kết quả lưu ở thư mục người dùng chọn. App mở thẳng workspace và kiểm tra engine nền trên toolbar. Inference/auto-label, đánh giá model, session recovery trong giao diện, resume training, export model và Python sidecar vẫn chưa khả dụng; Windows chưa được xác nhận.
+
+### Đo hiệu năng video dài
+
+Engine xử lý fixture H.264 tổng hợp FHD dài một giờ (1920×1080, 30 fps, 108.000 frame), lấy mẫu mỗi giây và xuất 3.600 crop 320×320 trong 132,27 giây, tương đương 27,22× thời gian thực. RSS process cao nhất được lấy mẫu là 807,3 MiB. Fixture ít chuyển động; xem [DEVELOPMENT.md](DEVELOPMENT.md) để biết điều kiện và giới hạn phép đo.

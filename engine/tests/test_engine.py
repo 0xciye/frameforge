@@ -15,7 +15,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
-from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame
+from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
 from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.project import create_project, load_project, save_annotations, save_project
 
@@ -157,6 +157,54 @@ def test_health_response_contains_engine_capabilities():
     assert "health" in response["data"]["capabilities"]
 
 
+def test_fhd_video_is_accepted_and_higher_resolution_video_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeCapture:
+        def __init__(self, frame: np.ndarray):
+            self.frame = frame
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, property_id: int) -> float:
+            if property_id == cv2.CAP_PROP_FPS:
+                return 30.0
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 1.0
+            return 0.0
+
+        def set(self, _property_id: int, _value: float) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            return True, self.frame
+
+        def release(self) -> None:
+            pass
+
+    fhd_path = tmp_path / "fhd.mp4"
+    oversized_path = tmp_path / "oversized.mp4"
+    fhd_path.touch()
+    oversized_path.touch()
+    current_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: FakeCapture(current_frame))
+
+    assert (probe_media(str(fhd_path))["width"], probe_media(str(fhd_path))["height"]) == (1920, 1080)
+
+    current_frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    inspection = inspect_sources([str(oversized_path)])
+    assert inspection["sources"] == []
+    assert "tối đa FHD" in inspection["errors"][0]["message"]
+    with pytest.raises(ValueError, match="tối đa FHD"):
+        preview_frame(str(oversized_path))
+    extraction = extract_frames(
+        [str(oversized_path)],
+        str(tmp_path / "oversized-output"),
+        {"crop_mode": "center", "output_width": 320, "output_height": 320},
+    )
+    assert extraction["failed_sources"] == 1
+    assert "tối đa FHD" in extraction["errors"][0]["message"]
+
+
 def test_unknown_command_returns_structured_error():
     response = frameforge_engine.handle_request({"id": 2, "command": "train_model"})
 
@@ -190,6 +238,50 @@ def test_center_crop_preview_command_routes_to_crop_preview(monkeypatch: pytest.
 
     assert response["ok"] is True
     assert response["data"] == {"path": "/media/clip.mp4", "frame_index": 6, "width": 320, "height": 256}
+
+
+def test_smart_folder_discovery_command_routes_scan_arguments(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "scan_project_folder",
+        lambda path, max_depth, max_files, ignored_dirs, cancel_file, progress: {
+            "path": path,
+            "max_depth": max_depth,
+            "max_files": max_files,
+            "ignored_dirs": ignored_dirs,
+            "cancel_file": cancel_file,
+            "progress_enabled": progress is not None,
+        },
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "discovery-1",
+        "command": "scan_project_folder",
+        "arguments": {"path": "/project", "max_depth": 4, "max_files": 1000, "ignored_dirs": ["cache"]},
+    }, progress=lambda _event: None)
+
+    assert response["ok"] is True
+    assert response["data"] == {
+        "path": "/project", "max_depth": 4, "max_files": 1000,
+        "ignored_dirs": ["cache"], "cancel_file": None, "progress_enabled": True,
+    }
+
+
+def test_discovered_training_run_command_persists_scan_record(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        frameforge_engine,
+        "register_discovered_run",
+        lambda root, run: {"root": root, "run_id": run["experiment_id"], "checkpoint_trusted": False},
+    )
+
+    response = frameforge_engine.handle_request({
+        "id": "discovered-run-1",
+        "command": "register_discovered_run",
+        "arguments": {"discovery_root": "/project", "run": {"experiment_id": "run-123"}},
+    })
+
+    assert response["ok"] is True
+    assert response["data"] == {"root": "/project", "run_id": "run-123", "checkpoint_trusted": False}
 
 
 def test_media_inspection_and_preview_read_real_image(tmp_path: Path):

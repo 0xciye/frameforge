@@ -9,8 +9,11 @@ import sys
 from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
+from frameforge.discovery import scan_project_folder
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
 from frameforge.project import create_project, load_project, save_annotations, save_project
+from frameforge.session import load_session, save_session
+from frameforge.training import inspect_training_dataset, list_training_runs, register_discovered_run, train_yolo_queue, training_capabilities
 
 
 def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
@@ -43,6 +46,13 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "yolo_export",
                     "project_persistence",
                     "model_inspection",
+                    "training_capabilities",
+                    "training_dataset_inspection",
+                    "yolo11n_training",
+                    "training_registry",
+                    "external_training_registry",
+                    "smart_folder_discovery",
+                    "session_recovery",
                 ],
             },
         }
@@ -111,13 +121,36 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             )
         elif command == "load_project":
             result = load_project(arguments["path"])
+        elif command == "save_session":
+            result = save_session(arguments["project"], arguments["session"])
+        elif command == "load_session":
+            result = load_session()
+        elif command == "training_capabilities":
+            result = training_capabilities(arguments.get("output_dir"))
+        elif command == "inspect_training_dataset":
+            result = inspect_training_dataset(arguments["data_yaml"], progress)
+        elif command == "list_training_runs":
+            result = list_training_runs()
+        elif command == "register_discovered_run":
+            result = register_discovered_run(arguments["discovery_root"], arguments["run"])
+        elif command == "scan_project_folder":
+            result = scan_project_folder(
+                arguments["path"],
+                arguments.get("max_depth", 8),
+                arguments.get("max_files", 50_000),
+                arguments.get("ignored_dirs"),
+                arguments.get("cancel_file"),
+                progress,
+            )
+        elif command == "train_yolo_queue":
+            result = train_yolo_queue(arguments, progress)
         else:
             return {
                 "id": request_id,
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:
@@ -131,6 +164,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
 
 def serve() -> int:
     """Read requests from stdin and write one JSON response per line."""
+    protocol_stdout = sys.stdout
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -139,8 +173,8 @@ def serve() -> int:
             request_id = request.get("id") if isinstance(request, dict) else None
 
             def emit_progress(event: Dict[str, Any]) -> None:
-                sys.stdout.write(json.dumps({"id": request_id, "ok": True, "event": event}, separators=(",", ":")) + "\n")
-                sys.stdout.flush()
+                protocol_stdout.write(json.dumps({"id": request_id, "ok": True, "event": event}, separators=(",", ":")) + "\n")
+                protocol_stdout.flush()
 
             response = handle_request(request, emit_progress)
         except json.JSONDecodeError as error:

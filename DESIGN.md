@@ -7,9 +7,9 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Bố cục
 
 - Thanh công cụ trên cùng: dự án mới/mở/lưu, kiểm tra ONNX và trạng thái engine.
-- Tabs quy trình: Trích xuất, Gán nhãn và Dataset; các nút inference/training vẫn khóa đến khi có chức năng thật.
+- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Inference vẫn khóa đến khi có chức năng thật.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
-- Trung tâm: preview frame thật, độ phân giải, điều khiển frame/timeline.
+- Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
 - Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
 - Gallery ngang ở dưới: thumbnail của ảnh thật vừa trích; trạng thái tổng kết ở thanh cuối.
 
@@ -19,14 +19,24 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Ảnh trống chưa review không được export; negative đã review có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
 
+## Huấn luyện
+
+- Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Mỗi imgsz chạy thành run riêng từ cùng checkpoint nền; fine-tune chỉ bắt đầu từ checkpoint YOLO11n nội bộ đã đăng ký, được người dùng chọn và có checksum hợp lệ.
+- Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data.
+
+## Quét thư mục dự án
+
+- Chọn một thư mục cha để quét cấu trúc, dataset YAML, cấu hình run, metric CSV, checkpoint và model export; hiện progress, giới hạn quét và nút hủy.
+- Kết quả run ngoài là metadata chỉ đọc. Lưu vào registry cần thao tác riêng; checkpoint `.pt` chưa được nạp hoặc xác minh tương thích nên không xuất hiện làm model fine-tune.
+
 Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa source/preview/settings và trên gallery kéo được bằng chuột hoặc phím mũi tên; kích thước lưu ở local storage. Ở cửa sổ hẹp hơn 1240px, panel co theo CSS trong khi nội dung settings/gallery cuộn độc lập. Cửa sổ Tauri khởi tạo ở 1440×960, tối thiểu 1024×700.
 
 ## Exact Center Crop
 
-- Đây là chế độ crop mặc định, dùng hình chữ nhật W×H cố định ở tâm từng frame đã giải mã. Tọa độ bắt đầu dùng `floor((frame - crop) / 2)` và vùng lấy theo half-open slicing; không resize hoặc padding.
-- Preview luôn giữ frame nguồn thật và vẽ viền cam nét đứt tại tâm theo đúng W×H pixel, co giãn cùng frame khi preview đổi kích thước. Ảnh crop đầu ra được xem trong gallery sau khi trích xuất.
+- Đây là chế độ crop mặc định, dùng hình chữ nhật W×H cố định ở tâm frame video nguồn tối đa 1920×1080. Từ chối video lớn hơn FHD; không scale video. Tọa độ bắt đầu dùng `floor((frame - crop) / 2)` và vùng lấy theo half-open slicing, không resize hoặc padding vùng crop.
+- Preview giữ frame nguồn đã giải mã và vẽ viền cam liền nét tại tâm theo đúng W×H pixel, co giãn cùng frame khi preview đổi kích thước. Ảnh crop đầu ra được xem trong gallery sau khi trích xuất.
 - Preset vuông 192, 256, 320, 416, 512 và 640 chỉ là lối tắt; hai trường W/H vẫn nhận kích thước nguyên tùy chỉnh độc lập.
-- Center crop nhận kích thước nguyên 1–4096 px; crop lớn hơn frame bị báo lỗi trước khi trích. Letterbox/Grid giữ giới hạn hiện có 16–4096 px. Blur và near-duplicate ở chế độ center đo trên crop nguồn.
+- Crop/output nhận kích thước nguyên tối đa rộng 1920, cao 1080 px; crop lớn hơn frame bị báo lỗi trước khi trích. Letterbox/Grid có cùng giới hạn tối đa. Blur và near-duplicate ở chế độ center đo trên crop của frame video nguồn.
 - Full Frame/Letterbox và Grid là thuật toán riêng; chỉ các mode đó mới resize hoặc padding.
 
 ## Tương tác và tiếp cận

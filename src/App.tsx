@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import {
+  Activity,
   AlertCircle,
   Check,
   ChevronDown,
@@ -32,6 +33,7 @@ import {
 import "./App.css";
 import DatasetManager from "./DatasetManager";
 import ManualLabeling, { type Annotation } from "./ManualLabeling";
+import TrainingWorkspace from "./TrainingWorkspace";
 
 type MediaSource = {
   path: string;
@@ -94,6 +96,8 @@ type FramePreview = {
   data_url: string;
   width: number;
   height: number;
+  source_width?: number;
+  source_height?: number;
   frame_index: number;
 };
 
@@ -138,6 +142,9 @@ type ModelInfo = {
 type PanelLayout = { sourceWidth: number; settingsWidth: number; galleryHeight: number };
 type ResizeKind = "source" | "settings" | "gallery";
 type ResizeDrag = { kind: ResizeKind; startX: number; startY: number; initialValue: number };
+
+const FHD_WIDTH = 1920;
+const FHD_HEIGHT = 1080;
 
 const DEFAULT_OPTIONS: ExtractionOptions = {
   interval: 10,
@@ -233,7 +240,8 @@ function App() {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [inspectingModel, setInspectingModel] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [activeTab, setActiveTab] = useState<"extract" | "label" | "dataset">("extract");
+  const [activeTab, setActiveTab] = useState<"extract" | "label" | "dataset" | "training">("extract");
+  const [trainingDatasetSeed, setTrainingDatasetSeed] = useState<string | null>(null);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
   const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const annotationSaveFailed = useRef(false);
@@ -245,6 +253,11 @@ function App() {
   const settingsPanelRef = useRef<HTMLElement | null>(null);
   const galleryPanelRef = useRef<HTMLElement | null>(null);
   const previewStageRef = useRef<HTMLDivElement | null>(null);
+  const useDiscoveredDataset = useCallback((path: string) => {
+    setTrainingDatasetSeed(path);
+    setActiveTab("training");
+  }, []);
+  const clearTrainingDatasetSeed = useCallback(() => setTrainingDatasetSeed(null), []);
 
   const selectedSource = useMemo(
     () => project.sources.find((source) => source.path === selectedPath) ?? null,
@@ -266,8 +279,8 @@ function App() {
   const duration = selectedSource?.duration_seconds ?? null;
   const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
   const cropSizeValid = Number.isInteger(options.output_width) && Number.isInteger(options.output_height)
-    && options.output_width >= minimumOutputSize && options.output_width <= 4096
-    && options.output_height >= minimumOutputSize && options.output_height <= 4096;
+    && options.output_width >= minimumOutputSize && options.output_width <= FHD_WIDTH
+    && options.output_height >= minimumOutputSize && options.output_height <= FHD_HEIGHT;
   const cropFitsPreview = Boolean(cropSizeValid && preview && options.output_width <= preview.width && options.output_height <= preview.height);
   const cropRect = preview
     ? {
@@ -554,10 +567,16 @@ function App() {
       setSelectedPaths((selected) => [...new Set([...selected, ...result.sources.map((source) => source.path)])]);
       if (!selectedPath && added[0]) setSelectedPath(added[0].path);
       setDirty(true);
-      if (result.unsupported_count) {
-        setError(`${result.unsupported_count} tệp không thuộc định dạng media được hỗ trợ đã bị bỏ qua.`);
-      } else if (result.errors.length) {
-        setError(`${result.sources.length} nguồn đã thêm; ${result.errors.length} tệp không đọc được.`);
+      const importNotices = [
+        result.unsupported_count
+          ? `${result.unsupported_count} tệp không thuộc định dạng media được hỗ trợ đã bị bỏ qua.`
+          : "",
+        result.errors.length
+          ? `${result.errors.length} tệp bị từ chối hoặc không đọc được. ${result.errors[0]?.message ?? ""}`
+          : "",
+      ].filter(Boolean);
+      if (importNotices.length) {
+        setError(importNotices.join(" "));
       }
     } catch (reason) {
       setError(String(reason));
@@ -737,9 +756,9 @@ function App() {
     }
     const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
     if (!Number.isInteger(options.output_width) || !Number.isInteger(options.output_height)
-      || options.output_width < minimumOutputSize || options.output_width > 4096
-      || options.output_height < minimumOutputSize || options.output_height > 4096) {
-      setError(`Chiều rộng và chiều cao phải là số nguyên từ ${minimumOutputSize} đến 4096 px.`);
+      || options.output_width < minimumOutputSize || options.output_width > FHD_WIDTH
+      || options.output_height < minimumOutputSize || options.output_height > FHD_HEIGHT) {
+      setError(`Kích thước tối đa là ${FHD_WIDTH} × ${FHD_HEIGHT} px (FHD).`);
       return;
     }
     let destination = outputDirectory;
@@ -901,6 +920,9 @@ function App() {
         <button className={activeTab === "dataset" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openDatasetWorkspace()}>
           <Database size={15} /><span>Dataset</span>
         </button>
+        <button className={activeTab === "training" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => setActiveTab("training")}>
+          <Activity size={15} /><span>Huấn luyện</span>
+        </button>
         <div className="tab-spacer" />
         <span className="workflow-hint"><CircleHelp size={13} /> Dữ liệu xử lý trên máy này</span>
       </nav>
@@ -920,7 +942,9 @@ function App() {
           saveImage={saveLabelImage}
         />
       ) : activeTab === "dataset" ? (
-        <DatasetManager projectPath={projectPath} imageCount={project.images.length} />
+        <DatasetManager projectPath={projectPath} imageCount={project.images.length} onUseDiscoveredDataset={useDiscoveredDataset} />
+      ) : activeTab === "training" ? (
+        <TrainingWorkspace initialDataYaml={trainingDatasetSeed} onInitialDataYamlConsumed={clearTrainingDatasetSeed} />
       ) : (
       <section
         className={`workspace-layout ${dropActive ? "drop-active" : ""}`}
@@ -958,7 +982,10 @@ function App() {
                     <Icon size={16} />
                     <span className="source-details">
                       <strong title={source.name}>{source.name}</strong>
-                      <small>{source.width} × {source.height} · {source.kind === "video" ? formatTime(source.duration_seconds) : "Ảnh"} · {formatBytes(source.size_bytes)}</small>
+                      <small>
+                        {source.width} × {source.height}
+                        {` · ${source.kind === "video" ? formatTime(source.duration_seconds) : "Ảnh"} · ${formatBytes(source.size_bytes)}`}
+                      </small>
                     </span>
                   </button>
                   <button type="button" className="source-remove icon-button" onClick={() => removeSource(source.path)} aria-label={`Gỡ ${source.name}`} title="Gỡ khỏi dự án"><X size={13} /></button>
@@ -989,7 +1016,12 @@ function App() {
             </div>
             <div className="preview-tools">
               <span className="preview-resolution">
-                {preview ? `${preview.width} × ${preview.height}` : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
+                {preview
+                  ? preview.source_width && preview.source_height
+                    && (preview.source_width !== preview.width || preview.source_height !== preview.height)
+                    ? `${preview.source_width} × ${preview.source_height} → ${preview.width} × ${preview.height}`
+                    : `${preview.width} × ${preview.height}`
+                  : selectedSource ? `${selectedSource.width} × ${selectedSource.height}` : "Chưa có nguồn"}
               </span>
             </div>
           </div>
@@ -1018,7 +1050,7 @@ function App() {
               <div className="preview-empty">
                 {selectedSource ? <LoaderCircle className="spin" size={25} /> : <FilmGlyph />}
                 <p>{selectedSource ? "Đang đọc frame nguồn…" : "Chọn hoặc thêm video / ảnh"}</p>
-                <small>{selectedSource ? "Frame được đọc trực tiếp từ tệp gốc." : "Preview hiển thị nội dung media thật, không có dữ liệu minh họa."}</small>
+                <small>{selectedSource?.kind === "video" ? "Chỉ nhận video tối đa FHD (1920 × 1080); video lớn hơn sẽ bị từ chối." : selectedSource ? "Đang tải ảnh nguồn thật, không có dữ liệu minh họa." : "Preview hiển thị nội dung media thật, không có dữ liệu minh họa."}</small>
                 {!selectedSource && <button type="button" className="primary-button" onClick={() => void chooseMedia(false)}><Plus size={15} /> Thêm media</button>}
               </div>
             )}
@@ -1078,7 +1110,7 @@ function App() {
               <div className="section-title-row"><h3>Chế độ crop</h3></div>
               <label className={`radio-option ${options.crop_mode === "center" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="center" checked={options.crop_mode === "center"} onChange={() => updateOptions({ crop_mode: "center" })} />
-                <span><strong>Exact Center Crop</strong><small>Cắt đúng pixel tại tâm, không resize</small></span>
+                <span><strong>Exact Center Crop</strong><small>Cắt đúng pixel tại tâm frame đã xử lý</small></span>
               </label>
               <label className={`radio-option ${options.crop_mode === "letterbox" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="letterbox" checked={options.crop_mode === "letterbox"} onChange={() => updateOptions({ crop_mode: "letterbox" })} />
@@ -1104,18 +1136,18 @@ function App() {
                 {[192, 256, 320, 416, 512, 640].map((size) => <button key={size} type="button" className={options.output_width === size && options.output_height === size ? "size-preset active" : "size-preset"} aria-pressed={options.output_width === size && options.output_height === size} onClick={() => updateOptions({ output_width: size, output_height: size })}>{size}</button>)}
               </div>
               <div className="form-grid two-col dimension-row">
-                <label className="field-label">Rộng<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
-                <label className="field-label">Cao<input type="number" min={minimumOutputSize} max="4096" step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
+                <label className="field-label">Rộng<input type="number" min={minimumOutputSize} max={FHD_WIDTH} step="1" value={options.output_width} onChange={(event) => updateOptions({ output_width: Number(event.target.value) })} /></label>
+                <label className="field-label">Cao<input type="number" min={minimumOutputSize} max={FHD_HEIGHT} step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
               </div>
               <div className="form-grid two-col output-options">
                 <label className="field-label">Định dạng<select value={options.image_format} onChange={(event) => updateOptions({ image_format: event.target.value as ExtractionOptions["image_format"] })}><option value="jpg">JPG</option><option value="png">PNG</option></select></label>
                 {options.crop_mode !== "center" && <label className="field-label">Viền<input type="color" value={options.padding_color} onChange={(event) => updateOptions({ padding_color: event.target.value })} /></label>}
               </div>
               {options.crop_mode === "center" && !cropSizeValid
-                ? <p className="crop-validation" role="alert">Nhập chiều rộng và chiều cao là số nguyên từ 1 đến 4096 px.</p>
+                ? <p className="crop-validation" role="alert">Kích thước tối đa là 1920 × 1080 px (FHD).</p>
                 : options.crop_mode === "center" && preview && !cropFitsPreview
                   ? <p className="crop-validation" role="alert">Crop {options.output_width} × {options.output_height} vượt khung nguồn {preview.width} × {preview.height}. Hãy giảm kích thước crop.</p>
-                  : options.crop_mode === "center" && <p className="crop-helper">Tâm crop dùng floor((khung − kích thước) / 2). Ảnh giữ nguyên pixel nguồn.</p>}
+                  : options.crop_mode === "center" && <p className="crop-helper">Chỉ nhận video tối đa FHD; tâm crop dùng floor((khung − kích thước) / 2) và không resize vùng crop.</p>}
               {options.image_format === "jpg" && <label className="quality-row">JPEG quality <input type="range" min="50" max="100" value={options.jpeg_quality} onChange={(event) => updateOptions({ jpeg_quality: Number(event.target.value) })} /><strong>{options.jpeg_quality}</strong></label>}
             </section>
 
@@ -1182,7 +1214,7 @@ function App() {
         <div className="status-right">
           <span>{outputDirectory || "Đầu ra chưa chọn"}</span>
           <span className="status-separator">/</span>
-          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : "Trích xuất"}</span>
+          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : activeTab === "training" ? "Huấn luyện" : "Trích xuất"}</span>
         </div>
       </footer>
     </main>

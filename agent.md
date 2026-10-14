@@ -1,6 +1,6 @@
 # FrameForge agent notes
 
-FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. The extraction workspace, manual bounding-box labeling, dataset validation/grouped splits/YOLO export and ONNX metadata inspection are implemented. Inference, training, benchmarking and model deployment remain unavailable until implemented and verified.
+FrameForge is a local-first Tauri 2 desktop application for exact-center-cropped object-detection datasets, annotation, YOLO11n training/fine-tuning, benchmarking and deployment export. Extraction, manual labeling, dataset validation/grouped splits/YOLO export, ONNX metadata inspection, and a real YOLO11n training queue are implemented. YOLO inference, benchmarking, and deployment export remain unavailable.
 
 ## Read first
 
@@ -10,15 +10,17 @@ Read `AGENTS.md`, `PRODUCT.md`, `DESIGN.md`, and `DEVELOPMENT.md`; inspect Git s
 
 - UI: React, TypeScript, Tailwind CSS, native Tauri dialogs.
 - Desktop boundary: allowlisted Rust commands validate inputs and start Python directly; do not invoke a shell.
+- Add every module imported by `engine/frameforge_engine.py` to the Tauri resources in `src-tauri/tauri.conf.json`; verify imports and health from the built app bundle.
 - Engine: Python JSON-lines on stdin/stdout, diagnostics only on stderr; OpenCV handles media, ONNX Runtime currently inspects models on CPU, SQLite stores `.ffproj` files.
-- The current master product objective includes training/fine-tuning YOLO11n on labeled data; this supersedes older repo notes that prohibited training. Use PyTorch MPS on Apple Silicon when verified, report the actual device, and never fabricate training, detection or benchmark results.
+- YOLO11n training uses the optional engine[train] extra (PyTorch, Ultralytics, psutil). Inspect local datasets before training, run each image size independently, store checkpoints/logs/config under the chosen output, cache pretrained weights in app data, and report the actual device and metrics. Fine-tuning may load only a registered internal YOLO11n detection checkpoint whose current SHA-256 matches its registry entry.
 - Never fabricate media, ONNX metadata, detections or annotation results. Manual labels must come from user edits and remain independent of inference.
 - Manual labeling requires a saved `.ffproj` so annotations can autosave to SQLite. Class IDs are stable: Head = 0, Body = 1. Store and validate boxes in the original image's pixel coordinates.
-- Keep inference, training, fine-tuning, benchmarking and deployment export unavailable until backed by working code.
+- Keep inference, benchmarking and deployment export unavailable until backed by working code. Training progress, metrics, cancellation and checkpoint discovery must come from real engine work.
 - Dataset export includes only positive images or reviewed negatives, groups video/time segments and byte-identical images into the same split, preserves image pixels, and writes normalized YOLO labels plus an integrity/provenance manifest into a new version directory.
+- Smart Folder Discovery scans only inside the user-selected root, skips symlinks, reports bounded progress, and reads YAML/CSV metadata without loading `.pt` files. Reject external YAML references; imported run metadata and checkpoints stay untrusted and must not become fine-tuning choices.
 - Open the app directly into the extraction workspace. Run engine health in the background and keep its status in the toolbar; do not show a blocking welcome/check-engine screen.
-- The user's source videos are primarily Full HD (1920×1080). Read actual media dimensions and preserve exact crop/annotation geometry for other resolutions too.
-- Exact Center Crop preview keeps the actual decoded source frame visible and draws a dashed orange rectangle using the exact source-pixel crop geometry; do not switch the preview to a cropped output image.
+- Accept video only up to 1920×1080; reject larger video during import, preview, and extraction without scaling. Preserve the source resolution of smaller video. Limit crop/output dimensions to 1920×1080.
+- Exact Center Crop previews the accepted source video frame (up to FHD) through `preview_frame`, then draws a solid orange box in that frame's pixel coordinates using `floor((frame − crop) / 2)`. Equal W/H dimensions make a square; changing a preset resizes the box over the same frame. Never replace the displayed frame with a crop output image.
 
 ## Development practice
 

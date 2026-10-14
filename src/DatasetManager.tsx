@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, CheckCircle2, Database, Download, FolderOpen, LoaderCircle, RefreshCw, ShieldAlert } from "lucide-react";
+import ProjectDiscovery from "./ProjectDiscovery";
 import "./DatasetManager.css";
 
 type DatasetConfig = {
@@ -48,6 +49,7 @@ type ExportResult = {
 type Props = {
   projectPath: string | null;
   imageCount: number;
+  onUseDiscoveredDataset(path: string): void;
 };
 
 const DEFAULT_CONFIG: DatasetConfig = {
@@ -67,7 +69,7 @@ function errorText(error: unknown) {
   return typeof error === "string" ? error : String(error);
 }
 
-export default function DatasetManager({ projectPath, imageCount }: Props) {
+export default function DatasetManager({ projectPath, imageCount, onUseDiscoveredDataset }: Props) {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [outputDirectory, setOutputDirectory] = useState("");
   const [report, setReport] = useState<DatasetReport | null>(null);
@@ -181,6 +183,8 @@ export default function DatasetManager({ projectPath, imageCount }: Props) {
             <p>Kiểm tra nhãn, chia dữ liệu theo nguồn để hạn chế rò rỉ frame, rồi tạo bản YOLO bất biến.</p>
           </div>
         </header>
+
+        <ProjectDiscovery onUseDataset={onUseDiscoveredDataset} />
 
         {!projectPath && <div className="dataset-notice" role="status">
           <ShieldAlert size={15} /><span>Lưu dự án trước khi kiểm tra hoặc xuất dataset.</span>

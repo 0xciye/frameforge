@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 
+const FHD_WIDTH: u64 = 1920;
+const FHD_HEIGHT: u64 = 1080;
+
 #[derive(Clone, Default)]
 struct EngineJobs(Arc<Mutex<HashMap<String, JobHandle>>>);
 
@@ -15,6 +18,7 @@ struct EngineJobs(Arc<Mutex<HashMap<String, JobHandle>>>);
 struct JobHandle {
     child: Arc<Mutex<Child>>,
     cancelled: Arc<AtomicBool>,
+    cancellation_marker: Option<PathBuf>,
 }
 
 #[tauri::command]
@@ -44,6 +48,15 @@ fn cancel_engine_request(
     let Some(handle) = handle else {
         return Ok(false);
     };
+    if let Some(marker) = handle.cancellation_marker {
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Không tạo được thư mục hủy an toàn: {error}"))?;
+        }
+        std::fs::write(marker, b"cancel")
+            .map_err(|error| format!("Không ghi được yêu cầu dừng an toàn: {error}"))?;
+        return Ok(true);
+    }
     handle.cancelled.store(true, Ordering::SeqCst);
     let mut child = handle
         .child
@@ -57,6 +70,7 @@ fn cancel_engine_request(
 }
 
 fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Result<Value, String> {
+    let mut request = request;
     let request_id = request
         .get("id")
         .and_then(Value::as_str)
@@ -68,8 +82,45 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         .and_then(Value::as_str)
         .ok_or_else(|| "Yêu cầu engine thiếu tên lệnh.".to_string())?
         .to_owned();
+    if request_id.len() > 128 {
+        return Err("Mã request không được dài quá 128 ký tự.".to_string());
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Không xác định được thư mục dữ liệu FrameForge: {error}"))?;
+    let mut cancellation_marker = None;
+    if command == "train_yolo_queue" || command == "scan_project_folder" {
+        let marker_dir = app_data_dir
+            .join(if command == "train_yolo_queue" {
+                "training"
+            } else {
+                "discovery"
+            })
+            .join("cancel");
+        std::fs::create_dir_all(&marker_dir)
+            .map_err(|error| format!("Không tạo được thư mục điều khiển tác vụ: {error}"))?;
+        let safe_id: String = request_id
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let marker = marker_dir.join(format!("{safe_id}.cancel"));
+        let arguments = request
+            .get_mut("arguments")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "Arguments phải là một JSON object.".to_string())?;
+        arguments.insert("cancel_file".to_string(), json!(marker));
+        cancellation_marker = Some(marker);
+    }
     validate_request(&command, request.get("arguments").unwrap_or(&Value::Null))?;
-    let cancellable = command == "extract_frames";
+    let request_bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    if request_bytes.len() > 64 * 1024 * 1024 {
+        return Err("Yêu cầu engine vượt giới hạn 64 MiB.".to_string());
+    }
+    let cancellable = matches!(
+        command.as_str(),
+        "extract_frames" | "train_yolo_queue" | "scan_project_folder"
+    );
     if cancellable
         && jobs
             .0
@@ -84,6 +135,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     let python = engine_program(&script);
     let mut child = Command::new(python)
         .arg(script)
+        .env("FRAMEFORGE_APP_DATA", &app_data_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -106,7 +158,6 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         .stdin
         .take()
         .ok_or_else(|| "Không mở được kênh gửi lệnh tới engine.".to_string())?;
-    let request_bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     if let Err(error) = stdin
         .write_all(&request_bytes)
         .and_then(|_| stdin.write_all(b"\n"))
@@ -135,6 +186,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
             JobHandle {
                 child: child.clone(),
                 cancelled: cancelled.clone(),
+                cancellation_marker: cancellation_marker.clone(),
             },
         );
     }
@@ -225,6 +277,9 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
             running.remove(&request_id);
         }
     }
+    if let Some(marker) = cancellation_marker {
+        let _ = std::fs::remove_file(marker);
+    }
     result
 }
 
@@ -234,6 +289,171 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
         .ok_or_else(|| "Arguments phải là một JSON object.".to_string())?;
     match command {
         "health" => Ok(()),
+        "training_capabilities" | "list_training_runs" | "load_session" => Ok(()),
+        "save_session" => {
+            if arguments
+                .get("project")
+                .and_then(Value::as_object)
+                .is_none()
+                || arguments
+                    .get("session")
+                    .and_then(Value::as_object)
+                    .is_none()
+            {
+                return Err("Thiếu project hoặc metadata phiên làm việc.".to_string());
+            }
+            Ok(())
+        }
+        "register_discovered_run" => {
+            let root = canonical_existing_path(
+                arguments
+                    .get("discovery_root")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục quét đã xác nhận.")?,
+            )?;
+            if !root.is_dir() {
+                return Err("Thư mục quét không còn tồn tại.".to_string());
+            }
+            let run = arguments
+                .get("run")
+                .and_then(Value::as_object)
+                .ok_or("Thiếu metadata training run.")?;
+            let source = canonical_existing_path(
+                run.get("source_dir")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục training run.")?,
+            )?;
+            if !source.is_dir() || !source.starts_with(&root) {
+                return Err("Training run nằm ngoài thư mục đã quét.".to_string());
+            }
+            Ok(())
+        }
+        "scan_project_folder" => {
+            let path = canonical_existing_path(
+                arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục cần quét.")?,
+            )?;
+            if !path.is_dir() {
+                return Err("Hãy chọn thư mục dự án để quét.".to_string());
+            }
+            let max_depth = arguments
+                .get("max_depth")
+                .map(Value::as_u64)
+                .flatten()
+                .unwrap_or(8);
+            if arguments.get("max_depth").is_some()
+                && arguments.get("max_depth").and_then(Value::as_u64).is_none()
+            {
+                return Err("Độ sâu quét phải là số nguyên từ 1–16.".to_string());
+            }
+            if !(1..=16).contains(&max_depth) {
+                return Err("Độ sâu quét phải nằm trong khoảng 1–16.".to_string());
+            }
+            let max_files = arguments
+                .get("max_files")
+                .map(Value::as_u64)
+                .flatten()
+                .unwrap_or(50_000);
+            if arguments.get("max_files").is_some()
+                && arguments.get("max_files").and_then(Value::as_u64).is_none()
+            {
+                return Err("Giới hạn file phải là số nguyên từ 1–200000.".to_string());
+            }
+            if !(1..=200_000).contains(&max_files) {
+                return Err("Giới hạn file phải nằm trong khoảng 1–200000.".to_string());
+            }
+            if let Some(ignored_dirs) = arguments.get("ignored_dirs") {
+                let ignored_dirs = ignored_dirs
+                    .as_array()
+                    .filter(|items| items.len() <= 64)
+                    .ok_or("Danh sách thư mục bỏ qua không hợp lệ.")?;
+                for name in ignored_dirs {
+                    let name = name
+                        .as_str()
+                        .filter(|name| {
+                            !name.is_empty()
+                                && name.len() <= 128
+                                && !name.contains('/')
+                                && !name.contains('\\')
+                        })
+                        .ok_or("Tên thư mục bỏ qua không hợp lệ.")?;
+                    if name == "." || name == ".." {
+                        return Err("Tên thư mục bỏ qua không hợp lệ.".to_string());
+                    }
+                }
+            }
+            Ok(())
+        }
+        "inspect_training_dataset" => validate_yaml_file(
+            arguments
+                .get("data_yaml")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn data.yaml.")?,
+        ),
+        "train_yolo_queue" => {
+            validate_yaml_file(
+                arguments
+                    .get("data_yaml")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu đường dẫn data.yaml.")?,
+            )?;
+            let output = canonical_existing_path(
+                arguments
+                    .get("output_dir")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục đầu ra training.")?,
+            )?;
+            if !output.is_dir() {
+                return Err("Thư mục đầu ra training không hợp lệ.".to_string());
+            }
+            let sizes = arguments
+                .get("sizes")
+                .and_then(Value::as_array)
+                .filter(|sizes| !sizes.is_empty() && sizes.len() <= 12)
+                .ok_or("Chọn từ 1 đến 12 kích thước train.")?;
+            let mut unique_sizes = std::collections::HashSet::new();
+            for size in sizes {
+                let size = size
+                    .as_u64()
+                    .filter(|size| (1..=2048).contains(size))
+                    .ok_or("imgsz phải là số nguyên từ 1 đến 2048 px.")?;
+                if !unique_sizes.insert(size) {
+                    return Err("Danh sách imgsz không được trùng kích thước.".to_string());
+                }
+            }
+            let device = arguments
+                .get("device")
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            if !["auto", "cpu", "mps", "cuda", "cuda:0"].contains(&device) {
+                return Err("Thiết bị training không hợp lệ.".to_string());
+            }
+            let on_error = arguments
+                .get("on_error")
+                .and_then(Value::as_str)
+                .unwrap_or("stop");
+            if !["stop", "continue"].contains(&on_error) {
+                return Err("Chính sách khi job lỗi phải là stop hoặc continue.".to_string());
+            }
+            let base_model = arguments
+                .get("base_model")
+                .and_then(Value::as_str)
+                .unwrap_or("yolo11n.pt");
+            if base_model != "yolo11n.pt" {
+                let checkpoint = canonical_existing_path(base_model)?;
+                if !checkpoint.is_file()
+                    || !checkpoint
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+                {
+                    return Err("Checkpoint fine-tune phải là tệp .pt hợp lệ.".to_string());
+                }
+            }
+            Ok(())
+        }
         "inspect_sources" => {
             let paths = arguments
                 .get("paths")
@@ -282,8 +502,16 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     .get(key)
                     .and_then(Value::as_u64)
                     .ok_or_else(|| format!("Thiếu kích thước crop {key}."))?;
-                if !(1..=4096).contains(&size) {
-                    return Err("Kích thước crop phải từ 1 đến 4096 px.".to_string());
+                let maximum = if key == "width" {
+                    FHD_WIDTH
+                } else {
+                    FHD_HEIGHT
+                };
+                if !(1..=maximum).contains(&size) {
+                    return Err(format!(
+                        "Kích thước crop tối đa là {} × {} px (FHD).",
+                        FHD_WIDTH, FHD_HEIGHT
+                    ));
                 }
             }
             Ok(())
@@ -340,9 +568,14 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     .get(key)
                     .and_then(Value::as_u64)
                     .ok_or_else(|| format!("Thiếu kích thước đầu ra {key}."))?;
-                if !(minimum_size..=4096).contains(&size) {
+                let maximum = if key == "output_width" {
+                    FHD_WIDTH
+                } else {
+                    FHD_HEIGHT
+                };
+                if !(minimum_size..=maximum).contains(&size) {
                     return Err(format!(
-                        "Kích thước đầu ra phải từ {minimum_size} đến 4096 px."
+                        "Kích thước đầu ra phải từ {minimum_size} đến {maximum} px."
                     ));
                 }
             }
@@ -514,6 +747,22 @@ fn canonical_existing_path(value: &str) -> Result<PathBuf, String> {
     }
     path.canonicalize()
         .map_err(|error| format!("Đường dẫn không hợp lệ: {error}"))
+}
+
+fn validate_yaml_file(value: &str) -> Result<(), String> {
+    let path = canonical_existing_path(value)?;
+    if path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "yaml" | "yml")
+            })
+    {
+        Ok(())
+    } else {
+        Err("Hãy chọn tệp data.yaml hoặc .yml có thật.".to_string())
+    }
 }
 
 fn validate_new_project_path(value: &str) -> Result<(), String> {
