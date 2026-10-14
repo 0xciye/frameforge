@@ -47,7 +47,7 @@ This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub push is currently blocked: `git push origin feature/manual-labeling` returned `could not read Username for 'https://github.com': Device not configured`. Local commit `85dc842` is preserved; retry after GitHub HTTPS credentials are configured.
+- GitHub push is currently blocked. Feature commit `f202b4b` and its documentation follow-up are local and unpushed; HTTPS push returned `could not read Username for 'https://github.com': Device not configured`, and SSH push returned `Host key verification failed`. Retry after HTTPS credentials or the GitHub SSH host key are configured.
 
 ## Dependencies and next work
 

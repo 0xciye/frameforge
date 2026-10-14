@@ -144,7 +144,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 57 passed; TypeScript `tsc` và Vite production build — thành công; `cargo fmt --check` và `cargo check` — thành công (dùng Rust toolchain tuyệt đối vì shell không có `cargo`/`rustc` trên PATH); `git diff --check` — thành công. `pnpm tauri build --bundles app` — app macOS 4.33 MiB; JSON-lines health từ engine đã đóng gói trả `status: ok`.
 - **Chưa xác minh:** UI inference chưa click-through với checkpoint thật vì training registry hiện không có checkpoint dùng được. Windows chưa được build/kiểm thử.
 - **Benchmark giới hạn:** Phép đo video FHD tổng hợp dài một giờ trước đó đạt 3.600 crop trong 132,27 giây, RSS lấy mẫu tối đa 807,3 MiB. Đây là một lượt extraction, không phải soak test nhiều giờ; không đại diện mọi codec.
-- **Git:** Local commit theo Conventional Commits trên `feature/manual-labeling`; hash được ghi trong Git history. Lần push trước thiếu GitHub HTTPS credential.
+- **Git:** Commit `f202b4b` (`feat(label): connect verified inference review workflow`) trên `feature/manual-labeling`. Push qua HTTPS thất bại do môi trường không cấp username; thử SSH cũng thất bại vì host key GitHub chưa được xác minh.
 - **Bước tiếp:** Nối inference hàng loạt cho các ảnh của project, nạp model một lần mỗi lượt và giữ review từng box.
 
 ### 2026-10-14 — YOLO11n inference engine
