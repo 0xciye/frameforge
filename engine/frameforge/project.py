@@ -783,6 +783,7 @@ def _save_ai_suggestions_batch(
             image_path = item.get("image_path")
             fingerprint = item.get("image_fingerprint")
             predictions = item.get("predictions")
+            skipped_large_objects = item.get("skipped_large_objects", 0)
             if not isinstance(image_path, str) or not image_path:
                 raise ValueError("Thiếu đường dẫn ảnh inference.")
             if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(
@@ -791,6 +792,12 @@ def _save_ai_suggestions_batch(
                 raise ValueError("Fingerprint ảnh inference không hợp lệ.")
             if not isinstance(predictions, list) or len(predictions) > 300:
                 raise ValueError("Danh sách gợi ý phải có tối đa 300 box mỗi ảnh.")
+            if (
+                isinstance(skipped_large_objects, bool)
+                or not isinstance(skipped_large_objects, int)
+                or not 0 <= skipped_large_objects <= 300
+            ):
+                raise ValueError("Số box bị bỏ qua do vượt khung không hợp lệ.")
             try:
                 image_file = Path(image_path).expanduser().resolve(strict=True)
             except (OSError, ValueError):
@@ -848,7 +855,7 @@ def _save_ai_suggestions_batch(
                 })
             prepared.append({
                 "image_path": image_path, "image_file": image_file, "fingerprint": fingerprint,
-                "predictions": annotations,
+                "predictions": annotations, "skipped_large_objects": skipped_large_objects,
             })
 
         now = datetime.now(timezone.utc).isoformat()
@@ -875,7 +882,7 @@ def _save_ai_suggestions_batch(
                             annotation["confidence"], "ai", "needs_review", source_model_id, checkpoint_sha256,
                         ) for annotation in annotations],
                     )
-                else:
+                elif item["skipped_large_objects"] == 0:
                     connection.execute(
                         """INSERT INTO ai_negative_candidates(
                             candidate_id, image_path, source_model_id, checkpoint_sha256,
@@ -895,8 +902,11 @@ def _save_ai_suggestions_batch(
         return {
             "processed_images": len(committed),
             "images_with_detections": sum(bool(item["predictions"]) for item in committed),
-            "candidate_negative_count": sum(not item["predictions"] for item in committed),
+            "candidate_negative_count": sum(
+                not item["predictions"] and item["skipped_large_objects"] == 0 for item in committed
+            ),
             "annotation_count": sum(len(item["predictions"]) for item in committed),
+            "skipped_large_objects": sum(item["skipped_large_objects"] for item in committed),
             "skipped_changed": skipped_changed,
             "skipped_duplicate": skipped_duplicate,
         }

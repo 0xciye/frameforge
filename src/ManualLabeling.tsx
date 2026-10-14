@@ -76,7 +76,7 @@ type RegisteredModel = {
 };
 type Prediction = { class_id: number; confidence: number; bbox_xyxy: number[] };
 type InferenceProgress = { stage: string; completed_images?: number; total_images?: number; eligible_images?: number; saved_images?: number };
-type InferenceResult = { status: string; results: { predictions: Prediction[] }[] };
+type InferenceResult = { status: string; results: { predictions: Prediction[]; skipped_large_objects?: number }[] };
 type BatchInferenceResult = {
   status: string;
   processed_images: number;
@@ -84,6 +84,7 @@ type BatchInferenceResult = {
   candidate_negative_count: number;
   annotation_count: number;
   skipped_changed: number;
+  skipped_large_objects: number;
 };
 type SaveSuggestionsResult = { annotations: Annotation[]; negative_candidate?: NegativeCandidate | null };
 type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string) => Promise<SaveSuggestionsResult>;
@@ -349,10 +350,18 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         return;
       }
       const predictions = result.results[0]?.predictions ?? [];
+      const skippedLargeObjects = result.results[0]?.skipped_large_objects ?? 0;
+      if (skippedLargeObjects > 0 && predictions.length === 0) {
+        setInferenceMessage(`Đã bỏ qua ${skippedLargeObjects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung. Không tạo candidate âm tính; ảnh vẫn cần bạn review.`);
+        return;
+      }
       const saved = await saveSuggestions(image.path, predictions, selectedModel.checkpoint_path, preview.image_fingerprint);
-      setInferenceMessage(saved.negative_candidate
+      const resultMessage = saved.negative_candidate
         ? "Model không phát hiện box. Candidate âm tính đang chờ bạn xác nhận; ảnh chưa được đưa vào dataset."
-        : `Đã lưu ${saved.annotations.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`);
+        : `Đã lưu ${saved.annotations.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`;
+      setInferenceMessage(skippedLargeObjects > 0
+        ? `${resultMessage} Đã bỏ qua thêm ${skippedLargeObjects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung.`
+        : resultMessage);
     } catch (reason) {
       setInferenceError(String(reason));
     } finally {
@@ -379,7 +388,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       });
       const result = await runBatchInference(selectedModel.checkpoint_path, id);
       if (activeInferenceId.current !== id) return;
-      setInferenceMessage(`${result.status === "cancelled" ? "Đã dừng" : "Hoàn tất"}: ${result.processed_images} ảnh đã lưu, ${result.images_with_detections} ảnh có box, ${result.candidate_negative_count} candidate âm tính cần review${result.skipped_changed ? `, ${result.skipped_changed} ảnh đã đổi hoặc không còn đọc được` : ""}.`);
+      setInferenceMessage(`${result.status === "cancelled" ? "Đã dừng" : "Hoàn tất"}: ${result.processed_images} ảnh đã xử lý, ${result.images_with_detections} ảnh có box, ${result.candidate_negative_count} candidate âm tính cần review${result.skipped_large_objects ? `, bỏ qua ${result.skipped_large_objects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung` : ""}${result.skipped_changed ? `, ${result.skipped_changed} ảnh đã đổi hoặc không còn đọc được` : ""}.`);
     } catch (reason) {
       setInferenceError(String(reason));
     } finally {

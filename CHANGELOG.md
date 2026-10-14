@@ -2,6 +2,7 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Bỏ qua detection box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung; báo số box bị bỏ qua và không tạo negative candidate nếu tất cả box đều bị bỏ qua.
 - Làm rõ dHash ngay dưới thanh trượt: giá trị 5 là số bit khác tối đa giữa hai hash 64-bit, không phải số ảnh; tổng kết gallery báo số crop gần giống thực tế bị lọc.
 - Thêm Champion/Challenger: so sánh evaluation trên cùng fixed validation và điều kiện, kiểm tra checksum/target/regression toàn cục và theo class, lưu lịch sử compare/promote/rollback; promote cần xác nhận. Test engine dùng fake runtime, chưa xác minh bằng checkpoint thật.
 - Thêm đánh giá YOLO11n trên fixed validation/test: chỉ dùng checkpoint nội bộ đã xác minh; kiểm tra manifest, hash ảnh/nhãn, class schema và chống leakage; lưu metric tổng/per-class, mục tiêu người dùng, điều kiện, cảnh báo và lịch sử. Có thể huỷ giữa các batch mà không lưu kết quả dở dang. Latency/FPS/throughput/RAM tiếp tục hiện `not_measured` đến khi có benchmark deployment.

@@ -432,6 +432,7 @@ function App() {
         candidate_negative_count: number;
         annotation_count: number;
         skipped_changed: number;
+        skipped_large_objects: number;
       }>("engine_request", {
         request: {
           id: requestId,

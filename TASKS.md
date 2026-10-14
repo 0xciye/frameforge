@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and dataset lineage/replay are committed locally, and Champion/Challenger is committed with the 81-test engine suite, frontend production build, Rust format/check, and `git diff --check` passing. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds; see `DEVELOPMENT.md`. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
+This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and dataset lineage/replay are committed locally, and Champion/Challenger is committed. The current engine suite passes 83 tests and the frontend production build passes; see `DEVELOPMENT.md`. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
 
 ## COMPLETED_VERIFIED
 
@@ -13,7 +13,8 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
 - The fixed-set evaluator has fake-runtime engine coverage for internal checkpoint trust, manifest/class/split checks, image and label hashes, cross-split leakage, target status/persistence, history, and cancellation; it records overall/per-class Precision/Recall/F1/mAP and evaluation conditions.
 - Fine-tune accepts only a registered FrameForge YOLO11n detection checkpoint in its run directory with matching file, JSON and SQLite SHA-256. Unregistered and discovered external `.pt` files are rejected before model load.
-- Current engine suite passes 81 tests; fixed-set evaluation and Champion/Challenger have fake-runtime coverage for fixed-set matching, condition/hardware checks, checkpoint hashes, targets, regressions, promotion, rollback and history.
+- Inference skips boxes within 1 px of a crop edge as potentially clipped/oversized, reports the skipped count, and does not turn an image into a negative candidate when all detections were skipped; fake-runtime regression tests verify both single-image and batch behavior.
+- Current engine suite passes 83 tests; fixed-set evaluation and Champion/Challenger have fake-runtime coverage for fixed-set matching, condition/hardware checks, checkpoint hashes, targets, regressions, promotion, rollback and history.
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
 - Earlier verification: 68 engine tests, TypeScript/Vite production build, Rust format/check; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
 - A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.

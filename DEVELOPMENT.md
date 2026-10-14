@@ -11,10 +11,10 @@
 | Trích frame, lọc crop, letterbox/grid, JPG/PNG | TESTED_MACOS | Fixture video; blur/dHash tính trên crop nguồn; dHash dùng Hamming distance ≤ ngưỡng trên hash 64-bit, bounded 4.096 hash gần nhất; gallery báo số crop thực tế bị lọc; progress/hủy |
 | Dự án SQLite `.ffproj` | TESTED_ENGINE | Create/save/load; schema v1/v2/v3 migrate lên v4 khi ghi; annotation và negative candidate AI lưu provenance/fingerprint; autosave bảo toàn provenance |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
-| YOLO11n inference adapter | TESTED_MACOS | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive; smoke một ảnh tổng hợp trên MPS |
-| Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
+| YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
+| Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 81 engine tests pass |
+| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; suite hiện tại có 83 engine tests pass |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
@@ -80,8 +80,8 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - SQLite schema v4 thêm provenance model/checkpoint cho annotation AI và bảng candidate âm tính có fingerprint; schema v1/v2/v3 được đọc và migrate khi người dùng ghi. Metadata crop cũ vẫn được giữ.
 - Annotation lưu tọa độ pixel ảnh gốc trong SQLite; fingerprint ngăn ghi nhãn lên file ảnh đã bị thay đổi kể từ lúc preview. Undo/redo, xóa và review đi qua cùng hàng đợi ghi dự án để giữ thứ tự autosave.
 - Dự án mới mặc định có class ổn định `head` (0) và `body` (1). Tab Gán nhãn hỗ trợ inference trên ảnh hiện tại hoặc project; thao tác cần project đã lưu.
-- `predict_crops` chỉ dùng checkpoint YOLO11n nội bộ đã đăng ký, còn khớp SHA-256 và có class schema khớp với model. Nó trả box `xyxy` theo pixel trên ảnh gốc; NMS do Ultralytics thực hiện và confidence cuối được lọc theo `score >= threshold`.
-- `save_ai_suggestions` xác minh lại checkpoint, class schema project và fingerprint ảnh; box được lưu `needs_review` với model ID/checkpoint SHA-256/confidence. Batch project nạp model một lần, predict theo batch 16 và lưu từng chunk 64 ảnh trong transaction; fingerprint được recheck trước commit, ảnh đổi bị bỏ qua, hủy giữ phần đã lưu. Không có detection tạo negative candidate chờ người review.
+- `predict_crops` chỉ dùng checkpoint YOLO11n nội bộ đã đăng ký, còn khớp SHA-256 và có class schema khớp với model. Nó trả box `xyxy` theo pixel trên ảnh gốc; NMS do Ultralytics thực hiện và confidence cuối được lọc theo `score >= threshold`. Box cách biên crop không quá 1 px bị bỏ qua vì có thể là object bị cắt hoặc lớn hơn khung.
+- `save_ai_suggestions` xác minh lại checkpoint, class schema project và fingerprint ảnh; box được lưu `needs_review` với model ID/checkpoint SHA-256/confidence. Batch project nạp model một lần, predict theo batch 16 và lưu từng chunk 64 ảnh trong transaction; fingerprint được recheck trước commit, ảnh đổi bị bỏ qua, hủy giữ phần đã lưu. Kết quả chỉ gồm box bị bỏ qua sát biên không tạo candidate âm tính; ảnh thực sự không có detection tạo candidate chờ người review.
 - Dataset validator đọc lại ảnh thật, kiểm tra kích thước so với project, class ID và box hữu hạn/còn trong biên. Chỉ box thủ công, AI `reviewed` và negative candidate được người dùng xác nhận mới được export; pending/rejected bị loại, ảnh pending không trở thành negative dù có trạng thái reviewed. Manifest ghi provenance candidate.
 - Split theo source gom toàn bộ frame/crop cùng video; split theo segment dùng timestamp hoặc frame/FPS. Ảnh có SHA-256 trùng nội dung luôn được gộp cùng nhóm split. Khi số nhóm độc lập ít hơn số split được bật, báo cảnh báo và chỉ gán các nhóm có sẵn.
 - YOLO export tạo thư mục phiên bản mới nguyên tử dưới thư mục người dùng đã chọn, sao chép ảnh gốc và xác minh SHA-256 sau khi sao chép; nhãn dùng `class x_center y_center width height` chuẩn hóa 8 chữ số thập phân. `manifest.json` lưu mapping class, split, fingerprint, hình học crop và provenance nguồn. Export không sửa project/ảnh nguồn.
@@ -143,6 +143,12 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Bước tiếp:** Làm dataset validation/split và YOLO export.
 
 ## Nhật ký công việc
+
+### 2026-10-14 — Bỏ qua object vượt biên crop trong inference
+
+- **Thay đổi:** Bỏ detection box nếu một cạnh nằm cách biên ảnh không quá 1 px; đây có thể là object bị crop hoặc lớn hơn vùng crop. Engine trả số box đã bỏ qua. Nếu toàn bộ box bị bỏ qua, không tạo negative candidate; ảnh vẫn cần người dùng review. UI ảnh hiện tại và batch project hiển thị số lượng.
+- **Kiểm tra:** `pnpm test:engine` — 83 passed trong 10,71 giây; `pnpm build` — thành công với TypeScript/Vite; `git diff --check` — thành công. Lệnh dùng Node và Python runtime đóng gói workspace.
+- **Giới hạn:** Kiểm tra biên là heuristic; object hợp lệ thực sự chạm mép ảnh cũng bị bỏ qua. Engine behavior được kiểm tra bằng fake YOLO runtime; chưa click-through với checkpoint thật vì registry local không có checkpoint usable.
 
 ### 2026-10-14 — Làm rõ ngưỡng dHash
 

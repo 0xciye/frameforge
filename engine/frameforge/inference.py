@@ -17,6 +17,7 @@ from frameforge.project import _save_ai_suggestions_batch, project_images_for_in
 MAX_INFERENCE_IMAGES = 500
 INFERENCE_BATCH_SIZE = 16
 MAX_DETECTIONS_PER_IMAGE = 300
+CLIPPED_BOX_EDGE_MARGIN_PX = 1.0
 PROJECT_PERSIST_BATCH_SIZE = 64
 MAX_PROJECT_INFERENCE_IMAGES = 100_000
 
@@ -83,6 +84,7 @@ def _decode_batch(
             raise ValueError("Kích thước ảnh inference không hợp lệ.")
         boxes = getattr(prediction, "boxes", None)
         items: List[Dict[str, Any]] = []
+        skipped_large_objects = 0
         if boxes is not None:
             xyxy = _numpy(getattr(boxes, "xyxy", np.empty((0, 4)))).reshape(-1, 4)
             scores = _numpy(getattr(boxes, "conf", np.empty((0,)))).reshape(-1)
@@ -107,13 +109,24 @@ def _decode_batch(
                     0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
                 ):
                     raise ValueError("YOLO trả về bounding box ngoài pixel bounds của ảnh.")
+                if (
+                    x1 <= CLIPPED_BOX_EDGE_MARGIN_PX
+                    or y1 <= CLIPPED_BOX_EDGE_MARGIN_PX
+                    or width - x2 <= CLIPPED_BOX_EDGE_MARGIN_PX
+                    or height - y2 <= CLIPPED_BOX_EDGE_MARGIN_PX
+                ):
+                    skipped_large_objects += 1
+                    continue
                 items.append({
                     "class_id": class_id,
                     "class_name": expected_names[class_id],
                     "confidence": score,
                     "bbox_xyxy": coordinates,
                 })
-        results.append({"image_path": str(path), "width": width, "height": height, "predictions": items})
+        results.append({
+            "image_path": str(path), "width": width, "height": height,
+            "predictions": items, "skipped_large_objects": skipped_large_objects,
+        })
     return results
 
 
@@ -261,6 +274,7 @@ def predict_crops(
         "device_actual": device,
         "processed_images": len(results),
         "total_images": len(paths),
+        "skipped_large_objects": sum(item["skipped_large_objects"] for item in results),
         "results": results,
     }
 
@@ -343,7 +357,7 @@ def auto_label_project(
             "status": "completed", "checkpoint_run_id": run["run_id"],
             "checkpoint_sha256": run["checkpoint_sha256"], "device_actual": device,
             "total_images": 0, "processed_images": 0, "images_with_detections": 0,
-            "candidate_negative_count": 0, "annotation_count": 0,
+            "candidate_negative_count": 0, "annotation_count": 0, "skipped_large_objects": 0,
             "skipped_changed": skipped_changed, "skipped_duplicate": 0,
         }
 
@@ -363,6 +377,7 @@ def auto_label_project(
     totals = {
         "processed_images": 0, "images_with_detections": 0,
         "candidate_negative_count": 0, "annotation_count": 0, "skipped_duplicate": 0,
+        "skipped_large_objects": 0,
     }
     pending = []
     completed = 0
@@ -426,6 +441,7 @@ def auto_label_project(
                 "image_path": str(row["path"]),
                 "image_fingerprint": row["fingerprint"],
                 "predictions": result["predictions"],
+                "skipped_large_objects": result["skipped_large_objects"],
             })
             if len(pending) >= PROJECT_PERSIST_BATCH_SIZE:
                 persist_pending()

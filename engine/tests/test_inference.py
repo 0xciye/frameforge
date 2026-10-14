@@ -47,11 +47,18 @@ def create_image(path: Path) -> Path:
     return path
 
 
-def install_fake_yolo(monkeypatch: pytest.MonkeyPatch, names=None):
+def install_fake_yolo(monkeypatch: pytest.MonkeyPatch, names=None, prediction_boxes=None):
+    xyxy, confidence, classes = prediction_boxes or (
+        [[2, 2, 10, 12], [3, 4, 12, 14], [5, 6, 20, 22]],
+        [0.5, 0.499, 0.8],
+        [0, 0, 1],
+    )
+
     class FakeBoxes:
-        xyxy = np.array([[1, 2, 10, 12], [3, 4, 12, 14], [5, 6, 20, 22]], dtype=np.float32)
-        conf = np.array([0.5, 0.499, 0.8], dtype=np.float32)
-        cls = np.array([0, 0, 1], dtype=np.float32)
+        def __init__(self):
+            self.xyxy = np.array(xyxy, dtype=np.float32)
+            self.conf = np.array(confidence, dtype=np.float32)
+            self.cls = np.array(classes, dtype=np.float32)
 
     class FakeYOLO:
         instances = []
@@ -96,13 +103,31 @@ def test_predict_crops_applies_inclusive_threshold_class_filter_and_pixel_boxes(
         "class_id": 0,
         "class_name": "head",
         "confidence": pytest.approx(0.5),
-        "bbox_xyxy": pytest.approx([1, 2, 10, 12]),
+        "bbox_xyxy": pytest.approx([2, 2, 10, 12]),
     }]
     call = FakeYOLO.instances[0].calls[0]
     assert call["conf"] < 0.5
     assert call["iou"] == 0.7
     assert call["classes"] == [0]
     assert progress[-1]["stage"] == "inference_completed"
+
+
+def test_predict_crops_skips_boxes_clipped_by_crop_edges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    image = create_image(tmp_path / "crop.jpg")
+    install_fake_yolo(monkeypatch, prediction_boxes=(
+        [[0, 2, 10, 12], [3, 4, 12, 14]],
+        [0.9, 0.8],
+        [0, 1],
+    ))
+
+    result = inference.predict_crops(str(checkpoint), [str(image)])
+
+    assert result["skipped_large_objects"] == 1
+    assert len(result["results"][0]["predictions"]) == 1
+    assert result["results"][0]["predictions"][0]["class_id"] == 1
+    assert result["results"][0]["skipped_large_objects"] == 1
 
 
 def test_predict_crops_rejects_unregistered_and_changed_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -198,3 +223,25 @@ def test_auto_label_project_rechecks_fingerprints_before_saving(tmp_path: Path, 
     by_path = {image["path"]: image for image in loaded["images"]}
     assert by_path[str(image_paths[0])]["annotations"] == []
     assert all(by_path[str(path)]["annotations"] for path in image_paths[1:])
+
+
+def test_auto_label_project_does_not_turn_skipped_large_objects_into_negatives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    project_path, image_paths = make_project(tmp_path, 1)
+    install_fake_yolo(monkeypatch, prediction_boxes=(
+        [[0, 2, 32, 20]],
+        [0.9],
+        [0],
+    ))
+
+    result = inference.auto_label_project(str(project_path), str(checkpoint))
+
+    assert result["skipped_large_objects"] == 1
+    assert result["candidate_negative_count"] == 0
+    loaded = load_project(str(project_path))
+    assert loaded["images"][0]["path"] == str(image_paths[0])
+    assert loaded["images"][0]["annotations"] == []
+    assert loaded["images"][0]["negative_candidates"] == []
