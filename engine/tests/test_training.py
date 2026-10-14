@@ -129,6 +129,7 @@ def install_fake_training_runtime(monkeypatch: pytest.MonkeyPatch, cancel_marker
     class FakeYOLO:
         sources: list[str] = []
         image_sizes: list[int] = []
+        train_parameters: list[dict] = []
         marker_to_create: Path | None = cancel_marker
 
         def __init__(self, source):
@@ -142,6 +143,7 @@ def install_fake_training_runtime(monkeypatch: pytest.MonkeyPatch, cancel_marker
 
         def train(self, **kwargs):
             self.__class__.image_sizes.append(kwargs["imgsz"])
+            self.__class__.train_parameters.append(kwargs.copy())
             save_dir = Path(kwargs["project"]) / kwargs["name"]
             (save_dir / "weights").mkdir(parents=True)
             best = save_dir / "weights" / "best.pt"
@@ -179,6 +181,54 @@ def install_fake_training_runtime(monkeypatch: pytest.MonkeyPatch, cancel_marker
     fake_ultralytics.YOLO = FakeYOLO
     monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
     return FakeYOLO
+
+
+def test_training_preflight_and_queue_support_over_20k_images_and_300_epochs_per_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    dataset = tmp_path / "large-dataset"
+    train_images = dataset / "images" / "train"
+    val_images = dataset / "images" / "val"
+    train_labels = dataset / "labels" / "train"
+    val_labels = dataset / "labels" / "val"
+    for folder in (train_images, val_images, train_labels, val_labels):
+        folder.mkdir(parents=True)
+    ok, encoded = cv2.imencode(".jpg", np.full((320, 320, 3), 80, dtype=np.uint8))
+    assert ok
+    image_bytes = encoded.tobytes()
+    for index in range(20_001):
+        (train_images / f"image-{index:05}.jpg").write_bytes(image_bytes)
+    for index in range(2):
+        (val_images / f"image-{index}.jpg").write_bytes(image_bytes)
+    (train_labels / "image-00000.txt").write_text("0 0.5 0.5 0.25 0.25\n", encoding="utf-8")
+    (val_labels / "image-0.txt").write_text("0 0.5 0.5 0.25 0.25\n", encoding="utf-8")
+    data_yaml = dataset / "data.yaml"
+    data_yaml.write_text(yaml.safe_dump({
+        "path": ".", "train": "images/train", "val": "images/val", "names": {0: "head"},
+    }), encoding="utf-8")
+
+    inspected = training.inspect_training_dataset(str(data_yaml))
+    assert inspected["valid"] is True
+    assert inspected["total_images"] == 20_003
+    assert inspected["image_counts"] == {"train": 20_001, "val": 2}
+
+    output_dir = tmp_path / "training-output"
+    output_dir.mkdir()
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    FakeYOLO = install_fake_training_runtime(monkeypatch)
+    result = training.train_yolo_queue({
+        "data_yaml": str(data_yaml),
+        "output_dir": str(output_dir),
+        "sizes": [64, 96],
+        "device": "auto",
+        "settings": {"epochs": 301, "batch": 2, "workers": 0, "save_period": 50},
+    })
+
+    assert result["status"] == "completed"
+    assert len(FakeYOLO.train_parameters) == 2
+    assert [call["epochs"] for call in FakeYOLO.train_parameters] == [301, 301]
+    assert [call["imgsz"] for call in FakeYOLO.train_parameters] == [64, 96]
+    assert [call["save_period"] for call in FakeYOLO.train_parameters] == [50, 50]
 
 
 def test_multi_resolution_queue_reloads_same_base_and_registers_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

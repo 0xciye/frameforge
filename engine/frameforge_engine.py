@@ -10,9 +10,9 @@ from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.discovery import scan_project_folder
-from frameforge.inference import predict_crops
+from frameforge.inference import auto_label_project, predict_crops
 from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
-from frameforge.project import create_project, load_project, save_ai_suggestions, save_annotations, save_project
+from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
 from frameforge.session import load_session, save_session
 from frameforge.training import inspect_training_dataset, list_training_runs, register_discovered_run, train_yolo_queue, training_capabilities
 
@@ -52,6 +52,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "training_dataset_inspection",
                     "yolo11n_training",
                     "yolo11n_inference",
+                    "project_batch_inference",
+                    "candidate_negative_review",
                     "training_registry",
                     "external_training_registry",
                     "smart_folder_discovery",
@@ -109,6 +111,13 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments["image_fingerprint"],
                 arguments["checkpoint"],
             )
+        elif command == "review_ai_negative_candidate":
+            result = review_ai_negative_candidate(
+                arguments["path"],
+                arguments["candidate_id"],
+                arguments["action"],
+                arguments.get("image_fingerprint"),
+            )
         elif command == "validate_dataset":
             result = validate_dataset(
                 arguments["path"],
@@ -165,13 +174,22 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("cancel_file"),
                 progress,
             )
+        elif command == "auto_label_project":
+            result = auto_label_project(
+                arguments["path"],
+                arguments["checkpoint"],
+                arguments.get("confidence_threshold", 0.25),
+                arguments.get("iou_threshold", 0.7),
+                arguments.get("cancel_file"),
+                progress,
+            )
         else:
             return {
                 "id": request_id,
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue, predict_crops.",
+                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, register_discovered_run, scan_project_folder, train_yolo_queue, predict_crops.",
                 },
             }
     except (KeyError, OSError, ValueError, TypeError) as error:

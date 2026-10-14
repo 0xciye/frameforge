@@ -2,8 +2,11 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Thêm inference toàn project: nạp model một lần, chạy theo batch/chunk có giới hạn, kiểm fingerprint khi lưu và giữ phần đã hoàn tất khi hủy.
+- Thêm candidate negative kèm model/checkpoint provenance và fingerprint ảnh; chỉ export sau khi người dùng xác nhận ảnh trống. Nâng SQLite project lên schema v4, migrate từ v1/v2/v3.
+- Mở rộng training preflight cho dataset trên 20.000 ảnh và cấu hình trên 300 epoch mỗi imgsz; ghi rõ Patience = 0 để tắt early stopping. Test 20.003 ảnh/301 epoch dùng fake trainer, chưa xác nhận hiệu năng train YOLO thật.
 - Nối inference vào tab Gán nhãn cho ảnh đang mở: chọn checkpoint YOLO11n nội bộ, lưu gợi ý AI kèm model ID/checkpoint SHA-256/confidence, duyệt/chỉnh sửa/loại; chỉ gợi ý đã duyệt vào YOLO export mặc định. Có thể chạy lại cùng checkpoint sau khi loại toàn bộ gợi ý cũ trên ảnh.
-- Nâng project SQLite lên schema v3 để lưu provenance annotation AI và migrate schema v1/v2 khi ghi; autosave giữ nguyên gợi ý AI, ảnh còn gợi ý chờ không được dùng làm negative.
+- Lưu provenance annotation AI qua project SQLite và migrate schema v1/v2/v3 lên v4 khi ghi; autosave giữ nguyên gợi ý AI, ảnh còn gợi ý chờ không được dùng làm negative.
 - Thêm engine YOLO11n inference theo batch cho ảnh crop; chỉ nạp checkpoint nội bộ đã xác minh, kiểm tra class schema và trả box pixel/confidence từ Ultralytics; hỗ trợ hủy giữa các batch.
 - Khóa fine-tune vào checkpoint YOLO11n detection nội bộ đã đăng ký, còn trong thư mục run và khớp SHA-256; từ chối checkpoint `.pt` bất kỳ hoặc được phát hiện từ nguồn ngoài.
 - Giới hạn đầu vào video tối đa 1920×1080; từ chối video lớn hơn ở import, preview và extraction, không tự scale; hiển thị lý do từ chối.

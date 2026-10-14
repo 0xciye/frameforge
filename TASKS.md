@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`; the current implementation and verification are recorded in `DEVELOPMENT.md`. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
+This ledger resumes branch `feature/manual-labeling` at `f923653`; current implementation and verification are recorded in `DEVELOPMENT.md`. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
 
 ## COMPLETED_VERIFIED
 
@@ -11,22 +11,22 @@ This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
 - Fine-tune accepts only a registered FrameForge YOLO11n detection checkpoint in its run directory with matching file, JSON and SQLite SHA-256. Unregistered and discovered external `.pt` files are rejected before model load.
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
-- Verification before the current changes: `pytest engine/tests -q` — 51 passed; frontend and Rust checks passed. Current verification is 57 engine tests, TypeScript/Vite production build, Rust format/check, a 4.33 MiB macOS app bundle, and bundled-engine JSON-lines health; results are recorded in `DEVELOPMENT.md`.
-- `pnpm tauri build --bundles app` produced a 4.30 MiB macOS app; JSON-lines health from its bundled engine returned `status: ok` and listed `yolo11n_inference`.
+- Verification for this turn: 63 engine tests, TypeScript/Vite production build, Rust format/check and `git diff --check`; current source changes have not yet been rebuilt into a macOS app bundle. Full-scale actual YOLO training remains unverified.
+- A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.
 - Commit `85dc842` records the inherited FHD/training/discovery implementation plus checkpoint-trust recovery. GitHub push failed because no HTTPS username credential was available.
 
 ## IMPLEMENTED_UNVERIFIED
 
 - Training and Smart Folder Discovery screens compile in the production frontend build, but their complete click-through workflow has not been repeated on a fresh app bundle in this audit.
-- Per-image inference is connected to the labeling UI. Its persistence and export rules are covered by engine tests; the workflow has not been click-through-tested with a real checkpoint because the local registry has no usable model.
-- Default YOLO export filters pending/rejected AI annotations and prevents pending-only images from being exported as reviewed negatives; engine tests cover exclusion and provenance for reviewed AI boxes.
-- MPS training smoke is documented as one real YOLO11n epoch on a small synthetic dataset. It verifies the training pipeline, not model quality or sustained training stability.
+- Per-image and project-wide inference are connected to the labeling UI. Batch engine tests use a fake YOLO runtime for 130 images over multiple persistence chunks; UI workflow has not been click-through-tested with a real checkpoint because the local registry has no usable model.
+- Candidate-negative persistence/review is tested for fingerprints, rejection/retry, confirmed-negative export provenance, and prevention of pending candidates becoming negatives. YOLO export filters pending/rejected AI boxes and candidates.
+- The MPS training smoke is one real YOLO11n epoch on a small synthetic dataset. A scale test creates 20,003 uniform 320×320 JPEGs, runs dataset preflight twice, and checks two imgsz jobs receive 301 epochs each through a fake trainer (9.53 seconds including fixture creation). This verifies capacity/configuration plumbing, not real 20k-image YOLO throughput, 301 completed epochs, or soak stability.
 
 ## PARTIALLY_COMPLETED
 
 - Session snapshots have Python IPC commands and private storage, but the frontend does not autosave or restore state on launch.
 - Dataset export creates immutable versioned directories with split and provenance manifests, but there is no parent-version graph, frozen test set, replay policy, or multi-generation lineage.
-- Training has dataset preflight, independent `imgsz` jobs, actual metrics/logs/checkpoints, cancellation at epoch boundaries, and fine-tuning. Resume after interruption, richer optimizer/augmentation controls, experiment comparison, and candidate promotion policy are absent.
+- Training has dataset preflight, independent `imgsz` jobs, actual metrics/logs/checkpoints, cancellation at epoch boundaries, and fine-tuning. Engine accepts 10,000 as the maximum epoch setting; set patience to 0 to disable early stopping. Actual training on more than 20,000 images for more than 300 epochs per size has not been run. Resume after interruption, richer optimizer/augmentation controls, experiment comparison, and candidate promotion policy are absent.
 - Smart Folder Discovery reads external run metadata and lists checkpoints without loading them. External checkpoint architecture/task verification and import are intentionally unavailable.
 - The one-hour media benchmark verifies a single synthetic clip; it does not establish multi-hour soak behavior or performance across codecs/content.
 
@@ -36,7 +36,7 @@ This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`
 
 ## NOT_IMPLEMENTED
 
-- Bulk auto-labeling across project images and automatic candidate-negative decisions remain unimplemented; the current UI runs inference on the image that is open.
+- Negative-image sampling policy and sampling ratios remain unimplemented; candidate-negative decisions require human review.
 - Guided workspace, contextual next actions, full workflow status, active-learning suggestions, and model quality dashboard.
 - Fixed validation/test evaluation, minimum quality targets, model-generation comparison, Champion/Challenger promotion and rollback.
 - Training resume, historical-data replay strategy, dataset version lineage, and frozen human-reviewed test set.
@@ -51,10 +51,11 @@ This ledger resumes the existing branch `feature/manual-labeling` from `bb1e603`
 
 ## Dependencies and next work
 
-1. **Next:** add project-wide batch inference and candidate-negative review without reloading the model per image.
-2. Add immutable dataset lineage and replay/frozen-test policies before iterative fine-tuning and quality comparisons.
-3. Implement fixed-set evaluation and Champion/Challenger policy before model promotion or release targets.
-4. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
-5. Complete session restoration and Windows validation as independent platform/workflow tracks.
+1. **Next:** add immutable dataset lineage, replay policy and a frozen human-reviewed test set before iterative fine-tuning comparisons.
+2. Implement fixed-set evaluation and Champion/Challenger policy before model promotion or quality claims.
+3. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
+4. Complete resume training and session restoration.
+5. Validate real YOLO training throughput/stability on a representative 20,000+ image dataset for 300+ epochs per size.
+6. Complete Windows validation when a Windows target is available.
 
 Update this file and `README.md`, `AGENTS.md`, `agent.md`, and `DEVELOPMENT.md` after each completed task; update product/design notes and `CHANGELOG.md` when applicable. Do not clear inherited working-tree changes.

@@ -11,6 +11,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 from frameforge import inference, training
+from frameforge.project import create_project, load_project, save_project
 
 
 def register_checkpoint(tmp_path: Path) -> Path:
@@ -132,3 +133,68 @@ def test_predict_crops_rejects_checkpoint_class_schema_mismatch(tmp_path: Path, 
         inference.predict_crops(str(checkpoint), [str(image)])
 
     assert FakeYOLO.instances[0].calls == []
+
+
+def make_project(tmp_path: Path, count: int) -> tuple[Path, list[Path]]:
+    project_path = tmp_path / "batch.ffproj"
+    created = create_project(str(project_path), "Batch")
+    images = [create_image(tmp_path / "images" / f"crop-{index:04}.jpg") for index in range(count)]
+    save_project(str(project_path), {
+        "id": created["id"], "name": "Batch", "sources": [], "settings": {},
+        "class_names": ["head", "body"],
+        "images": [{
+            "path": str(path), "width": 32, "height": 24, "status": "ready", "annotations": [],
+        } for path in images],
+    })
+    return project_path, images
+
+
+def test_auto_label_project_loads_model_once_and_saves_large_projects_in_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    project_path, image_paths = make_project(tmp_path, 130)
+    FakeYOLO = install_fake_yolo(monkeypatch)
+    progress = []
+
+    result = inference.auto_label_project(str(project_path), str(checkpoint), progress=progress.append)
+
+    assert result["status"] == "completed"
+    assert result["processed_images"] == len(image_paths)
+    assert result["images_with_detections"] == len(image_paths)
+    assert result["annotation_count"] == 3 * len(image_paths)
+    assert len(FakeYOLO.instances) == 1
+    assert len(FakeYOLO.instances[0].calls) == 9
+    assert sum(event["stage"] == "project_inference_saved" for event in progress) == 3
+    loaded = load_project(str(project_path))
+    assert all(len(image["annotations"]) == 3 for image in loaded["images"])
+    assert all(annotation["review_status"] == "needs_review" for image in loaded["images"] for annotation in image["annotations"])
+
+
+def test_auto_label_project_rechecks_fingerprints_before_saving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    project_path, image_paths = make_project(tmp_path, 3)
+    FakeYOLO = install_fake_yolo(monkeypatch)
+    predict = FakeYOLO.instances
+    original_predict = FakeYOLO.predict
+    changed = {"done": False}
+
+    def mutate_during_inference(self, **kwargs):
+        if not changed["done"]:
+            Path(kwargs["source"][0]).write_bytes(b"changed during inference")
+            changed["done"] = True
+        return original_predict(self, **kwargs)
+
+    monkeypatch.setattr(FakeYOLO, "predict", mutate_during_inference)
+
+    result = inference.auto_label_project(str(project_path), str(checkpoint))
+
+    assert result["processed_images"] == 2
+    assert result["skipped_changed"] == 1
+    assert len(predict) == 1
+    loaded = load_project(str(project_path))
+    by_path = {image["path"]: image for image in loaded["images"]}
+    assert by_path[str(image_paths[0])]["annotations"] == []
+    assert all(by_path[str(path)]["annotations"] for path in image_paths[1:])

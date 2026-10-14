@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_CLASS_NAMES = ("head", "body")
 
 
@@ -72,6 +72,16 @@ def _initialize(connection: sqlite3.Connection) -> None:
             source_model_id TEXT,
             checkpoint_sha256 TEXT
         );
+        CREATE TABLE IF NOT EXISTS ai_negative_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            image_path TEXT NOT NULL REFERENCES images(path) ON DELETE CASCADE,
+            source_model_id TEXT NOT NULL,
+            checkpoint_sha256 TEXT NOT NULL,
+            image_fingerprint TEXT NOT NULL,
+            review_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT
+        );
         """
     )
     connection.execute(
@@ -85,7 +95,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     version = int(row[0]) if row else 0
     if version == SCHEMA_VERSION:
         return
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         raise ValueError("Phiên bản cấu trúc dự án không được hỗ trợ.")
     if version == 1:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(images)")}
@@ -103,6 +113,18 @@ def _migrate(connection: sqlite3.Connection) -> None:
     for name in ("source_model_id", "checkpoint_sha256"):
         if name not in columns:
             connection.execute("ALTER TABLE annotations ADD COLUMN {0} TEXT".format(name))
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS ai_negative_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            image_path TEXT NOT NULL REFERENCES images(path) ON DELETE CASCADE,
+            source_model_id TEXT NOT NULL,
+            checkpoint_sha256 TEXT NOT NULL,
+            image_fingerprint TEXT NOT NULL,
+            review_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT
+        )"""
+    )
     connection.execute(
         "INSERT OR REPLACE INTO project_meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -143,6 +165,7 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
             )
 
         connection.execute("DELETE FROM annotations")
+        connection.execute("DELETE FROM ai_negative_candidates")
         connection.execute("DELETE FROM images")
         for image in project.get("images", []):
             if not isinstance(image, dict) or not image.get("path"):
@@ -185,6 +208,21 @@ def _save(connection: sqlite3.Connection, project: Dict[str, Any]) -> Dict[str, 
                         str(annotation.get("review_status", "unreviewed")),
                         annotation.get("source_model_id"),
                         annotation.get("checkpoint_sha256"),
+                    ),
+                )
+            for candidate in image.get("negative_candidates", []):
+                if not isinstance(candidate, dict):
+                    continue
+                connection.execute(
+                    """INSERT INTO ai_negative_candidates(
+                        candidate_id, image_path, source_model_id, checkpoint_sha256,
+                        image_fingerprint, review_status, created_at, reviewed_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(candidate.get("id") or uuid.uuid4()), str(image["path"]),
+                        str(candidate["source_model_id"]), str(candidate["checkpoint_sha256"]),
+                        str(candidate["image_fingerprint"]), str(candidate.get("review_status", "needs_review")),
+                        str(candidate.get("created_at") or now), candidate.get("reviewed_at"),
                     ),
                 )
 
@@ -240,7 +278,7 @@ def _is_frameforge_project(path: Path) -> bool:
             return False
         meta = {row[0]: row[1] for row in connection.execute("SELECT key, value FROM project_meta")}
         return (
-            meta.get("schema_version") in {"1", "2", str(SCHEMA_VERSION)}
+            meta.get("schema_version") in {"1", "2", "3", str(SCHEMA_VERSION)}
             and bool(meta.get("project_id"))
             and bool(meta.get("name"))
             and meta.get("application") == "FrameForge"
@@ -438,6 +476,15 @@ def save_annotations(
                     "checkpoint_sha256": row["checkpoint_sha256"],
                 })
 
+        if image_status == "reviewed" and (
+            any(item["source"] == "ai" and item["review_status"] == "needs_review" for item in cleaned)
+            or connection.execute(
+                "SELECT 1 FROM ai_negative_candidates WHERE image_path = ? AND review_status = 'needs_review' LIMIT 1",
+                (image_path,),
+            ).fetchone()
+        ):
+            raise ValueError("Hãy duyệt hoặc loại toàn bộ candidate AI trước khi đánh dấu ảnh đã review.")
+
         now = datetime.now(timezone.utc).isoformat()
         with connection:
             if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
@@ -554,7 +601,11 @@ def save_ai_suggestions(
             (image_path, source_model_id, checkpoint_sha256),
         ).fetchone():
             raise ValueError("Ảnh này đã có gợi ý chưa bị loại từ checkpoint đang chọn.")
-
+        if connection.execute(
+            "SELECT 1 FROM ai_negative_candidates WHERE image_path = ? AND review_status != 'rejected' AND source_model_id = ? AND checkpoint_sha256 = ? LIMIT 1",
+            (image_path, source_model_id, checkpoint_sha256),
+        ).fetchone():
+            raise ValueError("Ảnh này đã có candidate chưa bị loại từ checkpoint đang chọn.")
         width, height = int(image["width"]), int(image["height"])
         cleaned = []
         for prediction in predictions:
@@ -598,42 +649,334 @@ def save_ai_suggestions(
                 "checkpoint_sha256": checkpoint_sha256,
             })
 
-        if not cleaned:
-            return {
-                "image_path": image_path,
-                "annotation_count": 0,
-                "annotations": [],
-                "source_model_id": source_model_id,
-                "checkpoint_sha256": checkpoint_sha256,
-            }
         now = datetime.now(timezone.utc).isoformat()
+        candidate = None
         with connection:
             if hashlib.sha256(image_file.read_bytes()).hexdigest() != image_fingerprint:
                 raise ValueError("Ảnh đã thay đổi trên đĩa. Hãy tải lại ảnh trước khi lưu gợi ý.")
-            connection.executemany(
-                """INSERT INTO annotations(
-                    annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
-                    confidence, source, review_status, source_model_id, checkpoint_sha256
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(
-                    annotation["id"], image_path, annotation["class_id"], annotation["x_min"],
-                    annotation["y_min"], annotation["x_max"], annotation["y_max"],
-                    annotation["confidence"], annotation["source"], annotation["review_status"],
-                    annotation["source_model_id"], annotation["checkpoint_sha256"],
-                ) for annotation in cleaned],
-            )
+            if cleaned:
+                connection.executemany(
+                    """INSERT INTO annotations(
+                        annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
+                        confidence, source, review_status, source_model_id, checkpoint_sha256
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(
+                        annotation["id"], image_path, annotation["class_id"], annotation["x_min"],
+                        annotation["y_min"], annotation["x_max"], annotation["y_max"],
+                        annotation["confidence"], annotation["source"], annotation["review_status"],
+                        annotation["source_model_id"], annotation["checkpoint_sha256"],
+                    ) for annotation in cleaned],
+                )
+            else:
+                candidate = {
+                    "id": str(uuid.uuid4()),
+                    "image_path": image_path,
+                    "source_model_id": source_model_id,
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "image_fingerprint": image_fingerprint,
+                    "review_status": "needs_review",
+                    "created_at": now,
+                    "reviewed_at": None,
+                }
+                connection.execute(
+                    """INSERT INTO ai_negative_candidates(
+                        candidate_id, image_path, source_model_id, checkpoint_sha256,
+                        image_fingerprint, review_status, created_at, reviewed_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        candidate["id"], image_path, source_model_id, checkpoint_sha256,
+                        image_fingerprint, "needs_review", now, None,
+                    ),
+                )
+                if not connection.execute(
+                    "SELECT 1 FROM annotations WHERE image_path = ? AND review_status != 'rejected' LIMIT 1",
+                    (image_path,),
+                ).fetchone():
+                    connection.execute("UPDATE images SET status = 'ready' WHERE path = ?", (image_path,))
             connection.execute(
                 "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
             )
+        current_status = connection.execute("SELECT status FROM images WHERE path = ?", (image_path,)).fetchone()[0]
         return {
             "image_path": image_path,
             "annotation_count": len(cleaned),
             "annotations": cleaned,
+            "negative_candidate": candidate,
+            "status": current_status if candidate else None,
             "source_model_id": source_model_id,
             "checkpoint_sha256": checkpoint_sha256,
         }
     except sqlite3.DatabaseError as error:
         raise ValueError("Không lưu được gợi ý AI vào dự án: {0}".format(error)) from error
+    finally:
+        connection.close()
+
+
+def project_images_for_inference(path_value: str) -> Dict[str, Any]:
+    """List only unlabeled, unreviewed project images for one batch inference run."""
+    path = Path(path_value).expanduser().resolve(strict=True)
+    if path.suffix.lower() != ".ffproj" or not path.is_file() or not _is_frameforge_project(path):
+        raise ValueError("Hãy chọn một tệp dự án FrameForge .ffproj hợp lệ.")
+    connection = _connect(path)
+    try:
+        _migrate(connection)
+        class_names = [row[0] for row in connection.execute("SELECT name FROM classes ORDER BY class_id")]
+        rows = connection.execute(
+            """SELECT i.path, i.width, i.height FROM images AS i
+            WHERE i.status != 'reviewed'
+              AND NOT EXISTS (
+                SELECT 1 FROM annotations AS a
+                WHERE a.image_path = i.path AND (a.source = 'manual' OR a.review_status != 'rejected')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM ai_negative_candidates AS c
+                WHERE c.image_path = i.path AND c.review_status != 'rejected'
+              )
+            ORDER BY i.rowid"""
+        ).fetchall()
+        return {
+            "class_names": class_names,
+            "images": [{"path": row["path"], "width": row["width"], "height": row["height"]} for row in rows],
+        }
+    finally:
+        connection.close()
+
+
+def _save_ai_suggestions_batch(
+    path_value: str,
+    items: Any,
+    source_model_id: str,
+    checkpoint_sha256: str,
+    class_names: Any,
+) -> Dict[str, int]:
+    """Persist one bounded inference chunk in a single SQLite transaction."""
+    if not isinstance(items, list) or not 1 <= len(items) <= 128:
+        raise ValueError("Một lô inference phải có từ 1 đến 128 ảnh.")
+    if not isinstance(source_model_id, str) or not source_model_id:
+        raise ValueError("Thiếu mã model cho provenance inference.")
+    if not isinstance(checkpoint_sha256, str) or len(checkpoint_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in checkpoint_sha256.casefold()
+    ):
+        raise ValueError("Checksum checkpoint inference không hợp lệ.")
+    if not isinstance(class_names, (list, tuple)) or not class_names or any(
+        not isinstance(name, str) or not name.strip() for name in class_names
+    ):
+        raise ValueError("Schema class trong checkpoint không hợp lệ.")
+    path = Path(path_value).expanduser().resolve(strict=True)
+    if path.suffix.lower() != ".ffproj" or not path.is_file() or not _is_frameforge_project(path):
+        raise ValueError("Hãy chọn một tệp dự án FrameForge .ffproj hợp lệ.")
+
+    connection = _connect(path)
+    try:
+        _migrate(connection)
+        project_classes = [row[0] for row in connection.execute("SELECT name FROM classes ORDER BY class_id")]
+        if list(class_names) != project_classes:
+            raise ValueError("Class schema của checkpoint không khớp với dự án.")
+
+        prepared = []
+        seen_paths = set()
+        skipped_changed = 0
+        skipped_duplicate = 0
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Bản ghi ảnh inference không hợp lệ.")
+            image_path = item.get("image_path")
+            fingerprint = item.get("image_fingerprint")
+            predictions = item.get("predictions")
+            if not isinstance(image_path, str) or not image_path:
+                raise ValueError("Thiếu đường dẫn ảnh inference.")
+            if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(
+                character not in "0123456789abcdef" for character in fingerprint.casefold()
+            ):
+                raise ValueError("Fingerprint ảnh inference không hợp lệ.")
+            if not isinstance(predictions, list) or len(predictions) > 300:
+                raise ValueError("Danh sách gợi ý phải có tối đa 300 box mỗi ảnh.")
+            try:
+                image_file = Path(image_path).expanduser().resolve(strict=True)
+            except (OSError, ValueError):
+                skipped_changed += 1
+                continue
+            image_path = str(image_file)
+            if image_path in seen_paths:
+                raise ValueError("Một lô inference không được chứa đường dẫn ảnh trùng.")
+            seen_paths.add(image_path)
+            image = connection.execute("SELECT width, height FROM images WHERE path = ?", (image_path,)).fetchone()
+            if image is None:
+                raise ValueError("Ảnh không thuộc dự án hiện tại: {0}".format(image_path))
+            if not image_file.is_file() or hashlib.sha256(image_file.read_bytes()).hexdigest() != fingerprint:
+                skipped_changed += 1
+                continue
+            if connection.execute(
+                """SELECT 1 FROM annotations WHERE image_path = ? AND source = 'ai'
+                   AND review_status != 'rejected' AND source_model_id = ? AND checkpoint_sha256 = ? LIMIT 1""",
+                (image_path, source_model_id, checkpoint_sha256),
+            ).fetchone() or connection.execute(
+                """SELECT 1 FROM ai_negative_candidates WHERE image_path = ?
+                   AND review_status != 'rejected' AND source_model_id = ? AND checkpoint_sha256 = ? LIMIT 1""",
+                (image_path, source_model_id, checkpoint_sha256),
+            ).fetchone():
+                skipped_duplicate += 1
+                continue
+
+            width, height = int(image["width"]), int(image["height"])
+            annotations = []
+            for prediction in predictions:
+                if not isinstance(prediction, dict):
+                    raise ValueError("Mỗi gợi ý phải là một object hợp lệ.")
+                class_id = prediction.get("class_id")
+                coordinates = prediction.get("bbox_xyxy")
+                confidence_value = prediction.get("confidence")
+                if isinstance(class_id, bool) or not isinstance(class_id, int) or not 0 <= class_id < len(class_names):
+                    raise ValueError("Gợi ý tham chiếu class ID không hợp lệ.")
+                if not isinstance(coordinates, (list, tuple)) or len(coordinates) != 4:
+                    raise ValueError("Bounding box inference không hợp lệ.")
+                values = [*coordinates, confidence_value]
+                if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+                    raise ValueError("Box và confidence inference phải là số.")
+                x_min, y_min, x_max, y_max, confidence = (float(value) for value in values)
+                if not all(math.isfinite(value) for value in (x_min, y_min, x_max, y_max, confidence)):
+                    raise ValueError("Box và confidence inference phải là số hữu hạn.")
+                if not (0 <= x_min < x_max <= width and 0 <= y_min < y_max <= height):
+                    raise ValueError("Box inference phải nằm trong pixel bounds của ảnh.")
+                if not 0 <= confidence <= 1:
+                    raise ValueError("Confidence inference phải nằm trong khoảng 0 đến 1.")
+                annotations.append({
+                    "id": str(uuid.uuid4()), "class_id": class_id,
+                    "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
+                    "confidence": confidence, "source": "ai", "review_status": "needs_review",
+                    "source_model_id": source_model_id, "checkpoint_sha256": checkpoint_sha256,
+                })
+            prepared.append({
+                "image_path": image_path, "image_file": image_file, "fingerprint": fingerprint,
+                "predictions": annotations,
+            })
+
+        now = datetime.now(timezone.utc).isoformat()
+        with connection:
+            # Recheck bytes at the commit boundary so changed inputs never receive stale boxes.
+            committed = []
+            for item in prepared:
+                if hashlib.sha256(item["image_file"].read_bytes()).hexdigest() != item["fingerprint"]:
+                    skipped_changed += 1
+                else:
+                    committed.append(item)
+            for item in committed:
+                image_path = item["image_path"]
+                annotations = item["predictions"]
+                if annotations:
+                    connection.executemany(
+                        """INSERT INTO annotations(
+                            annotation_id, image_path, class_id, x_min, y_min, x_max, y_max,
+                            confidence, source, review_status, source_model_id, checkpoint_sha256
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        [(
+                            annotation["id"], image_path, annotation["class_id"], annotation["x_min"],
+                            annotation["y_min"], annotation["x_max"], annotation["y_max"],
+                            annotation["confidence"], "ai", "needs_review", source_model_id, checkpoint_sha256,
+                        ) for annotation in annotations],
+                    )
+                else:
+                    connection.execute(
+                        """INSERT INTO ai_negative_candidates(
+                            candidate_id, image_path, source_model_id, checkpoint_sha256,
+                            image_fingerprint, review_status, created_at, reviewed_at
+                        ) VALUES(?, ?, ?, ?, ?, 'needs_review', ?, NULL)""",
+                        (str(uuid.uuid4()), image_path, source_model_id, checkpoint_sha256, item["fingerprint"], now),
+                    )
+                    if not connection.execute(
+                        "SELECT 1 FROM annotations WHERE image_path = ? AND review_status != 'rejected' LIMIT 1",
+                        (image_path,),
+                    ).fetchone():
+                        connection.execute("UPDATE images SET status = 'ready' WHERE path = ?", (image_path,))
+            if committed:
+                connection.execute(
+                    "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
+                )
+        return {
+            "processed_images": len(committed),
+            "images_with_detections": sum(bool(item["predictions"]) for item in committed),
+            "candidate_negative_count": sum(not item["predictions"] for item in committed),
+            "annotation_count": sum(len(item["predictions"]) for item in committed),
+            "skipped_changed": skipped_changed,
+            "skipped_duplicate": skipped_duplicate,
+        }
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Không lưu được gợi ý inference theo lô: {0}".format(error)) from error
+    finally:
+        connection.close()
+
+
+def review_ai_negative_candidate(
+    path_value: str,
+    candidate_id: str,
+    action: str,
+    image_fingerprint: str | None = None,
+) -> Dict[str, Any]:
+    if action not in {"confirmed_negative", "rejected"}:
+        raise ValueError("Thao tác review candidate không hợp lệ.")
+    path = Path(path_value).expanduser().resolve(strict=True)
+    if path.suffix.lower() != ".ffproj" or not path.is_file() or not _is_frameforge_project(path):
+        raise ValueError("Hãy chọn một tệp dự án FrameForge .ffproj hợp lệ.")
+    connection = _connect(path)
+    try:
+        _migrate(connection)
+        candidate = connection.execute(
+            "SELECT * FROM ai_negative_candidates WHERE candidate_id = ?", (candidate_id,)
+        ).fetchone()
+        if candidate is None:
+            raise ValueError("Candidate không còn trong dự án.")
+        if candidate["review_status"] != "needs_review":
+            raise ValueError("Candidate này đã được review.")
+        image_path = Path(candidate["image_path"]).expanduser().resolve(strict=True)
+        if action == "confirmed_negative":
+            if image_fingerprint != candidate["image_fingerprint"]:
+                raise ValueError("Ảnh preview không khớp với candidate; không thể xác nhận ảnh âm tính.")
+            if hashlib.sha256(image_path.read_bytes()).hexdigest() != candidate["image_fingerprint"]:
+                raise ValueError("Ảnh đã thay đổi kể từ inference. Hãy chạy lại inference trên ảnh mới.")
+            if connection.execute(
+                "SELECT 1 FROM annotations WHERE image_path = ? AND review_status != 'rejected' LIMIT 1",
+                (str(image_path),),
+            ).fetchone():
+                raise ValueError("Ảnh đang có box. Không thể xác nhận ảnh này là âm tính.")
+            if connection.execute(
+                "SELECT 1 FROM ai_negative_candidates WHERE image_path = ? AND review_status = 'needs_review' AND candidate_id != ? LIMIT 1",
+                (str(image_path), candidate_id),
+            ).fetchone():
+                raise ValueError("Hãy review các candidate khác của ảnh trước.")
+        now = datetime.now(timezone.utc).isoformat()
+        with connection:
+            connection.execute(
+                "UPDATE ai_negative_candidates SET review_status = ?, reviewed_at = ? WHERE candidate_id = ?",
+                (action, now, candidate_id),
+            )
+            if action == "confirmed_negative":
+                connection.execute("UPDATE images SET status = 'reviewed' WHERE path = ?", (str(image_path),))
+            elif not connection.execute(
+                "SELECT 1 FROM annotations WHERE image_path = ? AND review_status != 'rejected' LIMIT 1",
+                (str(image_path),),
+            ).fetchone():
+                connection.execute("UPDATE images SET status = 'ready' WHERE path = ?", (str(image_path),))
+            connection.execute(
+                "INSERT OR REPLACE INTO project_meta(key, value) VALUES('modified_at', ?)", (now,)
+            )
+        updated = dict(candidate)
+        updated["review_status"] = action
+        updated["reviewed_at"] = now
+        return {
+            "image_path": str(image_path),
+            "status": "reviewed" if action == "confirmed_negative" else "ready",
+            "negative_candidate": {
+                "id": updated["candidate_id"],
+                "source_model_id": updated["source_model_id"],
+                "checkpoint_sha256": updated["checkpoint_sha256"],
+                "image_fingerprint": updated["image_fingerprint"],
+                "review_status": updated["review_status"],
+                "created_at": updated["created_at"],
+                "reviewed_at": updated["reviewed_at"],
+            },
+        }
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Không lưu được trạng thái review candidate: {0}".format(error)) from error
     finally:
         connection.close()
 
@@ -672,6 +1015,18 @@ def load_project(path_value: str) -> Dict[str, Any]:
             if annotation["source"] == "ai" and annotation["review_status"] == "unreviewed":
                 annotation["review_status"] = "needs_review"
             annotations.setdefault(row["image_path"], []).append(annotation)
+        negative_candidates = {}
+        if version >= 4:
+            for row in connection.execute("SELECT * FROM ai_negative_candidates"):
+                negative_candidates.setdefault(row["image_path"], []).append({
+                    "id": row["candidate_id"],
+                    "source_model_id": row["source_model_id"],
+                    "checkpoint_sha256": row["checkpoint_sha256"],
+                    "image_fingerprint": row["image_fingerprint"],
+                    "review_status": row["review_status"],
+                    "created_at": row["created_at"],
+                    "reviewed_at": row["reviewed_at"],
+                })
         images = []
         for row in connection.execute("SELECT * FROM images"):
             keys = row.keys()
@@ -694,6 +1049,7 @@ def load_project(path_value: str) -> Dict[str, Any]:
                 if column in keys and row[column] is not None:
                     image[field] = json.loads(row[column])
             image["annotations"] = annotations.get(image["path"], [])
+            image["negative_candidates"] = negative_candidates.get(image["path"], [])
             images.append(image)
         class_names = [row["name"] for row in connection.execute("SELECT name FROM classes ORDER BY class_id")]
         return {

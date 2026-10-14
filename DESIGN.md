@@ -16,15 +16,15 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Dataset
 
 - Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
-- Ảnh trống chưa review không được export; negative đã review có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
+- Ảnh trống chưa review không được export; candidate negative do inference tạo ra chỉ thành negative đã review sau khi người dùng xác nhận ảnh trống. Negative đã xác nhận có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
 - Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
-- Chọn checkpoint nội bộ đã xác minh và đúng class schema; inference chỉ áp dụng vào ảnh đang mở. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry.
+- Chọn checkpoint nội bộ đã xác minh và đúng class schema; inference áp dụng vào ảnh đang mở hoặc toàn bộ project theo batch có giới hạn. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry. Hủy giữ các chunk đã lưu; ảnh thay đổi trong lúc chạy bị bỏ qua khi commit.
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
 
 ## Huấn luyện
 
 - Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Mỗi imgsz chạy thành run riêng từ cùng checkpoint nền; fine-tune chỉ bắt đầu từ checkpoint YOLO11n nội bộ đã đăng ký, được người dùng chọn và có checksum hợp lệ.
-- Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data.
+- Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data. Giữ `cache=False` cho dataset lớn; nhập Patience = 0 để tắt early stopping và chạy đủ epoch đã đặt.
 
 ## Quét thư mục dự án
 

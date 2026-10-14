@@ -17,7 +17,7 @@ sys.path.insert(0, str(ENGINE_ROOT))
 import frameforge_engine  # noqa: E402
 from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
 from frameforge.dataset import export_yolo_dataset, validate_dataset
-from frameforge.project import create_project, load_project, save_ai_suggestions, save_annotations, save_project
+from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
 from frameforge import training
 
 
@@ -191,10 +191,12 @@ def test_fhd_video_is_accepted_and_higher_resolution_video_is_rejected(tmp_path:
 
     assert (probe_media(str(fhd_path))["width"], probe_media(str(fhd_path))["height"]) == (1920, 1080)
 
-    current_frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
-    inspection = inspect_sources([str(oversized_path)])
-    assert inspection["sources"] == []
-    assert "tối đa FHD" in inspection["errors"][0]["message"]
+    for height, width in [(1081, 1920), (1080, 1921), (2160, 3840)]:
+        current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        inspection = inspect_sources([str(oversized_path)])
+        assert inspection["sources"] == []
+        assert "tối đa FHD" in inspection["errors"][0]["message"]
+
     with pytest.raises(ValueError, match="tối đa FHD"):
         preview_frame(str(oversized_path))
     extraction = extract_frames(
@@ -736,6 +738,46 @@ def test_ai_suggestions_keep_provenance_and_can_be_retried_after_rejection(
     assert {item["review_status"] for item in reopened if item["source"] == "ai"} == {"rejected", "needs_review"}
 
 
+def test_empty_inference_candidate_requires_review_before_becoming_negative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+    checkpoint = _register_annotation_checkpoint(tmp_path)
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+
+    saved = save_ai_suggestions(str(project_path), image_path, [], fingerprint, str(checkpoint))
+    candidate = saved["negative_candidate"]
+    assert candidate["review_status"] == "needs_review"
+    assert load_project(str(project_path))["images"][0]["status"] == "ready"
+    with pytest.raises(ValueError, match="preview"):
+        review_ai_negative_candidate(str(project_path), candidate["id"], "confirmed_negative", "0" * 64)
+
+    rejected = review_ai_negative_candidate(str(project_path), candidate["id"], "rejected")
+    assert rejected["negative_candidate"]["review_status"] == "rejected"
+    retry = save_ai_suggestions(str(project_path), image_path, [], fingerprint, str(checkpoint))
+    accepted = review_ai_negative_candidate(
+        str(project_path), retry["negative_candidate"]["id"], "confirmed_negative", fingerprint,
+    )
+    reopened = load_project(str(project_path))["images"][0]
+    assert accepted["status"] == "reviewed"
+    assert reopened["status"] == "reviewed"
+    assert reopened["negative_candidates"][-1]["review_status"] == "confirmed_negative"
+
+
+def test_pending_negative_candidate_cannot_be_marked_reviewed_through_annotation_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+    checkpoint = _register_annotation_checkpoint(tmp_path)
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+    saved = save_ai_suggestions(str(project_path), image_path, [], fingerprint, str(checkpoint))
+
+    with pytest.raises(ValueError, match="candidate AI"):
+        save_annotations(str(project_path), image_path, [], "reviewed", fingerprint)
+
+    assert load_project(str(project_path))["images"][0]["negative_candidates"][0]["id"] == saved["negative_candidate"]["id"]
+
+
 @pytest.mark.parametrize("prediction", [
     {"class_id": 0, "bbox_xyxy": [True, 20, 120, 140], "confidence": 0.8},
     {"class_id": 0, "bbox_xyxy": [10, 20, 120, 140], "confidence": True},
@@ -797,7 +839,7 @@ def test_schema_v1_project_loads_and_migrates_on_save(tmp_path: Path):
     connection = sqlite3.connect(project_path)
     version = connection.execute("SELECT value FROM project_meta WHERE key = 'schema_version'").fetchone()[0]
     connection.close()
-    assert version == "3"
+    assert version == "4"
 
 
 def test_save_project_preserves_an_unrelated_existing_file(tmp_path: Path):
@@ -923,6 +965,41 @@ def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_pat
     assert ai_provenance["review_status"] == "reviewed"
     assert ai_provenance["source_model_id"] == "run-fixture"
     assert ai_provenance["checkpoint_sha256"] == "b" * 64
+
+
+def test_dataset_requires_review_for_ai_candidate_negative_and_records_provenance(tmp_path: Path):
+    project_path, image_paths = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    candidate_image = next(item for item in project["images"] if item["path"] == str(image_paths["a_negative"]))
+    fingerprint = hashlib.sha256(image_paths["a_negative"].read_bytes()).hexdigest()
+    candidate_image["negative_candidates"] = [{
+        "id": "candidate-negative-1",
+        "source_model_id": "run-negative-fixture",
+        "checkpoint_sha256": "c" * 64,
+        "image_fingerprint": fingerprint,
+        "review_status": "needs_review",
+        "created_at": "2026-10-14T00:00:00Z",
+        "reviewed_at": None,
+    }]
+    candidate_image["status"] = "reviewed"
+    save_project(str(project_path), project)
+
+    pending_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    assert pending_report["pending_negative_candidate_count"] == 1
+    assert pending_report["included_image_count"] == 2
+
+    review_ai_negative_candidate(
+        str(project_path), "candidate-negative-1", "confirmed_negative", fingerprint,
+    )
+    confirmed_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    assert confirmed_report["reviewed_negative_count"] == 1
+    output_root = tmp_path / "negative-exports"
+    output_root.mkdir()
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    exported = next(item for item in manifest["images"] if item["source_image"] == str(image_paths["a_negative"]))
+    assert exported["negative_candidate_provenance"][0]["review_status"] == "confirmed_negative"
+    assert exported["negative_candidate_provenance"][0]["checkpoint_sha256"] == "c" * 64
 
 
 def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_path: Path):

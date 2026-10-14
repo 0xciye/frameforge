@@ -219,6 +219,7 @@ def _analyze(
     positive_count = 0
     annotation_count = 0
     pending_suggestion_count = 0
+    pending_negative_candidate_count = 0
     missing_source_metadata = 0
 
     for image in images:
@@ -350,6 +351,23 @@ def _analyze(
             continue
         pending_suggestion_count += image_pending_ai_count
 
+        negative_candidates = image.get("negative_candidates", [])
+        if not isinstance(negative_candidates, list):
+            errors.append("Danh sách candidate âm tính không hợp lệ: {0}".format(image_path))
+            continue
+        pending_candidates = [
+            item for item in negative_candidates
+            if isinstance(item, dict) and item.get("review_status") == "needs_review"
+        ]
+        confirmed_candidates = [
+            item for item in negative_candidates
+            if isinstance(item, dict) and item.get("review_status") == "confirmed_negative"
+        ]
+        if pending_candidates:
+            pending_negative_candidate_count += len(pending_candidates)
+            candidate_negative_count += 1
+            continue
+
         status = image.get("status", "ready")
         if status not in {"ready", "reviewed"}:
             errors.append("Trạng thái review của ảnh không hợp lệ: {0}".format(image_path))
@@ -369,6 +387,16 @@ def _analyze(
             digest = _sha256(image_path)
         except OSError as error:
             errors.append("Không đọc được ảnh để kiểm tra integrity: {0} ({1})".format(image_path, error))
+            continue
+        if not cleaned_annotations and status == "reviewed" and any(
+            candidate.get("image_fingerprint") != digest
+            or not isinstance(candidate.get("source_model_id"), str)
+            or not candidate.get("source_model_id")
+            or not isinstance(candidate.get("checkpoint_sha256"), str)
+            or len(candidate["checkpoint_sha256"]) != 64
+            for candidate in confirmed_candidates
+        ):
+            errors.append("Ảnh âm tính đã thay đổi hoặc thiếu provenance candidate: {0}".format(image_path))
             continue
         source_key = _source_key(image)
         if source_key is None:
@@ -396,11 +424,21 @@ def _analyze(
             "group_key": source_key,
             "crop_rect": image.get("crop_rect"),
             "extraction_settings": image.get("extraction_settings"),
+            "negative_candidate_provenance": [
+                {
+                    "candidate_id": candidate.get("id"),
+                    "source_model_id": candidate.get("source_model_id"),
+                    "checkpoint_sha256": candidate.get("checkpoint_sha256"),
+                    "image_fingerprint": candidate.get("image_fingerprint"),
+                    "review_status": candidate.get("review_status"),
+                }
+                for candidate in confirmed_candidates
+            ] if not cleaned_annotations else [],
         })
 
     if candidate_negative_count:
         warnings.append(
-            "Đã loại {0} ảnh trống chưa review; ảnh không có box chỉ được export khi trạng thái là Reviewed Negative.".format(candidate_negative_count)
+            "Đã loại {0} ảnh trống chưa review hoặc candidate âm tính chưa được xác nhận; ảnh AI không phát hiện chỉ vào dataset sau khi người dùng xác nhận.".format(candidate_negative_count)
         )
     if pending_suggestion_count:
         warnings.append(
@@ -472,6 +510,7 @@ def _analyze(
         "candidate_negative_excluded_count": candidate_negative_count,
         "annotation_count": annotation_count,
         "pending_suggestion_count": pending_suggestion_count,
+        "pending_negative_candidate_count": pending_negative_candidate_count,
         "class_distribution": class_distribution,
         "duplicate_basename_groups": len(duplicate_basename_groups),
         "exact_duplicate_count": exact_duplicate_count,
@@ -603,6 +642,7 @@ def export_yolo_dataset(
                     }
                     for annotation in sample["annotations"]
                 ],
+                "negative_candidate_provenance": sample["negative_candidate_provenance"],
             })
 
         names = {index: name for index, name in enumerate(project["class_names"])}

@@ -11,23 +11,25 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Điều hướng frame, lấy mẫu theo số frame hoặc thời gian, lọc near-duplicate bằng dHash và độ mờ bằng variance of Laplacian.
 - Exact Center Crop cắt đúng vùng W×H từ tâm frame nguồn, không resize/padding vùng crop; preview phủ overlay đúng pixel. Video lớn hơn 1920×1080 bị từ chối. Full-frame letterbox và grid vẫn khả dụng; kích thước crop/output tối đa 1920×1080.
 - Lọc blur và near-duplicate đo vùng crop nguồn; provenance gồm source identity, frame/timestamp, crop rectangle, output size và settings.
-- Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema hiện có từ v1/v2 lên v3.
+- Lưu/mở dự án SQLite `.ffproj`, hỗ trợ nâng schema v1/v2/v3 lên v4.
 - Gán nhãn box thủ công với class ổn định, review, undo/redo và autosave vào dự án đã lưu.
 - Kiểm tra dataset, loại ảnh trống chưa review, chia theo video/đoạn với chống rò rỉ ảnh trùng byte, và export YOLO vào thư mục phiên bản mới.
 - Quét thư mục dự án ở chế độ chỉ đọc để tìm dataset YOLO, run Ultralytics, metric CSV, checkpoint, model export và project FrameForge; giới hạn độ sâu/số file, bỏ symlink, báo progress và hỗ trợ hủy.
 - Nạp ONNX Runtime CPU để xem tensor/metadata model; chưa suy luận.
 - Huấn luyện YOLO11n trên CPU hoặc backend GPU mà PyTorch báo khả dụng; kiểm tra dataset trước train, queue nhiều imgsz độc lập, theo dõi progress/metrics thật, dừng tại ranh giới epoch và lưu registry/checkpoint. Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký và checksum còn khớp.
-- Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Tab Gán nhãn chạy inference trên ảnh đang mở bằng checkpoint nội bộ đã xác minh; lưu gợi ý AI cùng model ID, SHA-256 checkpoint và confidence vào project ở trạng thái `needs_review`. Người dùng có thể duyệt, chỉnh sửa hoặc loại box; nhãn thủ công và AI đã duyệt được giữ nguyên.
-- Dataset export chỉ đưa box thủ công và gợi ý AI đã duyệt vào YOLO labels. Gợi ý đang chờ/bị loại không được export; ảnh chỉ còn gợi ý đang chờ không được tính thành negative đã review.
+- Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Tab Gán nhãn chạy inference cho ảnh hiện tại hoặc cả project: nạp model một lần, xử lý batch/chunk có giới hạn, kiểm fingerprint trước khi lưu và giữ các chunk đã hoàn tất khi hủy. Box AI được lưu ở trạng thái `needs_review`; ảnh không có detection trở thành candidate negative có provenance/fingerprint và chỉ được export sau khi người dùng xác nhận ảnh trống.
+- Dataset export chỉ đưa box thủ công, gợi ý AI đã duyệt và candidate negative đã xác nhận vào YOLO labels. Gợi ý/candidate đang chờ hoặc bị loại không được export.
+- Training preflight xử lý dataset lớn theo luồng, giữ `cache=False`, hỗ trợ hơn 20.000 ảnh và cấu hình hơn 300 epoch cho mỗi imgsz. Fixture tổng hợp 20.003 ảnh cùng hai job 301 epoch đã được kiểm tra bằng fake trainer; đây là kiểm tra cấu hình, không phải benchmark hoặc train thật ở quy mô đó. Patience = 0 tắt early stopping.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài giữ trạng thái chưa xác minh và không được đưa vào lựa chọn fine-tune.
 
 ## Chưa khả dụng
 
-- Inference hàng loạt cho toàn bộ ảnh trong project; hiện UI chạy ảnh đang mở.
 - Xác minh an toàn/khả năng tương thích và nạp checkpoint `.pt` từ nguồn ngoài.
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
+- Dataset lineage/replay và frozen test set; đánh giá cố định cùng Champion/Challenger.
 - Resume training sau khi tiến trình bị gián đoạn.
-- Benchmark/experiment tracking và export ONNX/TensorRT/OpenVINO.
+- Benchmark model, experiment tracking và export ONNX/TensorRT/OpenVINO.
+- Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch; hiện chỉ xác nhận plumbing bằng fake trainer và smoke nhỏ.
 - Đóng gói Python engine thành sidecar standalone.
 
 Các hành động chưa triển khai phải khóa rõ trong giao diện. Không thay bằng demo detection, metric hoặc training progress giả.

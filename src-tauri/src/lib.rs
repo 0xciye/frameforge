@@ -92,7 +92,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     let mut cancellation_marker = None;
     if matches!(
         command.as_str(),
-        "train_yolo_queue" | "scan_project_folder" | "predict_crops"
+        "train_yolo_queue" | "scan_project_folder" | "predict_crops" | "auto_label_project"
     ) {
         let marker_dir = app_data_dir
             .join(match command.as_str() {
@@ -122,7 +122,11 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     }
     let cancellable = matches!(
         command.as_str(),
-        "extract_frames" | "train_yolo_queue" | "scan_project_folder" | "predict_crops"
+        "extract_frames"
+            | "train_yolo_queue"
+            | "scan_project_folder"
+            | "predict_crops"
+            | "auto_label_project"
     );
     if cancellable
         && jobs
@@ -527,6 +531,42 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        "auto_label_project" => {
+            let project = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(project)?;
+            let checkpoint = canonical_existing_path(
+                arguments
+                    .get("checkpoint")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu checkpoint inference.")?,
+            )?;
+            if !checkpoint.is_file()
+                || !checkpoint
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+            {
+                return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
+            }
+            for (key, default) in [("confidence_threshold", 0.25), ("iou_threshold", 0.7)] {
+                let value = match arguments.get(key) {
+                    None => default,
+                    Some(value) => value
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or("Confidence threshold và NMS IoU phải là số hữu hạn.")?,
+                };
+                if !(0.0..=1.0).contains(&value) {
+                    return Err(
+                        "Confidence threshold và NMS IoU phải nằm trong khoảng 0–1.".to_string()
+                    );
+                }
+            }
+            Ok(())
+        }
         "inspect_sources" => {
             let paths = arguments
                 .get("paths")
@@ -757,6 +797,38 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
             {
                 return Err("Fingerprint ảnh không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
+        "review_ai_negative_candidate" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let candidate_id = arguments
+                .get("candidate_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .ok_or("Mã candidate không hợp lệ.")?;
+            let _ = candidate_id;
+            let action = arguments
+                .get("action")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu thao tác review candidate.")?;
+            if !matches!(action, "confirmed_negative" | "rejected") {
+                return Err("Thao tác review candidate không hợp lệ.".to_string());
+            }
+            if action == "confirmed_negative" {
+                let fingerprint = arguments
+                    .get("image_fingerprint")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu fingerprint ảnh đã preview.")?;
+                if fingerprint.len() != 64
+                    || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err("Fingerprint ảnh không hợp lệ.".to_string());
+                }
             }
             Ok(())
         }

@@ -149,6 +149,8 @@
 .label-ai-model select:disabled { opacity: .55; }
 .label-ai-run-button { width: 100%; min-height: 29px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; margin-top: 7px; padding: 0 8px; border: 1px solid #3d6f9e; border-radius: 4px; color: #d9ebff; background: #22364b; font-size: 9px; font-weight: 580; cursor: pointer; }
 .label-ai-run-button:hover:not(:disabled) { border-color: #5791c6; background: #294662; }
+.label-ai-run-button.label-ai-batch-button { margin-top: 5px; border-color: #4c6656; color: #d8f0df; background: #23352a; }
+.label-ai-run-button.label-ai-batch-button:hover:not(:disabled) { border-color: #628d6d; background: #2a4031; }
 .label-ai-run-button:focus-visible, .label-ai-review-actions button:focus-visible { outline: 2px solid #8bc0fa; outline-offset: 2px; }
 .label-ai-run-button:disabled { opacity: .48; cursor: not-allowed; }
 .label-ai-note, .label-ai-progress, .label-ai-error { display: flex; align-items: flex-start; gap: 5px; margin-top: 6px; color: #aeb5c0; font-size: 8px; line-height: 1.45; }
@@ -207,6 +209,9 @@
 .label-ai-review-actions .label-ai-reject { border-color: #64433f; color: #e8b0a9; background: #2a211f; }
 .label-ai-review-actions .label-ai-reject:hover:not(:disabled) { border-color: #8a5c56; background: #392725; }
 .label-ai-review-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.label-negative-candidate { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid #655538; border-radius: 4px; color: #edcf9a; background: #2c261b; }
+.label-negative-candidate > small { color: #d8c394; font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.label-negative-candidate > small.label-negative-stale { color: #f0a69d; }
 .label-box-empty { margin: 0; padding: 8px 5px; color: #9ba2ac; font-size: 9px; line-height: 1.5; }
 .label-key-help, .label-coordinate-help { margin: 9px 1px 0; color: #a5aab3; font-size: 8px; line-height: 1.5; }
 .label-coordinate-help { color: #858b96; font-variant-numeric: tabular-nums; }

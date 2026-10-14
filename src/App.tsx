@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import DatasetManager from "./DatasetManager";
-import ManualLabeling, { type Annotation } from "./ManualLabeling";
+import ManualLabeling, { type Annotation, type NegativeCandidate } from "./ManualLabeling";
 import TrainingWorkspace from "./TrainingWorkspace";
 
 type MediaSource = {
@@ -60,6 +60,7 @@ type ProjectImage = {
   height: number;
   status: string;
   annotations?: Annotation[];
+  negative_candidates?: NegativeCandidate[];
 };
 
 type ExtractionOptions = {
@@ -221,6 +222,8 @@ function App() {
     class_names: ["head", "body"],
   });
   const [projectPath, setProjectPath] = useState<string | null>(null);
+  const projectPathRef = useRef(projectPath);
+  useEffect(() => { projectPathRef.current = projectPath; }, [projectPath]);
   const [dirty, setDirty] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -357,10 +360,14 @@ function App() {
     predictions: { class_id: number; confidence: number; bbox_xyxy: number[] }[],
     checkpoint: string,
     fingerprint: string,
-  ): Promise<Annotation[]> => {
+  ): Promise<{ annotations: Annotation[]; negative_candidate?: NegativeCandidate | null }> => {
     const path = projectPath;
     if (!path) throw new Error("Hãy lưu dự án trước khi tạo gợi ý AI.");
-    const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[] }>("save_ai_suggestions", {
+    const saved = await serializeProjectWrite(() => callEngine<{
+      annotations: Annotation[];
+      negative_candidate?: NegativeCandidate | null;
+      status?: string;
+    }>("save_ai_suggestions", {
       path,
       image_path: imagePath,
       predictions,
@@ -370,10 +377,86 @@ function App() {
     setProject((current) => ({
       ...current,
       images: current.images.map((image) => image.path === imagePath
-        ? { ...image, annotations: [...(image.annotations ?? []), ...saved.annotations] }
+        ? {
+            ...image,
+            annotations: [...(image.annotations ?? []), ...saved.annotations],
+            negative_candidates: saved.negative_candidate
+              ? [...(image.negative_candidates ?? []), saved.negative_candidate]
+              : image.negative_candidates,
+            status: saved.status ?? image.status,
+          }
         : image),
     }));
-    return saved.annotations;
+    return saved;
+  }, [projectPath]);
+
+  const reviewLabelNegativeCandidate = useCallback(async (
+    candidateId: string,
+    action: "confirmed_negative" | "rejected",
+    fingerprint?: string,
+  ): Promise<void> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi review candidate.");
+    const saved = await serializeProjectWrite(() => callEngine<{
+      image_path: string;
+      status: string;
+      negative_candidate: NegativeCandidate;
+    }>("review_ai_negative_candidate", {
+      path,
+      candidate_id: candidateId,
+      action,
+      ...(fingerprint ? { image_fingerprint: fingerprint } : {}),
+    }));
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => image.path === saved.image_path
+        ? {
+            ...image,
+            status: saved.status,
+            negative_candidates: (image.negative_candidates ?? []).map((candidate) => (
+              candidate.id === candidateId ? saved.negative_candidate : candidate
+            )),
+          }
+        : image),
+    }));
+  }, [projectPath]);
+
+  const runProjectInference = useCallback(async (checkpoint: string, requestId: string) => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi chạy inference hàng loạt.");
+    try {
+      return await serializeProjectWrite(() => invoke<{
+        status: string;
+        processed_images: number;
+        images_with_detections: number;
+        candidate_negative_count: number;
+        annotation_count: number;
+        skipped_changed: number;
+      }>("engine_request", {
+        request: {
+          id: requestId,
+          command: "auto_label_project",
+          arguments: { path, checkpoint, confidence_threshold: 0.25 },
+        },
+      }));
+    } finally {
+      const loaded = await serializeProjectWrite(() => callEngine<ProjectState>("load_project", { path }));
+      if (projectPathRef.current === path) {
+        const savedImages = new Map(loaded.images.map((image) => [image.path, image]));
+        setProject((current) => ({
+          ...current,
+          images: current.images.map((image) => {
+            const saved = savedImages.get(image.path);
+            return saved ? {
+              ...image,
+              annotations: saved.annotations,
+              negative_candidates: saved.negative_candidates,
+              status: saved.status,
+            } : image;
+          }),
+        }));
+      }
+    }
   }, [projectPath]);
 
   useEffect(() => {
@@ -972,6 +1055,8 @@ function App() {
           loadPreview={loadLabelPreview}
           saveImage={saveLabelImage}
           saveSuggestions={saveLabelSuggestions}
+          reviewNegativeCandidate={reviewLabelNegativeCandidate}
+          runBatchInference={runProjectInference}
         />
       ) : activeTab === "dataset" ? (
         <DatasetManager projectPath={projectPath} imageCount={project.images.length} onUseDiscoveredDataset={useDiscoveredDataset} />

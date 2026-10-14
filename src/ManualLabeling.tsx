@@ -43,6 +43,17 @@ type LabelImage = {
   height: number;
   status: string;
   annotations?: Annotation[];
+  negative_candidates?: NegativeCandidate[];
+};
+
+export type NegativeCandidate = {
+  id: string;
+  source_model_id: string;
+  checkpoint_sha256: string;
+  image_fingerprint: string;
+  review_status: "needs_review" | "confirmed_negative" | "rejected";
+  created_at: string;
+  reviewed_at?: string | null;
 };
 
 type LabelPreview = {
@@ -64,9 +75,20 @@ type RegisteredModel = {
   requested_imgsz?: number;
 };
 type Prediction = { class_id: number; confidence: number; bbox_xyxy: number[] };
-type InferenceProgress = { stage: string; completed_images?: number; total_images?: number };
+type InferenceProgress = { stage: string; completed_images?: number; total_images?: number; eligible_images?: number; saved_images?: number };
 type InferenceResult = { status: string; results: { predictions: Prediction[] }[] };
-type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string) => Promise<Annotation[]>;
+type BatchInferenceResult = {
+  status: string;
+  processed_images: number;
+  images_with_detections: number;
+  candidate_negative_count: number;
+  annotation_count: number;
+  skipped_changed: number;
+};
+type SaveSuggestionsResult = { annotations: Annotation[]; negative_candidate?: NegativeCandidate | null };
+type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string) => Promise<SaveSuggestionsResult>;
+type ReviewNegativeCandidate = (candidateId: string, action: "confirmed_negative" | "rejected", fingerprint?: string) => Promise<void>;
+type RunBatchInference = (checkpoint: string, requestId: string) => Promise<BatchInferenceResult>;
 type Point = { x: number; y: number };
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 type Tool = { kind: "draw"; classId: number } | { kind: "select" } | { kind: "pan" };
@@ -85,6 +107,8 @@ type Props = {
   loadPreview: LoadPreview;
   saveImage: SaveImage;
   saveSuggestions: SaveSuggestions;
+  reviewNegativeCandidate: ReviewNegativeCandidate;
+  runBatchInference: RunBatchInference;
 };
 
 function requestId() {
@@ -138,7 +162,7 @@ function resizeBox(box: Annotation, handle: ResizeHandle, point: Point, width: n
   return next;
 }
 
-export default function ManualLabeling({ images, classNames, loadPreview, saveImage, saveSuggestions }: Props) {
+export default function ManualLabeling({ images, classNames, loadPreview, saveImage, saveSuggestions, reviewNegativeCandidate, runBatchInference }: Props) {
   const classes = useMemo(() => classNames.length ? classNames : ["head", "body"], [classNames]);
   const [activePath, setActivePath] = useState(images[0]?.path ?? "");
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
@@ -160,6 +184,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const [inferenceProgress, setInferenceProgress] = useState<InferenceProgress | null>(null);
   const [inferenceMessage, setInferenceMessage] = useState<string | null>(null);
   const [inferenceError, setInferenceError] = useState<string | null>(null);
+  const [reviewingCandidateId, setReviewingCandidateId] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
   const previewSequence = useRef(0);
@@ -177,6 +202,13 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const annotations = image?.annotations ?? [];
   const activeAnnotations = useMemo(() => annotations.filter((item) => item.review_status !== "rejected"), [annotations]);
   const pendingSuggestions = annotations.filter((item) => item.source === "ai" && item.review_status === "needs_review");
+  const negativeCandidates = image?.negative_candidates ?? [];
+  const pendingNegativeCandidates = negativeCandidates.filter((item) => item.review_status === "needs_review");
+  const inferenceQueue = images.filter((item) => (
+    item.status !== "reviewed"
+    && !(item.annotations ?? []).some((annotation) => annotation.source === "manual" || annotation.review_status !== "rejected")
+    && !(item.negative_candidates ?? []).some((candidate) => candidate.review_status !== "rejected")
+  ));
   const imageIndex = image ? images.findIndex((item) => item.path === image.path) : -1;
   const selectedAnnotation = activeAnnotations.find((item) => item.id === selectedAnnotationId) ?? null;
   const alreadySuggestedByModel = Boolean(image && selectedModel && annotations.some((item) => (
@@ -184,7 +216,11 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     && item.review_status !== "rejected"
     && item.source_model_id === selectedModel.run_id
     && item.checkpoint_sha256 === selectedModel.checkpoint_sha256
-  )));
+  )) || Boolean(image && selectedModel && negativeCandidates.some((item) => (
+    item.review_status !== "rejected"
+    && item.source_model_id === selectedModel.run_id
+    && item.checkpoint_sha256 === selectedModel.checkpoint_sha256
+  ))));
   const saveState = image ? saveStates[image.path] ?? { status: "saved" as const } : { status: "saved" as const };
   const sizeMismatch = Boolean(preview && image && (preview.width !== image.width || preview.height !== image.height));
   const canEdit = Boolean(image && preview && preview.image_fingerprint && !sizeMismatch && !inferenceBusy);
@@ -313,12 +349,10 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         return;
       }
       const predictions = result.results[0]?.predictions ?? [];
-      if (!predictions.length) {
-        setInferenceMessage("Không có box đạt confidence từ 0,25 trở lên.");
-        return;
-      }
       const saved = await saveSuggestions(image.path, predictions, selectedModel.checkpoint_path, preview.image_fingerprint);
-      setInferenceMessage(`Đã lưu ${saved.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`);
+      setInferenceMessage(saved.negative_candidate
+        ? "Model không phát hiện box. Candidate âm tính đang chờ bạn xác nhận; ảnh chưa được đưa vào dataset."
+        : `Đã lưu ${saved.annotations.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`);
     } catch (reason) {
       setInferenceError(String(reason));
     } finally {
@@ -326,6 +360,58 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       activeInferenceId.current = null;
       setInferenceBusy(false);
       setInferenceCancelling(false);
+    }
+  }
+
+  async function startBatchInference() {
+    if (!selectedModel?.checkpoint_path || inferenceBusy || inferenceQueue.length === 0) return;
+    setInferenceBusy(true);
+    setInferenceCancelling(false);
+    setInferenceProgress(null);
+    setInferenceMessage(null);
+    setInferenceError(null);
+    const id = requestId();
+    activeInferenceId.current = id;
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = await listen<{ id: string; progress: InferenceProgress }>("engine-progress", (event) => {
+        if (event.payload.id === id) setInferenceProgress(event.payload.progress);
+      });
+      const result = await runBatchInference(selectedModel.checkpoint_path, id);
+      if (activeInferenceId.current !== id) return;
+      setInferenceMessage(`${result.status === "cancelled" ? "Đã dừng" : "Hoàn tất"}: ${result.processed_images} ảnh đã lưu, ${result.images_with_detections} ảnh có box, ${result.candidate_negative_count} candidate âm tính cần review${result.skipped_changed ? `, ${result.skipped_changed} ảnh đã đổi hoặc không còn đọc được` : ""}.`);
+    } catch (reason) {
+      setInferenceError(String(reason));
+    } finally {
+      dispose?.();
+      activeInferenceId.current = null;
+      setInferenceBusy(false);
+      setInferenceCancelling(false);
+    }
+  }
+
+  async function reviewCandidate(candidate: NegativeCandidate, action: "confirmed_negative" | "rejected") {
+    if (!preview?.image_fingerprint || reviewingCandidateId) return;
+    if (action === "confirmed_negative" && (
+      preview.image_fingerprint !== candidate.image_fingerprint
+      || activeAnnotations.length > 0
+      || pendingNegativeCandidates.length > 1
+    )) return;
+    setReviewingCandidateId(candidate.id);
+    setInferenceError(null);
+    try {
+      await reviewNegativeCandidate(
+        candidate.id,
+        action,
+        action === "confirmed_negative" ? preview.image_fingerprint : undefined,
+      );
+      setInferenceMessage(action === "confirmed_negative"
+        ? "Đã xác nhận ảnh âm tính. Ảnh trống này có thể được đưa vào dataset."
+        : "Đã loại candidate âm tính. Ảnh cần được gán nhãn trước khi xuất dataset.");
+    } catch (reason) {
+      setInferenceError(String(reason));
+    } finally {
+      setReviewingCandidateId(null);
     }
   }
 
@@ -553,7 +639,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   }
 
   function markReviewed() {
-    if (!image || !canEdit || (image.status !== "reviewed" && pendingSuggestions.length > 0)) return;
+    if (!image || !canEdit || (image.status !== "reviewed" && (pendingSuggestions.length > 0 || pendingNegativeCandidates.length > 0))) return;
     const status = image.status === "reviewed" ? "ready" : "reviewed";
     commit(annotations, status);
   }
@@ -604,7 +690,8 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         <div className="label-image-list" role="list" aria-label="Danh sách ảnh cần gán nhãn">
           {images.map((item, index) => {
             const count = item.annotations?.filter((annotation) => annotation.review_status !== "rejected").length ?? 0;
-            const pendingCount = item.annotations?.filter((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review").length ?? 0;
+            const pendingCount = (item.annotations?.filter((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review").length ?? 0)
+              + (item.negative_candidates?.filter((candidate) => candidate.review_status === "needs_review").length ?? 0);
             const current = item.path === image.path;
             return (
               <div role="listitem" key={item.path}>
@@ -615,7 +702,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                   disabled={inferenceBusy}
                   onClick={() => selectImage(item.path)}
                 >
-                  <span className={`label-review-dot${pendingCount ? " needs-review" : item.status === "reviewed" ? " reviewed" : ""}`} aria-label={pendingCount ? `${pendingCount} gợi ý AI cần duyệt` : item.status === "reviewed" ? "Đã review" : "Chưa review"} />
+                  <span className={`label-review-dot${pendingCount ? " needs-review" : item.status === "reviewed" ? " reviewed" : ""}`} aria-label={pendingCount ? `${pendingCount} mục AI cần duyệt` : item.status === "reviewed" ? "Đã review" : "Chưa review"} />
                   <span className="label-image-copy"><strong>{imageName(item.path)}</strong><small>{item.width} × {item.height} · {count} box{pendingCount ? ` · ${pendingCount} AI chờ duyệt` : ""}</small></span>
                   <small className="label-image-index">{index + 1}</small>
                 </button>
@@ -705,7 +792,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
 
         <div className="label-canvas-footer">
           <span>{preview ? `${preview.width} × ${preview.height} px` : imageName(image.path)}</span>
-          <span>{activeAnnotations.length} box{pendingSuggestions.length ? ` · ${pendingSuggestions.length} AI chờ duyệt` : ""}</span>
+          <span>{activeAnnotations.length} box{pendingSuggestions.length ? ` · ${pendingSuggestions.length} AI chờ duyệt` : ""}{pendingNegativeCandidates.length ? ` · ${pendingNegativeCandidates.length} candidate trống` : ""}</span>
           <span className={`label-save-status ${saveState.status}`} aria-live="polite">
             {saveState.status === "saving" ? <><LoaderCircle className="spin" size={12} /> Đang lưu…</> : saveState.status === "error" ? "Chưa lưu" : <><Check size={12} /> Đã tự lưu</>}
           </span>
@@ -739,18 +826,27 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                 <X size={13} /> {inferenceCancelling ? "Đang dừng…" : "Dừng inference"}
               </button>
             ) : (
-              <button type="button" className="label-ai-run-button" disabled={!canEdit || !selectedModel || alreadySuggestedByModel} onClick={() => void startInference()}>
-                <Sparkles size={13} /> Gợi ý ảnh này
-              </button>
+              <>
+                <button type="button" className="label-ai-run-button" disabled={!canEdit || !selectedModel || alreadySuggestedByModel} onClick={() => void startInference()}>
+                  <Sparkles size={13} /> Gợi ý ảnh này
+                </button>
+                <button type="button" className="label-ai-run-button label-ai-batch-button" disabled={!selectedModel || inferenceQueue.length === 0} onClick={() => void startBatchInference()}>
+                  <Sparkles size={13} /> Gợi ý {inferenceQueue.length} ảnh chưa xử lý
+                </button>
+              </>
             )}
             {modelsLoading && <small className="label-ai-note">Đang đọc registry checkpoint…</small>}
             {!modelsLoading && usableModels.length === 0 && <small className="label-ai-note">Chưa có checkpoint YOLO11n nội bộ khớp class của dự án.</small>}
             {alreadySuggestedByModel && <small className="label-ai-note">Ảnh đã có gợi ý từ checkpoint này. Duyệt hoặc loại chúng trước khi chạy lại.</small>}
-            {inferenceBusy && <small className="label-ai-progress" aria-live="polite"><LoaderCircle className="spin" size={12} /> {inferenceCancelling ? "Đang chờ inference dừng an toàn…" : inferenceProgress?.stage === "inference_started" ? "Đang chạy YOLO trên ảnh hiện tại…" : "Đang khởi tạo inference…"}</small>}
+            {inferenceBusy && <small className="label-ai-progress" aria-live="polite"><LoaderCircle className="spin" size={12} /> {inferenceCancelling
+              ? "Đang dừng an toàn và lưu phần đã xử lý…"
+              : inferenceProgress?.stage?.startsWith("project_")
+                ? `Đang xử lý project: ${inferenceProgress.completed_images ?? 0}/${inferenceProgress.total_images ?? inferenceProgress.eligible_images ?? 0} ảnh${inferenceProgress.saved_images ? ` · đã lưu ${inferenceProgress.saved_images}` : ""}`
+                : inferenceProgress?.stage === "inference_started" ? "Đang chạy YOLO trên ảnh hiện tại…" : "Đang khởi tạo inference…"}</small>}
             {inferenceMessage && <small className="label-ai-note" aria-live="polite">{inferenceMessage}</small>}
             {modelError && <small className="label-ai-error" role="alert">Không đọc được registry checkpoint: {modelError}</small>}
             {inferenceError && <small className="label-ai-error" role="alert">Inference chưa hoàn tất: {inferenceError}</small>}
-            <small className="label-ai-note">Box do AI tạo sẽ ghi rõ confidence và chỉ vào dataset sau khi được duyệt.</small>
+            <small className="label-ai-note">Box AI chỉ vào dataset sau khi được duyệt. Ảnh không có detection thành candidate âm tính và phải được xác nhận riêng.</small>
           </section>
 
           <section className="label-tool-section" aria-label="Chọn class để vẽ box">
@@ -784,7 +880,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
           </section>
 
           <section className="label-tool-section">
-            <div className="label-review-heading"><h3>Danh sách box</h3><button type="button" className={`label-review-button${image.status === "reviewed" ? " reviewed" : ""}`} disabled={!canEdit || (image.status !== "reviewed" && pendingSuggestions.length > 0)} title={pendingSuggestions.length && image.status !== "reviewed" ? "Duyệt hoặc loại gợi ý AI trước khi xác nhận ảnh âm tính." : undefined} aria-pressed={image.status === "reviewed"} onClick={markReviewed}>{image.status === "reviewed" ? <><CheckCircle2 size={13} /> Đã review</> : <><Check size={13} /> Đánh dấu đã review</>}</button></div>
+            <div className="label-review-heading"><h3>Danh sách box</h3><button type="button" className={`label-review-button${image.status === "reviewed" ? " reviewed" : ""}`} disabled={!canEdit || (image.status !== "reviewed" && (pendingSuggestions.length > 0 || pendingNegativeCandidates.length > 0))} title={(pendingSuggestions.length || pendingNegativeCandidates.length) && image.status !== "reviewed" ? "Duyệt hoặc loại toàn bộ gợi ý và candidate AI trước khi đánh dấu ảnh đã review." : undefined} aria-pressed={image.status === "reviewed"} onClick={markReviewed}>{image.status === "reviewed" ? <><CheckCircle2 size={13} /> Đã review</> : <><Check size={13} /> Đánh dấu đã review</>}</button></div>
             <div className="label-box-list" role="list" aria-label="Box trên ảnh">
               {activeAnnotations.map((annotation, index) => (
                 <div className={`label-box-row${annotation.id === selectedAnnotationId ? " selected" : ""}`} role="listitem" key={annotation.id}>
@@ -815,6 +911,28 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
               {activeAnnotations.length === 0 && <p className="label-box-empty">Chưa có box. Chọn lớp để vẽ hoặc chạy gợi ý AI cho ảnh này.</p>}
             </div>
           </section>
+
+          {pendingNegativeCandidates.length > 0 && <section className="label-tool-section" aria-label="Review candidate âm tính">
+            <h3>Candidate âm tính cần review</h3>
+            {pendingNegativeCandidates.map((candidate) => {
+              const stale = preview?.image_fingerprint !== candidate.image_fingerprint;
+              const canConfirmNegative = canEdit && !stale && activeAnnotations.length === 0 && pendingNegativeCandidates.length === 1;
+              return <div className="label-negative-candidate" key={candidate.id}>
+                <small>Model {candidate.source_model_id.slice(0, 8)} không phát hiện box. Ảnh chưa vào dataset.</small>
+                {stale && <small className="label-negative-stale">Ảnh đã đổi kể từ inference; hãy loại candidate này rồi chạy lại.</small>}
+                {pendingNegativeCandidates.length > 1 && <small className="label-negative-stale">Review các candidate khác của ảnh trước khi xác nhận âm tính.</small>}
+                {activeAnnotations.length > 0 && <small className="label-negative-stale">Ảnh đang có box; không thể xác nhận là ảnh âm tính.</small>}
+                <div className="label-ai-review-actions">
+                  <button type="button" className="label-ai-accept" disabled={!canConfirmNegative || reviewingCandidateId !== null} onClick={() => void reviewCandidate(candidate, "confirmed_negative")}>
+                    <Check size={11} /> Xác nhận ảnh trống
+                  </button>
+                  <button type="button" className="label-ai-reject" disabled={!canEdit || reviewingCandidateId !== null} onClick={() => void reviewCandidate(candidate, "rejected")}>
+                    <Ban size={11} /> {stale ? "Loại candidate cũ" : "Loại candidate"}
+                  </button>
+                </div>
+              </div>;
+            })}
+          </section>}
 
           <p className="label-key-help">⌘/Ctrl+Z hoàn tác · ⌘/Ctrl+Shift+Z làm lại · Delete xóa · Esc kết thúc thao tác</p>
           {selectedAnnotation && <p className="label-coordinate-help">Box #{annotations.findIndex((item) => item.id === selectedAnnotation.id) + 1}: x {Math.round(selectedAnnotation.x_min)}, y {Math.round(selectedAnnotation.y_min)} → {Math.round(selectedAnnotation.x_max)}, {Math.round(selectedAnnotation.y_max)} px</p>}
