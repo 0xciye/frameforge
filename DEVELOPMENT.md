@@ -203,6 +203,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Giới hạn FHD:** Video đầu vào vẫn chỉ tối đa 1920×1080. Không thêm tuỳ chọn video độ phân giải cao hơn; nguồn vượt giới hạn bị từ chối, không scale. `imgsz` training là cấu hình riêng.
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 68 passed; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`, `cargo check --manifest-path src-tauri/Cargo.toml` và `git diff --check` — thành công.
 - **Chưa xác minh:** Dataset controls đã qua TypeScript/Vite build nhưng chưa click-through trong app bundle. Fixed-set evaluation/Champion-Challenger chưa triển khai. Benchmark một giờ là một lượt extraction trên fixture H.264 tổng hợp FHD; không phải soak test nhiều giờ hoặc mọi codec. Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch chưa chạy.
+- **Git:** Commit `7cbae6d` (`feat(dataset): add lineage and frozen evaluation sets`) đã lưu local trên `feature/manual-labeling`. Push bị chặn do GitHub HTTPS yêu cầu username nhưng phiên này không cung cấp (`could not read Username for 'https://github.com': Device not configured`).
 - **Bước tiếp:** Triển khai evaluation trên fixed validation/test sets và lưu metric theo từng run trước khi xây Champion/Challenger.
 
 ## Quy trình thay đổi
