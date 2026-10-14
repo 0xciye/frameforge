@@ -291,7 +291,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 
 Windows chưa được build hoặc xác nhận. Các việc còn lại: xác nhận native dialogs/paths, đóng gói Python và DLL của OpenCV/ONNX Runtime, build Tauri, kiểm tra Windows 10/11, tích hợp DirectML và benchmark trên RX 6600. Chỉ ghi `TESTED_WINDOWS_CI` hoặc `VERIFIED_WINDOWS_HARDWARE` sau đúng loại kiểm thử đó.
 
-### 2026-10-14 — Rà soát source và chuẩn bị publish
+### 2026-10-14 — Rà soát source và merge PR #1
 
 - **Source:** Worktree ban đầu sạch tại `8807a5d`; không có thay đổi source chưa commit cần dọn. Rà danh sách file tracked không thấy cache/build, media/model hoặc mẫu token/private key thông dụng. Lượt này chỉ chỉnh tài liệu hướng dẫn publish và ghi nhận trạng thái.
-- **GitHub:** Đã cài GitHub CLI arm64 chính thức, xác minh SHA-256 và đăng nhập thành công. Nhánh `feature/manual-labeling` đã push lên `origin` và tracking đã cấu hình. Lúc bắt đầu publish, repo chưa có refs; `main` local là tổ tiên của feature branch và được dùng làm base PR.
+- **GitHub:** Đã cài GitHub CLI arm64 chính thức, xác minh SHA-256 và đăng nhập thành công. Nhánh `feature/manual-labeling` đã push lên `origin`; PR #1 được squash-merge vào `main` (merge commit `1d90c1b`). `main` được đặt làm default branch và local checkout đã fast-forward theo remote. Tại thời điểm merge, PR ở trạng thái `CLEAN`, không có CI checks hoặc branch protection.

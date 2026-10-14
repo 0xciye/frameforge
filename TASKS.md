@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dataset lineage/replay, negative sampling, Champion/Challenger, trusted YOLO11n checkpoint import, and automatic workspace recovery are implemented locally. The current engine suite passes 98 tests; the frontend production build, Rust format check and crate check pass. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
+This ledger tracks FrameForge after PR #1 from `feature/manual-labeling` was squash-merged into `main`. Fixed-set evaluation, dataset lineage/replay, negative sampling, Champion/Challenger, trusted YOLO11n checkpoint import, and automatic workspace recovery are implemented. The current engine suite passes 98 tests; the frontend production build, Rust format check and crate check pass. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
 
 ## COMPLETED_VERIFIED
 
@@ -22,7 +22,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dat
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
 - Earlier verification: 68 engine tests, TypeScript/Vite production build, Rust format/check; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
 - A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.
-- The `feature/manual-labeling` branch is pushed and tracks `origin`. GitHub authentication is set up locally; before the push, the remote repository had no refs, so local `main` is the ancestor used as the pull request base.
+- [PR #1](https://github.com/0xciye/frameforge/pull/1) from `feature/manual-labeling` to `main` was squash-merged. `main` is the GitHub default branch; local `main` was fast-forwarded to the merged commit.
 
 ## IMPLEMENTED_UNVERIFIED
 
