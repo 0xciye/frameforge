@@ -2,6 +2,7 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Thêm negative sampling cho dataset: mặc định 10%, preset 0/5/10/25% hoặc tùy chỉnh 0–100%, chọn lặp lại theo seed và lọc ảnh gần giống dHash ≤5. Giữ nguyên negative trong fixed validation/test của parent và cảnh báo nếu vượt quota.
 - Tự lưu snapshot project và trạng thái workspace; tự khôi phục khi mở app mà không hiện hộp thoại. Nếu `.ffproj` nguồn mất hoặc checksum thay đổi, khôi phục thành dự án chưa lưu để tránh ghi đè.
 - Dataset validation/export loại ảnh còn box thủ công `unreviewed`; báo số ảnh bị loại. Replay parent bỏ ảnh train cũ chưa review và từ chối dùng nhãn thủ công chưa review trong fixed validation/test.
 - Thêm nhập checkpoint `.pt` YOLO11n detection có xác nhận tin cậy; kiểm tra task/kiến trúc/class, giới hạn 2 GiB, SHA-256 và lưu bản sao quản lý riêng. Model đã nhập xuất hiện trong inference/fine-tune theo class schema; discovered checkpoint vẫn chưa tin cậy. Đã kiểm tra bằng fake runtime, chưa click-through với checkpoint thật.

@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dataset lineage/replay, Champion/Challenger, trusted YOLO11n checkpoint import, and automatic workspace recovery are implemented locally. The current engine suite passes 96 tests and the frontend production build passes; Rust format/check passed earlier. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
+This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dataset lineage/replay, negative sampling, Champion/Challenger, trusted YOLO11n checkpoint import, and automatic workspace recovery are implemented locally. The current engine suite passes 98 tests; the frontend production build, Rust format check and crate check pass. A synthetic FHD batch with four aggregate source hours produced 14,400 crops without errors in 519.16 seconds. Source-video scope is **at most FHD 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution video options. Smaller sources retain their native size. Training `imgsz` is separate.
 
 ## COMPLETED_VERIFIED
 
@@ -11,12 +11,13 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dat
 - A batch of four copies of a synthetic one-hour H.264 FHD fixture was extracted at 1 frame/second: 14,400 crops from 4 aggregate source hours in 519.16 seconds, no errors, peak RSS 892.3 MiB. See `DEVELOPMENT.md` for fixture limits.
 - Dataset lineage is implemented: freeze reviewed validation/test sets, verify parent manifest and image/label hashes, preserve fixed images and labels across child versions, and replay historical training groups with `all`, `balanced`, or `new`. Training preflight/queue/run metadata records the lineage.
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
+- Negative sampling defaults to 10% with 0/5/10/25% presets or a custom 0–100% cap; selection is seed-stable, skips dHash-near duplicates, and preserves parent fixed-evaluation negatives with an over-quota warning. Engine regression coverage includes zero/all/invalid ratios and fixed-set preservation.
 - The fixed-set evaluator has fake-runtime engine coverage for internal checkpoint trust, manifest/class/split checks, image and label hashes, cross-split leakage, target status/persistence, history, and cancellation; it records overall/per-class Precision/Recall/F1/mAP and evaluation conditions.
 - Fine-tune accepts only a registered YOLO11n detection checkpoint with matching file, JSON and SQLite SHA-256 plus matching dataset class schema. Checkpoints may come from a FrameForge training run or the explicit trusted-import flow; unregistered/discovered external `.pt` files remain rejected.
 - Explicit trusted checkpoint import validates YOLO11n detection task/architecture/class names, caps `.pt` at 2 GiB, hashes the source before/after validation and copy, stores it with private managed permissions and registers provenance. Engine tests verify registration, class-schema-gated fine-tuning, unsupported task/architecture, file-size rejection and source mutation rejection.
 - Inference skips boxes within 1 px of a crop edge as potentially clipped/oversized, reports the skipped count, and does not turn an image into a negative candidate when all detections were skipped; fake-runtime regression tests verify both single-image and batch behavior.
 - Dataset validation/export excludes any image containing an unreviewed manual box and reports the excluded count. Parent replay skips legacy unreviewed training rows and rejects fixed validation/test data with unreviewed manual labels; regression tests cover both paths.
-- Current engine suite passes 96 tests; fixed-set evaluation and Champion/Challenger have fake-runtime coverage for fixed-set matching, condition/hardware checks, checkpoint hashes, targets, regressions, promotion, rollback and history.
+- Current engine suite passes 98 tests; fixed-set evaluation and Champion/Challenger have fake-runtime coverage for fixed-set matching, condition/hardware checks, checkpoint hashes, targets, regressions, promotion, rollback and history.
 - Session recovery automatically saves a private local project/workspace snapshot and restores it after startup health check. If the original project is missing or its checksum changed, the snapshot is opened as an unsaved project. Engine regression tests pass; the UI has a production build but no fresh app-bundle click-through yet.
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
 - Earlier verification: 68 engine tests, TypeScript/Vite production build, Rust format/check; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
@@ -45,7 +46,6 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation, dat
 
 ## NOT_IMPLEMENTED
 
-- Negative-image sampling policy and sampling ratios remain unimplemented; candidate-negative decisions require human review.
 - Guided workspace, contextual next actions, full workflow status, active-learning suggestions, and model quality dashboard.
 - Actual deployment latency/FPS/throughput/memory benchmark and model-generation comparison. These targets remain `not_measured`; the video extraction benchmark is not a model benchmark.
 - Training resume after interruption.

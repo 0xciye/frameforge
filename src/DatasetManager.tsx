@@ -12,6 +12,8 @@ type DatasetConfig = {
   test: number;
   seed: number;
   segmentSeconds: number;
+  negativeRatio: number;
+  negativeRatioCustom: boolean;
   freezeEvaluationSet: boolean;
 };
 
@@ -22,6 +24,11 @@ type DatasetReport = {
   included_image_count: number;
   positive_image_count: number;
   reviewed_negative_count: number;
+  negative_ratio_requested: number;
+  negative_ratio_actual: number;
+  negative_sample_target_count: number;
+  negative_samples_available_count: number;
+  negative_samples_excluded_count: number;
   unreviewed_annotation_excluded_count: number;
   candidate_negative_excluded_count: number;
   annotation_count: number;
@@ -71,6 +78,8 @@ const DEFAULT_CONFIG: DatasetConfig = {
   test: 10,
   seed: 42,
   segmentSeconds: 30,
+  negativeRatio: 10,
+  negativeRatioCustom: false,
   freezeEvaluationSet: false,
 };
 
@@ -96,7 +105,8 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
   const configKey = useMemo(() => JSON.stringify({ projectPath, config, parentManifestPath, replayStrategy }), [projectPath, config, parentManifestPath, replayStrategy]);
   const validationIsCurrent = Boolean(report && validatedKey === configKey);
   const ratioTotal = config.train + config.val + config.test;
-  const ratioValid = ratioTotal === 100 && config.train > 0;
+  const negativeRatioValid = Number.isFinite(config.negativeRatio) && config.negativeRatio >= 0 && config.negativeRatio <= 100;
+  const ratioValid = ratioTotal === 100 && config.train > 0 && negativeRatioValid;
 
   function updateConfig(patch: Partial<DatasetConfig>) {
     setConfig((current) => ({ ...current, ...patch }));
@@ -115,6 +125,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
       test_ratio: config.test / 100,
       seed: config.seed,
       segment_seconds: config.segmentSeconds,
+      negative_ratio: config.negativeRatio / 100,
       parent_manifest_path: parentManifestPath || null,
       replay_strategy: replayStrategy,
       freeze_evaluation_set: config.freezeEvaluationSet,
@@ -272,6 +283,26 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
               <label>Seed<input type="number" min="0" max="4294967295" step="1" value={config.seed} onChange={(event) => updateConfig({ seed: Number(event.target.value) })} /></label>
               {config.splitMode === "segment" && <label>Độ dài đoạn (giây)<input type="number" min="1" max="3600" step="1" value={config.segmentSeconds} onChange={(event) => updateConfig({ segmentSeconds: Number(event.target.value) })} /></label>}
             </div>
+            <div className="dataset-negative-control">
+              <label htmlFor="dataset-negative-ratio">Tỷ lệ negative tối đa</label>
+              <div>
+                <select id="dataset-negative-ratio" value={config.negativeRatioCustom ? "custom" : String(config.negativeRatio)} onChange={(event) => {
+                  const value = event.target.value;
+                  updateConfig(value === "custom"
+                    ? { negativeRatioCustom: true }
+                    : { negativeRatio: Number(value), negativeRatioCustom: false });
+                }}>
+                  <option value="0">0%</option>
+                  <option value="5">5%</option>
+                  <option value="10">10%</option>
+                  <option value="25">25%</option>
+                  <option value="custom">Tùy chỉnh</option>
+                </select>
+                {config.negativeRatioCustom && <input type="number" min="0" max="100" step="1" value={config.negativeRatio} aria-label="Tỷ lệ negative tùy chỉnh từ 0 đến 100 phần trăm" aria-invalid={!negativeRatioValid} onChange={(event) => updateConfig({ negativeRatio: Number(event.target.value) })} />}
+              </div>
+              <small>Tính trên dataset cuối; lấy mẫu tái lập theo seed và bỏ ảnh gần giống (dHash ≤5). Chọn 100% để giữ mọi ảnh negative.</small>
+              {!negativeRatioValid && <small className="dataset-negative-error" role="alert">Nhập tỷ lệ từ 0 đến 100%.</small>}
+            </div>
             {!parentManifestPath && <label className="dataset-freeze-control">
               <input type="checkbox" checked={config.freezeEvaluationSet} onChange={(event) => updateConfig({ freezeEvaluationSet: event.target.checked })} />
               <span><strong>Đóng băng val/test</strong><small>Chỉ bật khi mọi ảnh trong hai split đã được review; các phiên bản sau sẽ dùng lại nguyên các ảnh và nhãn này.</small></span>
@@ -326,6 +357,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
             <div><strong>{report.reviewed_negative_count}</strong><span>Negative đã review</span></div>
             <div><strong>{report.annotation_count}</strong><span>Bounding box</span></div>
           </div>
+          <p className="dataset-negative-summary" aria-live="polite">Negative: giữ {report.reviewed_negative_count}/{report.negative_samples_available_count} ảnh đã review · tỷ lệ thực tế {(report.negative_ratio_actual * 100).toFixed(1)}% / giới hạn {(report.negative_ratio_requested * 100).toFixed(1)}%{report.negative_samples_excluded_count > 0 ? ` · đã loại ${report.negative_samples_excluded_count} ảnh` : ""}</p>
           <div className="dataset-report-columns">
             <div><h3>Split thực tế</h3>
               {(["train", "val", "test"] as const).map((split) => <div className="dataset-split-row" key={split}>

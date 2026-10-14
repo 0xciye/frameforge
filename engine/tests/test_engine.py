@@ -15,7 +15,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
-from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
+from frameforge.media import _RecentHashes, _center_crop, _dhash, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
 from frameforge.dataset import _balanced_replay_groups, export_yolo_dataset, validate_dataset
 from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
 from frameforge import training
@@ -938,7 +938,7 @@ def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(t
     project_path, _ = create_dataset_project(tmp_path)
 
     report = validate_dataset(
-        str(project_path), "source", train_ratio=0.5, val_ratio=0.5, test_ratio=0, seed=23,
+        str(project_path), "source", train_ratio=0.5, val_ratio=0.5, test_ratio=0, seed=23, negative_ratio=1.0,
     )
 
     assert report["valid"] is True
@@ -963,7 +963,7 @@ def test_dataset_export_excludes_unreviewed_manual_annotations(tmp_path: Path):
     unreviewed["annotations"][0]["review_status"] = "unreviewed"
     save_project(str(project_path), project)
 
-    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
 
     assert report["valid"] is True
     assert report["included_image_count"] == 2
@@ -972,7 +972,7 @@ def test_dataset_export_excludes_unreviewed_manual_annotations(tmp_path: Path):
 
     output_root = tmp_path / "review-gated-exports"
     output_root.mkdir()
-    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
     assert all(item["source_image"] != str(image_paths["a_positive"]) for item in manifest["images"])
 
@@ -983,7 +983,7 @@ def test_dataset_lineage_excludes_unreviewed_training_annotations_from_parent(tm
     output_root.mkdir()
     base = export_yolo_dataset(
         str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
-        freeze_evaluation_set=True,
+        freeze_evaluation_set=True, negative_ratio=1.0,
     )
     manifest_path = Path(base["path"]) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -995,7 +995,7 @@ def test_dataset_lineage_excludes_unreviewed_training_annotations_from_parent(tm
 
     report = validate_dataset(
         str(project_path), "source", 0.8, 0.2, 0, 23,
-        parent_manifest_path=str(manifest_path), replay_strategy="all",
+        parent_manifest_path=str(manifest_path), replay_strategy="all", negative_ratio=1.0,
     )
 
     assert report["valid"] is True
@@ -1009,7 +1009,7 @@ def test_dataset_lineage_rejects_unreviewed_annotations_in_frozen_parent(tmp_pat
     output_root.mkdir()
     base = export_yolo_dataset(
         str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
-        freeze_evaluation_set=True,
+        freeze_evaluation_set=True, negative_ratio=1.0,
     )
     manifest_path = Path(base["path"]) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1027,6 +1027,85 @@ def test_dataset_lineage_rejects_unreviewed_annotations_in_frozen_parent(tmp_pat
 
     assert report["valid"] is False
     assert any("Fixed validation/test" in error for error in report["errors"])
+
+
+def test_dataset_negative_sampling_respects_ratio_seed_and_visual_diversity(tmp_path: Path):
+    image_root = tmp_path / "negative-sampling"
+    image_root.mkdir()
+    images = []
+
+    def add_image(name: str, frame: np.ndarray, positive: bool) -> None:
+        path = image_root / (name + ".png")
+        assert cv2.imwrite(str(path), frame)
+        images.append({
+            "path": str(path), "source_path": str(tmp_path / (name + ".mp4")),
+            "source_id": name, "frame_index": 0, "timestamp_seconds": 0.0,
+            "width": 64, "height": 48, "status": "reviewed",
+            "annotations": [{
+                "id": name + "-box", "class_id": 0,
+                "x_min": 8, "y_min": 6, "x_max": 32, "y_max": 36,
+                "review_status": "reviewed",
+            }] if positive else [],
+        })
+
+    for index in range(20):
+        add_image("positive-{0}".format(index), np.full((48, 64, 3), 30 + index * 7, dtype=np.uint8), True)
+
+    rising = np.tile(np.linspace(0, 255, 64, dtype=np.uint8), (48, 1))
+    falling = np.tile(np.linspace(255, 0, 64, dtype=np.uint8), (48, 1))
+    checker = np.indices((48, 64)).sum(axis=0).astype(np.uint8) % 2 * 255
+    for index in range(10):
+        add_image("negative-near-{0}".format(index), cv2.cvtColor(rising, cv2.COLOR_GRAY2BGR), False)
+    add_image("negative-falling", cv2.cvtColor(falling, cv2.COLOR_GRAY2BGR), False)
+    add_image("negative-checker", cv2.cvtColor(checker, cv2.COLOR_GRAY2BGR), False)
+
+    project_path = tmp_path / "negative-sampling.ffproj"
+    save_project(str(project_path), {
+        "id": "negative-sampling-project", "name": "Negative sampling fixture",
+        "sources": [], "settings": {}, "class_names": ["object"], "images": images,
+    })
+    output_root = tmp_path / "negative-sampling-exports"
+    output_root.mkdir()
+    arguments = {
+        "split_mode": "source", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0,
+        "seed": 23, "negative_ratio": 0.1,
+    }
+
+    report = validate_dataset(str(project_path), **arguments)
+
+    assert report["valid"] is True
+    assert report["positive_image_count"] == 20
+    assert report["negative_samples_available_count"] == 12
+    assert report["negative_sample_target_count"] == 2
+    assert report["reviewed_negative_count"] == 2
+    assert report["negative_ratio_actual"] <= 0.1
+
+    first = export_yolo_dataset(str(project_path), str(output_root), **arguments)
+    second = export_yolo_dataset(str(project_path), str(output_root), **arguments)
+    first_manifest = json.loads((Path(first["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    second_manifest = json.loads((Path(second["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    first_negatives = sorted(item["sha256"] for item in first_manifest["images"] if item["annotation_count"] == 0)
+    second_negatives = sorted(item["sha256"] for item in second_manifest["images"] if item["annotation_count"] == 0)
+    assert first_negatives == second_negatives
+    assert len(first_negatives) == 2
+    selected_hashes = [
+        _dhash(cv2.imread(item["source_image"], cv2.IMREAD_COLOR))
+        for item in first_manifest["images"] if item["annotation_count"] == 0
+    ]
+    assert (selected_hashes[0] ^ selected_hashes[1]).bit_count() > 5
+
+
+def test_dataset_negative_sampling_accepts_zero_and_all_and_rejects_invalid_ratio(tmp_path: Path):
+    project_path, _ = create_dataset_project(tmp_path)
+
+    zero = validate_dataset(str(project_path), "source", 1.0, 0.0, 0.0, 23, negative_ratio=0.0)
+    all_negatives = validate_dataset(str(project_path), "source", 1.0, 0.0, 0.0, 23, negative_ratio=1.0)
+
+    assert zero["reviewed_negative_count"] == 0
+    assert all_negatives["reviewed_negative_count"] == 1
+    for value in (True, -0.01, 1.01, float("nan")):
+        with pytest.raises(ValueError, match="Tỷ lệ ảnh negative"):
+            validate_dataset(str(project_path), "source", 1.0, 0.0, 0.0, 23, negative_ratio=value)
 
 
 def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_path: Path):
@@ -1048,7 +1127,7 @@ def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_pat
     }]
     save_project(str(project_path), project)
 
-    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     assert report["valid"] is True
     assert report["pending_suggestion_count"] == 1
     assert report["reviewed_negative_count"] == 0
@@ -1058,7 +1137,7 @@ def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_pat
 
     output_root = tmp_path / "exports"
     output_root.mkdir()
-    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["summary"]["pending_suggestion_count"] == 1
     assert all(item["source_image"] != str(image_paths["a_negative"]) for item in manifest["images"])
@@ -1086,18 +1165,18 @@ def test_dataset_requires_review_for_ai_candidate_negative_and_records_provenanc
     candidate_image["status"] = "reviewed"
     save_project(str(project_path), project)
 
-    pending_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    pending_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     assert pending_report["pending_negative_candidate_count"] == 1
     assert pending_report["included_image_count"] == 2
 
     review_ai_negative_candidate(
         str(project_path), "candidate-negative-1", "confirmed_negative", fingerprint,
     )
-    confirmed_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+    confirmed_report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     assert confirmed_report["reviewed_negative_count"] == 1
     output_root = tmp_path / "negative-exports"
     output_root.mkdir()
-    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
     exported = next(item for item in manifest["images"] if item["source_image"] == str(image_paths["a_negative"]))
     assert exported["negative_candidate_provenance"][0]["review_status"] == "confirmed_negative"
@@ -1110,7 +1189,7 @@ def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_pa
     output_root.mkdir()
 
     result = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23,
+        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0,
     )
     root = Path(result["path"])
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -1137,7 +1216,7 @@ def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_pa
     assert (root / positive["exported_image"]).read_bytes() == image_paths["a_positive"].read_bytes()
 
     next_version = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23,
+        str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0,
     )
     assert next_version["path"] != result["path"]
     assert len(list(output_root.glob("frameforge_dataset_*"))) == 2
@@ -1172,9 +1251,10 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
     project_path = create_reviewed_lineage_project(tmp_path)
     output_root = tmp_path / "lineage-exports"
     output_root.mkdir()
+    seed = 3
     base = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
-        freeze_evaluation_set=True,
+        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, seed,
+        freeze_evaluation_set=True, negative_ratio=1.0,
     )
     base_root = Path(base["path"])
     base_manifest = json.loads((base_root / "manifest.json").read_text(encoding="utf-8"))
@@ -1183,6 +1263,11 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
     assert base_manifest["frozen_test_set"]["enabled"] is True
     assert len(base_manifest["annotation_revision"]) == 64
     assert all(len(item["label_sha256"]) == 64 and item["group_key"] for item in base_manifest["images"])
+    fixed_negative_hashes = {
+        item["sha256"] for item in base_manifest["images"]
+        if item["split"] in {"val", "test"} and item["annotation_count"] == 0
+    }
+    assert fixed_negative_hashes
 
     project = load_project(str(project_path))
     frozen_test_source = next(item["source_image"] for item in base_manifest["images"] if item["split"] == "test")
@@ -1206,18 +1291,21 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
     save_project(str(project_path), project)
 
     report = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0.0, 23,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new",
+        str(project_path), "source", 0.8, 0.2, 0.0, seed,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new", negative_ratio=0.0,
     )
     assert report["valid"] is True
     assert report["new_image_count"] == 1
     assert report["replayed_image_count"] == 0
     assert report["fixed_validation_count"] == base["split_counts"]["val"]
     assert report["frozen_test_count"] == base["split_counts"]["test"]
+    assert report["reviewed_negative_count"] == len(fixed_negative_hashes)
+    assert report["negative_ratio_actual"] > report["negative_ratio_requested"]
+    assert any("fixed validation/test vượt quota" in warning for warning in report["warnings"])
 
     child = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.8, 0.2, 0.0, 23,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new",
+        str(project_path), str(output_root), "source", 0.8, 0.2, 0.0, seed,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new", negative_ratio=0.0,
     )
     child_manifest = json.loads((Path(child["path"]) / "manifest.json").read_text(encoding="utf-8"))
     assert child["version"] == 2
@@ -1228,14 +1316,18 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
         before = sorted((item["sha256"], item["label_sha256"]) for item in base_manifest["images"] if item["split"] == split)
         after = sorted((item["sha256"], item["label_sha256"]) for item in child_manifest["images"] if item["split"] == split)
         assert after == before
+    assert {
+        item["sha256"] for item in child_manifest["images"]
+        if item["split"] in {"val", "test"} and item["annotation_count"] == 0
+    } == fixed_negative_hashes
     parent_train_digests = {item["sha256"] for item in base_manifest["images"] if item["split"] == "train"}
     child_train_digests = {item["sha256"] for item in child_manifest["images"] if item["split"] == "train"}
     assert parent_train_digests.isdisjoint(child_train_digests)
     assert child_train_digests == {hashlib.sha256(new_image.read_bytes()).hexdigest()}
 
     all_replay = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0.0, 23,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="all",
+        str(project_path), "source", 0.8, 0.2, 0.0, seed,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="all", negative_ratio=1.0,
     )
     assert all_replay["valid"] is True
     assert all_replay["replayed_image_count"] == base["split_counts"]["train"]

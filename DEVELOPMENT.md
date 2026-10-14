@@ -14,7 +14,7 @@
 | YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận |
+| Dataset validation, negative sampling, grouped splits, YOLO export and lineage | TESTED_ENGINE | Negative sampling theo seed (mặc định 10%, 0–100%), lọc dHash ≤5; fixed val/test giữ negative kể cả khi vượt quota; export loại box/candidate AI đang chờ hoặc bị loại |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
@@ -274,6 +274,14 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 96 passed trong 10,53 giây; `pnpm build` — thành công với 1.922 module bằng Node.js runtime đi kèm Codex; `git diff --check` — sạch.
 - **Phạm vi video:** Giữ nguyên giới hạn nguồn tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale và không thêm lựa chọn độ phân giải cao hơn. `imgsz` training vẫn riêng biệt.
 - **Chưa xác minh:** Chưa click-through UI trên app bundle mới. Benchmark media vẫn là fixture H.264 FHD tổng hợp, không phải soak test nhiều giờ trên footage thực.
+
+### 2026-10-14 — Negative sampling cho dataset
+
+- **Thay đổi:** Dataset validation/export có giới hạn negative mặc định 10%, preset 0/5/10/25% hoặc tùy chỉnh 0–100%. Seed cho kết quả tái lập; dHash ≤5 bỏ ảnh negative gần giống. Negative đã thuộc fixed validation/test của parent luôn được giữ và report cảnh báo khi vượt quota.
+- **Phạm vi video:** Chỉ nhận nguồn tối đa FHD 1920×1080; video lớn hơn bị từ chối tại import/preview/extraction, không scale và không thêm lựa chọn độ phân giải cao hơn. `imgsz` training vẫn độc lập.
+- **Hiệu năng media:** Giữ nguyên benchmark fixture tổng hợp trước đó: bốn bản sao H.264 FHD, tổng 4 giờ nguồn, 14.400 crop trong 519,16 giây, peak RSS 892,3 MiB. Fixture lặp không thay thế soak test nhiều giờ trên footage thực.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 98 passed trong 11,11 giây; TypeScript/Vite production build — thành công (1.922 modules); `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`, `cargo check --manifest-path src-tauri/Cargo.toml` và `git diff --check` — thành công. Regression xác nhận quota 0% vẫn giữ negative trong fixed val/test.
+- **Chưa xác minh:** Chưa click-through giao diện Dataset trên app bundle mới.
 
 ## Quy trình thay đổi
 

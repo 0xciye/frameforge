@@ -16,6 +16,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Dataset
 
 - Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
+- Điều khiển negative sampling có preset 0/5/10/25% và tỷ lệ tùy chỉnh; report nêu số ảnh negative được giữ/bỏ cùng tỷ lệ thực tế. Giữ nguyên negative trong fixed validation/test của parent.
 - Ảnh trống chưa review không được export; candidate negative do inference tạo ra chỉ thành negative đã review sau khi người dùng xác nhận ảnh trống. Negative đã xác nhận có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
 - Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
 - Chọn checkpoint nội bộ đã xác minh hoặc nhập `.pt` YOLO11n tương thích qua xác nhận tin cậy; danh sách hiển thị tên file đã nhập và chỉ dùng model khớp class schema. Inference áp dụng vào ảnh đang mở hoặc toàn bộ project theo batch có giới hạn. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry. Hủy giữ các chunk đã lưu; ảnh thay đổi trong lúc chạy bị bỏ qua khi commit.

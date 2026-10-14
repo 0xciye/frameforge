@@ -1074,6 +1074,14 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             if train <= 0.0 || (train + val + test - 1.0).abs() > 1e-6 {
                 return Err("Tổng tỷ lệ phải bằng 100% và train phải lớn hơn 0%.".to_string());
             }
+            if let Some(value) = arguments.get("negative_ratio") {
+                let ratio = value
+                    .as_f64()
+                    .ok_or("Tỷ lệ ảnh negative phải là số từ 0 đến 100%.")?;
+                if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                    return Err("Tỷ lệ ảnh negative phải từ 0 đến 100%.".to_string());
+                }
+            }
             let seed = arguments.get("seed").and_then(Value::as_u64).unwrap_or(42);
             if seed > u32::MAX as u64 {
                 return Err("Seed phải nằm trong khoảng 0 đến 4294967295.".to_string());

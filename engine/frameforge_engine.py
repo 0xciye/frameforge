@@ -149,6 +149,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("parent_manifest_path"),
                 arguments.get("replay_strategy", "all"),
                 arguments.get("freeze_evaluation_set", False),
+                arguments.get("negative_ratio", 0.1),
             )
         elif command == "export_yolo_dataset":
             result = export_yolo_dataset(
@@ -163,6 +164,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("parent_manifest_path"),
                 arguments.get("replay_strategy", "all"),
                 arguments.get("freeze_evaluation_set", False),
+                arguments.get("negative_ratio", 0.1),
             )
         elif command == "load_project":
             result = load_project(arguments["path"])

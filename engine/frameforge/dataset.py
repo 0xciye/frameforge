@@ -13,9 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import yaml
 from PIL import Image, UnidentifiedImageError
 
+from frameforge.media import _RecentHashes, _dhash
 from frameforge.project import load_project
 
 
@@ -30,6 +32,7 @@ def _config(
     test_ratio: float,
     seed: int,
     segment_seconds: float,
+    negative_ratio: float,
 ) -> Dict[str, Any]:
     if split_mode not in {"source", "segment"}:
         raise ValueError("Cách chia dataset phải là theo video nguồn hoặc theo đoạn video.")
@@ -47,11 +50,16 @@ def _config(
         raise ValueError("Độ dài đoạn video không hợp lệ.")
     if not 1 <= segment_seconds <= 3600:
         raise ValueError("Độ dài đoạn video phải từ 1 đến 3600 giây.")
+    if isinstance(negative_ratio, bool) or not isinstance(negative_ratio, (int, float)) or not math.isfinite(negative_ratio):
+        raise ValueError("Tỷ lệ ảnh negative phải là số từ 0 đến 100%.")
+    if not 0 <= negative_ratio <= 1:
+        raise ValueError("Tỷ lệ ảnh negative phải từ 0 đến 100%.")
     return {
         "split_mode": split_mode,
         "ratios": ratios,
         "seed": seed,
         "segment_seconds": float(segment_seconds),
+        "negative_ratio": float(negative_ratio),
     }
 
 
@@ -268,6 +276,76 @@ def _balanced_replay_groups(samples: List[Dict[str, Any]], seed: int) -> set[str
     return selected
 
 
+def _negative_hash(sample: Dict[str, Any]) -> int:
+    path = Path(sample.get("parent_asset_path") or sample["path"])
+    frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Không đọc được ảnh negative để kiểm tra ảnh gần giống: {0}".format(path))
+    return _dhash(frame)
+
+
+def _sample_negative_images(
+    samples: List[Dict[str, Any]], config: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
+    positives = sum(bool(sample["annotations"]) for sample in samples)
+    negatives = [sample for sample in samples if not sample["annotations"]]
+    ratio = config["negative_ratio"]
+    if ratio == 1:
+        target = len(negatives)
+        kept = samples
+    else:
+        target = math.floor(positives * ratio / (1 - ratio)) if positives else 0
+        fixed_negatives = [sample for sample in negatives if sample.get("fixed_evaluation")]
+        selected = {id(sample) for sample in fixed_negatives}
+        quota = max(0, target - len(fixed_negatives))
+        recent_hashes = _RecentHashes(threshold=5)
+        for sample in sorted(fixed_negatives, key=lambda item: item["sha256"]):
+            recent_hashes.add(_negative_hash(sample))
+
+        candidates = [sample for sample in negatives if not sample.get("fixed_evaluation")]
+        candidates.sort(key=lambda item: (
+            hashlib.sha256((str(config["seed"]) + ":negative:" + item["sha256"]).encode("utf-8")).hexdigest(),
+            item["sha256"],
+            item["path"],
+        ))
+        selected_count = 0
+        for sample in candidates:
+            if selected_count >= quota:
+                break
+            image_hash = _negative_hash(sample)
+            if recent_hashes.contains_near(image_hash):
+                continue
+            recent_hashes.add(image_hash)
+            selected.add(id(sample))
+            selected_count += 1
+        kept = [sample for sample in samples if sample["annotations"] or id(sample) in selected]
+
+    retained_negative_count = sum(not sample["annotations"] for sample in kept)
+    excluded_count = len(negatives) - retained_negative_count
+    actual_ratio = retained_negative_count / len(kept) if kept else 0.0
+    warnings: List[str] = []
+    fixed_negative_count = sum(bool(sample.get("fixed_evaluation")) for sample in negatives)
+    if ratio < 1 and fixed_negative_count > target:
+        warnings.append(
+            "Negative đã khóa trong fixed validation/test vượt quota: tỷ lệ thực tế {0:.1%} cao hơn giới hạn {1:.1%}; các split cố định được giữ nguyên.".format(
+                actual_ratio, ratio
+            )
+        )
+    elif excluded_count:
+        warnings.append(
+            "Áp dụng giới hạn negative {0:.1%} trên dataset cuối: giữ {1}/{2} ảnh đã review, loại {3} ảnh do vượt quota hoặc gần giống (dHash ≤5).".format(
+                ratio, retained_negative_count, len(negatives), excluded_count
+            )
+        )
+    return kept, warnings, {
+        "negative_ratio_requested": ratio,
+        "negative_ratio_actual": actual_ratio,
+        "negative_sample_target_count": target,
+        "negative_samples_available_count": len(negatives),
+        "negative_samples_excluded_count": excluded_count,
+    }
+
+
 def _compose_lineage_samples(
     current_samples: List[Dict[str, Any]],
     parent: Dict[str, Any],
@@ -310,7 +388,7 @@ def _compose_lineage_samples(
 
     for split, fixed_samples in (("val", fixed_val), ("test", frozen_test)):
         for sample in fixed_samples:
-            result.append({**sample, "split": split})
+            result.append({**sample, "split": split, "fixed_evaluation": True})
 
     replayed_image_count = 0
     for old_sample in historical:
@@ -501,8 +579,9 @@ def _analyze(
     parent_manifest_path: Optional[str] = None,
     replay_strategy: str = "all",
     freeze_evaluation_set: bool = False,
+    negative_ratio: float = 0.1,
 ) -> Dict[str, Any]:
-    config = _config(split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds)
+    config = _config(split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds, negative_ratio)
     project = load_project(path_value)
     class_names = project.get("class_names", [])
     images = project.get("images", [])
@@ -832,6 +911,23 @@ def _analyze(
             lineage_counts["fixed_validation_count"] = sum(sample["split"] == "val" for sample in samples)
             lineage_counts["frozen_test_count"] = sum(sample["split"] == "test" for sample in samples)
 
+    samples, negative_warnings, negative_summary = _sample_negative_images(samples, config)
+    warnings.extend(negative_warnings)
+    if parent is not None:
+        lineage_counts["new_image_count"] = sum(sample.get("origin_dataset_id") is None for sample in samples)
+        lineage_counts["replayed_image_count"] = sum(
+            sample["split"] == "train" and sample.get("origin_dataset_id") is not None for sample in samples
+        )
+        lineage_counts["fixed_validation_count"] = sum(
+            bool(sample.get("fixed_evaluation")) and sample["split"] == "val" for sample in samples
+        )
+        lineage_counts["frozen_test_count"] = sum(
+            bool(sample.get("fixed_evaluation")) and sample["split"] == "test" for sample in samples
+        )
+    elif freeze_evaluation_set:
+        lineage_counts["fixed_validation_count"] = sum(sample["split"] == "val" for sample in samples)
+        lineage_counts["frozen_test_count"] = sum(sample["split"] == "test" for sample in samples)
+
     split_counts = {name: 0 for name in SPLITS}
     split_group_keys: Dict[str, set[str]] = {name: set() for name in SPLITS}
     for sample in samples:
@@ -920,6 +1016,7 @@ def _analyze(
         "ratios": config["ratios"],
         "seed": config["seed"],
         "segment_seconds": config["segment_seconds"],
+        **negative_summary,
         "errors": errors,
         "warnings": warnings,
     }
@@ -937,11 +1034,12 @@ def validate_dataset(
     parent_manifest_path: Optional[str] = None,
     replay_strategy: str = "all",
     freeze_evaluation_set: bool = False,
+    negative_ratio: float = 0.1,
 ) -> Dict[str, Any]:
     """Validate a saved project and return a stable, source-grouped split preview."""
     return _analyze(
         path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds,
-        parent_manifest_path, replay_strategy, freeze_evaluation_set,
+        parent_manifest_path, replay_strategy, freeze_evaluation_set, negative_ratio,
     )["summary"]
 
 
@@ -987,11 +1085,12 @@ def export_yolo_dataset(
     parent_manifest_path: Optional[str] = None,
     replay_strategy: str = "all",
     freeze_evaluation_set: bool = False,
+    negative_ratio: float = 0.1,
 ) -> Dict[str, Any]:
     """Create a new immutable YOLO dataset version without modifying source images."""
     analysis = _analyze(
         path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds,
-        parent_manifest_path, replay_strategy, freeze_evaluation_set,
+        parent_manifest_path, replay_strategy, freeze_evaluation_set, negative_ratio,
     )
     summary = analysis["summary"]
     if not summary["valid"]:
@@ -1152,6 +1251,7 @@ def export_yolo_dataset(
                 "ratios": config["ratios"],
                 "seed": config["seed"],
                 "segment_seconds": config["segment_seconds"],
+                "negative_ratio": config["negative_ratio"],
                 "counts": summary["split_counts"],
                 "groups": summary["split_group_counts"],
             },
@@ -1162,6 +1262,8 @@ def export_yolo_dataset(
                     "fixed_validation_count", "frozen_test_count", "positive_image_count",
                     "reviewed_negative_count", "unreviewed_annotation_excluded_count",
                     "unreviewed_parent_train_excluded_count", "candidate_negative_excluded_count",
+                    "negative_ratio_requested", "negative_ratio_actual", "negative_sample_target_count",
+                    "negative_samples_available_count", "negative_samples_excluded_count",
                     "annotation_count", "pending_suggestion_count", "class_distribution", "exact_duplicate_count",
                 )
             },
