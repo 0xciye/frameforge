@@ -14,7 +14,7 @@
 | YOLO11n inference adapter | TESTED_MACOS | Chỉ nạp checkpoint nội bộ đã đăng ký/khớp SHA-256 và class schema; Ultralytics NMS một lần, confidence filter inclusive; smoke một ảnh tổng hợp trên MPS |
 | Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
-| Dataset validation, grouped splits, YOLO export | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; negative AI cần xác nhận và ghi provenance; 63 engine tests pass ở lần kiểm tra hiện tại |
+| Dataset validation, grouped splits, YOLO export and lineage | TESTED_ENGINE | Export loại box/candidate AI đang chờ hoặc bị loại; fixed val/test giữ ảnh/label qua lineage; freeze yêu cầu val/test không rỗng và đã review; negative AI cần xác nhận; 68 engine tests pass |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
 | Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Smoke một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro. Kiểm tra synthetic 20.003 ảnh 320×320 và chuyển cấu hình 301 epoch tới hai imgsz bằng fake runtime; chưa xác nhận throughput/độ ổn định YOLO thật ở quy mô đầy đủ. |
@@ -24,7 +24,7 @@
 | Benchmark, experiment comparison, model export | NOT_STARTED | Chưa có công cụ benchmark model trong app; phép đo hiệu năng xử lý media một lần được ghi bên dưới |
 | Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Cần máy Windows thật; chưa tuyên bố tương thích |
 
-Thứ tự tiếp theo: dataset lineage/replay → đánh giá model và quality targets → benchmark/so sánh → deployment export → resume/recovery training → session recovery UI → Windows validation. Inference hàng loạt đã được triển khai nhưng UI chưa click-through bằng checkpoint thật. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale.
+Thứ tự tiếp theo: đánh giá cố định trên validation/test → Champion/Challenger → deployment export → resume/recovery training → session recovery UI → Windows validation. Dataset lineage/replay đã được triển khai và có kiểm tra engine; controls chưa click-through bằng app bundle. Inference hàng loạt đã được triển khai nhưng UI chưa click-through bằng checkpoint thật. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale.
 
 ## Công cụ và cài đặt
 
@@ -196,6 +196,14 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Giới hạn:** Tạo DMG lỗi trong `bundle_dmg.sh`; Windows vẫn `PENDING_WINDOWS_VALIDATION`.
 - **Git:** Commit `1c97231` — `feat(crop): implement exact center crop`; push chưa thành công vì thiếu GitHub HTTPS credentials (`could not read Username`). Remote đã cấu hình là `https://github.com/0xciye/frameforge.git`, nhưng API trả 404 khi kiểm tra unauthenticated nên chưa xác nhận repo public/tồn tại.
 - **Bước tiếp:** Thiết lập GitHub authentication để tạo/đẩy remote; sau đó hoàn tất filtering và bắt đầu manual labeling theo roadmap.
+
+### 2026-10-14 — Dataset lineage, replay và fixed evaluation sets
+
+- **Thay đổi:** Export có manifest lineage/version và parent SHA-256; val/test chỉ đóng băng khi cả hai split có ảnh và mọi ảnh đã review. Child xác minh ảnh, nhãn, split, class schema và hash của parent, giữ nguyên byte ảnh cùng labels của fixed val/test, chia dữ liệu mới theo nhóm, và hỗ trợ replay train `all`, `balanced`, `new`. Training preflight, queue và run config nhận dataset version, parent, replay policy và fixed-set IDs.
+- **Giới hạn FHD:** Video đầu vào vẫn chỉ tối đa 1920×1080. Không thêm tuỳ chọn video độ phân giải cao hơn; nguồn vượt giới hạn bị từ chối, không scale. `imgsz` training là cấu hình riêng.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 68 passed; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`, `cargo check --manifest-path src-tauri/Cargo.toml` và `git diff --check` — thành công.
+- **Chưa xác minh:** Dataset controls đã qua TypeScript/Vite build nhưng chưa click-through trong app bundle. Fixed-set evaluation/Champion-Challenger chưa triển khai. Benchmark một giờ là một lượt extraction trên fixture H.264 tổng hợp FHD; không phải soak test nhiều giờ hoặc mọi codec. Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch chưa chạy.
+- **Bước tiếp:** Triển khai evaluation trên fixed validation/test sets và lưu metric theo từng run trước khi xây Champion/Challenger.
 
 ## Quy trình thay đổi
 

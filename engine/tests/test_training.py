@@ -52,6 +52,30 @@ def test_training_dataset_preflight_checks_images_labels_and_fingerprint(tmp_pat
     assert changed["dataset_fingerprint"] != summary["dataset_fingerprint"]
 
 
+def test_training_preflight_reports_dataset_lineage_and_fixed_sets(tmp_path: Path):
+    data_yaml = create_yolo_dataset(tmp_path / "dataset")
+    manifest = {
+        "format": "FrameForge YOLO dataset",
+        "dataset_id": "dataset-v2",
+        "version": 2,
+        "parent_dataset_id": "dataset-v1",
+        "replay_strategy": "balanced",
+        "fixed_validation_set": {"set_id": "fixed-val-1"},
+        "frozen_test_set": {"set_id": "frozen-test-1"},
+        "images": [],
+    }
+    (data_yaml.parent / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    summary = training.inspect_training_dataset(str(data_yaml))
+
+    assert summary["dataset_id"] == "dataset-v2"
+    assert summary["dataset_version"] == 2
+    assert summary["parent_dataset_id"] == "dataset-v1"
+    assert summary["replay_strategy"] == "balanced"
+    assert summary["fixed_validation_set_id"] == "fixed-val-1"
+    assert summary["frozen_test_set_id"] == "frozen-test-1"
+
+
 def test_training_dataset_preflight_rejects_invalid_and_corrupt_labels(tmp_path: Path):
     data_yaml = create_yolo_dataset(tmp_path / "dataset")
     (data_yaml.parent / "labels" / "train" / "0.txt").write_text("3 0.5 0.5 0.25 0.25\n", encoding="utf-8")
@@ -206,11 +230,23 @@ def test_training_preflight_and_queue_support_over_20k_images_and_300_epochs_per
     data_yaml.write_text(yaml.safe_dump({
         "path": ".", "train": "images/train", "val": "images/val", "names": {0: "head"},
     }), encoding="utf-8")
+    (dataset / "manifest.json").write_text(json.dumps({
+        "format": "FrameForge YOLO dataset",
+        "dataset_id": "large-dataset-v2",
+        "version": 2,
+        "parent_dataset_id": "large-dataset-v1",
+        "replay_strategy": "balanced",
+        "fixed_validation_set": {"set_id": "fixed-val"},
+        "frozen_test_set": {"set_id": "frozen-test"},
+        "images": [],
+    }), encoding="utf-8")
 
     inspected = training.inspect_training_dataset(str(data_yaml))
     assert inspected["valid"] is True
     assert inspected["total_images"] == 20_003
     assert inspected["image_counts"] == {"train": 20_001, "val": 2}
+    assert inspected["parent_dataset_id"] == "large-dataset-v1"
+    assert inspected["frozen_test_set_id"] == "frozen-test"
 
     output_dir = tmp_path / "training-output"
     output_dir.mkdir()
@@ -229,6 +265,13 @@ def test_training_preflight_and_queue_support_over_20k_images_and_300_epochs_per
     assert [call["epochs"] for call in FakeYOLO.train_parameters] == [301, 301]
     assert [call["imgsz"] for call in FakeYOLO.train_parameters] == [64, 96]
     assert [call["save_period"] for call in FakeYOLO.train_parameters] == [50, 50]
+    queue_config = json.loads((Path(result["queue_root"]) / "queue.json").read_text(encoding="utf-8"))
+    assert queue_config["dataset_version"] == 2
+    assert queue_config["parent_dataset_id"] == "large-dataset-v1"
+    assert queue_config["replay_strategy"] == "balanced"
+    run_config = json.loads(Path(result["jobs"][0]["configuration_path"]).read_text(encoding="utf-8"))
+    assert run_config["fixed_validation_set_id"] == "fixed-val"
+    assert run_config["frozen_test_set_id"] == "frozen-test"
 
 
 def test_multi_resolution_queue_reloads_same_base_and_registers_checkpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -471,6 +471,12 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
             warnings.append("manifest.json không đọc được; dataset fingerprint sẽ được tính trực tiếp từ tệp local.")
             manifest = {}
             manifest_digests = {}
+    fixed_validation_set = manifest.get("fixed_validation_set")
+    frozen_test_set = manifest.get("frozen_test_set")
+    if not isinstance(fixed_validation_set, dict):
+        fixed_validation_set = {}
+    if not isinstance(frozen_test_set, dict):
+        frozen_test_set = {}
 
     fingerprint = hashlib.sha256()
     fingerprint.update(data_file.read_bytes())
@@ -541,6 +547,11 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
         "data_yaml": str(data_file),
         "dataset_root": str(root),
         "dataset_id": manifest.get("dataset_id"),
+        "dataset_version": manifest.get("version"),
+        "parent_dataset_id": manifest.get("parent_dataset_id"),
+        "replay_strategy": manifest.get("replay_strategy", "none"),
+        "fixed_validation_set_id": fixed_validation_set.get("set_id"),
+        "frozen_test_set_id": frozen_test_set.get("set_id"),
         "dataset_fingerprint": fingerprint.hexdigest(),
         "class_names": names,
         "class_instance_counts": {name: class_instance_counts[index] for index, name in enumerate(names)},
@@ -908,6 +919,11 @@ def train_yolo_queue(arguments: Dict[str, Any], progress: ProgressCallback = Non
         "parent_model_id": parent_model_id,
         "dataset_yaml": dataset["data_yaml"],
         "dataset_id": dataset.get("dataset_id"),
+        "dataset_version": dataset.get("dataset_version"),
+        "parent_dataset_id": dataset.get("parent_dataset_id"),
+        "replay_strategy": dataset.get("replay_strategy"),
+        "fixed_validation_set_id": dataset.get("fixed_validation_set_id"),
+        "frozen_test_set_id": dataset.get("frozen_test_set_id"),
         "dataset_fingerprint": dataset["dataset_fingerprint"],
         "class_names": dataset["class_names"],
         "requested_sizes": sizes,
@@ -972,6 +988,11 @@ def train_yolo_queue(arguments: Dict[str, Any], progress: ProgressCallback = Non
             "parent_model_id": parent_model_id,
             "dataset_yaml": dataset["data_yaml"],
             "dataset_id": dataset.get("dataset_id"),
+            "dataset_version": dataset.get("dataset_version"),
+            "parent_dataset_id": dataset.get("parent_dataset_id"),
+            "replay_strategy": dataset.get("replay_strategy"),
+            "fixed_validation_set_id": dataset.get("fixed_validation_set_id"),
+            "frozen_test_set_id": dataset.get("frozen_test_set_id"),
             "dataset_fingerprint": dataset["dataset_fingerprint"],
             "class_names": dataset["class_names"],
             "dataset_image_counts": dataset["image_counts"],

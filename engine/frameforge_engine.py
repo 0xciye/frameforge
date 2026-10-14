@@ -127,6 +127,9 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("test_ratio", 0.1),
                 arguments.get("seed", 42),
                 arguments.get("segment_seconds", 30),
+                arguments.get("parent_manifest_path"),
+                arguments.get("replay_strategy", "all"),
+                arguments.get("freeze_evaluation_set", False),
             )
         elif command == "export_yolo_dataset":
             result = export_yolo_dataset(
@@ -138,6 +141,9 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("test_ratio", 0.1),
                 arguments.get("seed", 42),
                 arguments.get("segment_seconds", 30),
+                arguments.get("parent_manifest_path"),
+                arguments.get("replay_strategy", "all"),
+                arguments.get("freeze_evaluation_set", False),
             )
         elif command == "load_project":
             result = load_project(arguments["path"])

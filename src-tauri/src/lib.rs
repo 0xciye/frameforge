@@ -883,6 +883,56 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             if !segment_seconds.is_finite() || !(1.0..=3600.0).contains(&segment_seconds) {
                 return Err("Độ dài đoạn video phải từ 1 đến 3600 giây.".to_string());
             }
+            let replay_strategy = arguments
+                .get("replay_strategy")
+                .and_then(Value::as_str)
+                .unwrap_or("all");
+            if !["all", "balanced", "new"].contains(&replay_strategy) {
+                return Err("Chính sách replay dataset không hợp lệ.".to_string());
+            }
+            let freeze_evaluation_set = arguments
+                .get("freeze_evaluation_set")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if arguments
+                .get("freeze_evaluation_set")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err("Cờ đóng băng validation/test không hợp lệ.".to_string());
+            }
+            if arguments
+                .get("replay_strategy")
+                .is_some_and(|value| !value.is_string())
+            {
+                return Err("Chính sách replay dataset không hợp lệ.".to_string());
+            }
+            let parent_manifest = match arguments.get("parent_manifest_path") {
+                Some(Value::String(value)) if !value.trim().is_empty() => {
+                    let path = canonical_existing_path(value)?;
+                    if !path.is_file()
+                        || path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
+                    {
+                        return Err(
+                            "Chọn manifest.json của một phiên bản FrameForge đã xuất.".to_string()
+                        );
+                    }
+                    Some(path)
+                }
+                Some(Value::Null) | None | Some(Value::String(_)) => None,
+                Some(_) => return Err("Đường dẫn parent manifest không hợp lệ.".to_string()),
+            };
+            if parent_manifest.is_some() && freeze_evaluation_set {
+                return Err(
+                    "Parent đã có val/test cố định; không thể tạo bộ mới trong cùng lượt xuất."
+                        .to_string(),
+                );
+            }
+            if parent_manifest.is_some() && test != 0.0 {
+                return Err(
+                    "Khi dùng parent, đặt Test (%) của dữ liệu mới bằng 0 để giữ nguyên test set."
+                        .to_string(),
+                );
+            }
             if command == "export_yolo_dataset" {
                 let output = arguments
                     .get("output_dir")

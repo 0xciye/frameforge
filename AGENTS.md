@@ -12,7 +12,9 @@
 - Cài training dependencies bằng .venv/bin/python -m pip install -e "engine[train]"; không đánh dấu Windows/DirectML/RX 6600 là đã hỗ trợ khi chưa kiểm chứng trên máy Windows.
 - Gán nhãn thủ công hoạt động độc lập với inference; không tạo hoặc gợi ý kết quả AI giả. Khi chỉnh sửa annotation, yêu cầu dự án đã lưu và bảo toàn tọa độ pixel của ảnh. Project schema v4 lưu provenance AI và bảng candidate âm tính, migrate v1/v2/v3 khi ghi.
 - Dataset chỉ xuất box thủ công hợp lệ và box AI đã duyệt; loại gợi ý/candidate `needs_review` hoặc `rejected`. Ảnh có candidate âm tính chỉ được export khi người dùng xác nhận; giữ fingerprint, model ID và SHA-256 checkpoint trong provenance. Ảnh trống đang còn gợi ý AI chờ review không được export như negative dù trạng thái ảnh cũ là reviewed. Giữ cùng video/đoạn và ảnh trùng byte trong cùng split, ghi nhãn YOLO chuẩn hóa và manifest provenance vào phiên bản mới.
+- Lineage dataset phải dùng parent manifest FrameForge hợp lệ và giữ nguyên byte ảnh cùng label đã đóng băng cho val/test. Chỉ đóng băng khi mỗi split có ảnh và mọi ảnh đều đã được review; child version không được đưa nhóm thuộc fixed val/test sang train. Replay train hỗ trợ `all`, `balanced`, `new`; ghi parent/checksum, phiên bản, policy và fixed-set IDs vào manifest và metadata training.
 - Chỉ nhận video có chiều rộng ≤1920 và chiều cao ≤1080. Video lớn hơn bị từ chối, không scale; video nhỏ hơn giữ độ phân giải gốc. Giới hạn crop/output tối đa rộng 1920, cao 1080 px.
+- Không thêm tuỳ chọn nhận video 2K/4K hoặc video vượt FHD; `imgsz` training là cấu hình riêng, không thay đổi giới hạn video đầu vào.
 - App mở thẳng workspace. Không khôi phục màn chào bắt buộc kiểm tra engine; health check chạy nền và chỉ hiện trạng thái gọn trên toolbar.
 - Giữ cầu nối Tauri an toàn: allowlist command, xác thực đường dẫn/argument và gọi tiến trình trực tiếp; không chạy lệnh qua shell.
 - Giao thức engine là JSON-lines UTF-8: mỗi request và response chiếm một dòng.

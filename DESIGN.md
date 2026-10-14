@@ -20,6 +20,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
 - Chọn checkpoint nội bộ đã xác minh và đúng class schema; inference áp dụng vào ảnh đang mở hoặc toàn bộ project theo batch có giới hạn. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry. Hủy giữ các chunk đã lưu; ảnh thay đổi trong lúc chạy bị bỏ qua khi commit.
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
+- Có thể đóng băng val/test khi cả hai split đều có ảnh và mọi ảnh đã được review. Khi tạo child version, chọn parent manifest và replay policy train (`all`, `balanced`, `new`); ảnh và label val/test được giữ nguyên, còn nhóm của chúng không đi vào train. Report hiển thị ảnh mới, replay và fixed-set counts.
 
 ## Huấn luyện
 

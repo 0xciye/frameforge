@@ -26,6 +26,8 @@ type TrainingCapabilities = {
 };
 type DatasetSummary = {
   valid: boolean; data_yaml: string; dataset_root: string; dataset_id: string | null; dataset_fingerprint: string;
+  dataset_version?: number | null; parent_dataset_id?: string | null; replay_strategy?: string | null;
+  fixed_validation_set_id?: string | null; frozen_test_set_id?: string | null;
   class_names: string[]; class_instance_counts: Record<string, number>; image_counts: Record<string, number>;
   instance_counts: Record<string, number>; total_images: number; total_instances: number; warnings: string[]; errors: string[];
 };
@@ -409,7 +411,8 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
             {dataset?.class_names.length ? <div className="train-class-list">{dataset.class_names.map((name) => <span key={name}>{name}<small>{dataset.class_instance_counts[name] ?? 0}</small></span>)}</div> : null}
             {dataset?.errors.map((message) => <p className="train-warning train-error" key={message}><AlertCircle size={12} />{message}</p>)}
             {dataset?.warnings.map((message) => <p className="train-warning" key={message}><CircleHelp size={12} />{message}</p>)}
-            {dataset && <small className="train-fingerprint" title={dataset.dataset_fingerprint}>Dataset ID: {dataset.dataset_id ?? "external"} · SHA-256 {dataset.dataset_fingerprint.slice(0, 12)}…</small>}
+            {dataset && <small className="train-fingerprint" title={dataset.dataset_fingerprint}>Dataset {dataset.dataset_id ?? "external"}{dataset.dataset_version ? ` · v${dataset.dataset_version}` : ""} · SHA-256 {dataset.dataset_fingerprint.slice(0, 12)}…</small>}
+            {dataset?.parent_dataset_id && <small className="train-fingerprint">Parent {dataset.parent_dataset_id.slice(0, 8)} · replay {dataset.replay_strategy} · fixed test {dataset.frozen_test_set_id?.slice(0, 8) ?? "—"}</small>}
           </section>
 
           <section className="train-card">

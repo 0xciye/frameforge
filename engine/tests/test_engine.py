@@ -16,7 +16,7 @@ sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
 from frameforge.media import _RecentHashes, _center_crop, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
-from frameforge.dataset import export_yolo_dataset, validate_dataset
+from frameforge.dataset import _balanced_replay_groups, export_yolo_dataset, validate_dataset
 from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
 from frameforge import training
 
@@ -97,6 +97,31 @@ def create_dataset_project(tmp_path: Path, invalid_class: bool = False) -> tuple
     }
     save_project(str(project_path), project)
     return project_path, image_paths
+
+
+def create_reviewed_lineage_project(tmp_path: Path, reviewed: bool = True) -> Path:
+    project_path, _ = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    for image in project["images"]:
+        image["status"] = "reviewed" if reviewed else "ready"
+    for index, class_id in enumerate((0, 1)):
+        source_id = "source-{0}".format(chr(ord("c") + index))
+        source_path = tmp_path / (source_id + ".mp4")
+        image_path = tmp_path / "images" / source_id / "positive.png"
+        image_path.parent.mkdir(parents=True)
+        cv2.imwrite(str(image_path), np.full((48, 64, 3), 150 + index * 40, dtype=np.uint8))
+        project["sources"].append({"path": str(source_path), "kind": "video", "fps": 10.0})
+        project["images"].append({
+            "path": str(image_path), "source_path": str(source_path), "source_id": source_id,
+            "frame_index": 5, "timestamp_seconds": 0.5, "width": 64, "height": 48,
+            "status": "reviewed" if reviewed else "ready",
+            "annotations": [{
+                "id": source_id + "-box", "class_id": class_id,
+                "x_min": 8, "y_min": 5, "x_max": 32, "y_max": 36,
+            }],
+        })
+    save_project(str(project_path), project)
+    return project_path
 
 
 def test_recent_hash_index_matches_threshold_and_evicts_old_values():
@@ -1039,6 +1064,121 @@ def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_pa
     )
     assert next_version["path"] != result["path"]
     assert len(list(output_root.glob("frameforge_dataset_*"))) == 2
+
+
+def test_frozen_validation_and_test_require_reviewed_images(tmp_path: Path):
+    project_path = create_reviewed_lineage_project(tmp_path, reviewed=False)
+    report = validate_dataset(
+        str(project_path), "source", 0.5, 0.25, 0.25, 23, freeze_evaluation_set=True,
+    )
+
+    assert report["valid"] is False
+    assert any("mọi ảnh đã được người dùng review" in error for error in report["errors"])
+
+
+def test_frozen_validation_and_test_require_nonempty_group_splits(tmp_path: Path):
+    project_path, _ = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    for image in project["images"]:
+        image["status"] = "reviewed"
+    save_project(str(project_path), project)
+
+    report = validate_dataset(
+        str(project_path), "source", 0.5, 0.25, 0.25, 23, freeze_evaluation_set=True,
+    )
+
+    assert report["valid"] is False
+    assert any("validation và test sau khi chia nhóm" in error for error in report["errors"])
+
+
+def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_path: Path):
+    project_path = create_reviewed_lineage_project(tmp_path)
+    output_root = tmp_path / "lineage-exports"
+    output_root.mkdir()
+    base = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
+        freeze_evaluation_set=True,
+    )
+    base_root = Path(base["path"])
+    base_manifest = json.loads((base_root / "manifest.json").read_text(encoding="utf-8"))
+    assert base["version"] == 1
+    assert base_manifest["fixed_validation_set"]["enabled"] is True
+    assert base_manifest["frozen_test_set"]["enabled"] is True
+    assert len(base_manifest["annotation_revision"]) == 64
+    assert all(len(item["label_sha256"]) == 64 and item["group_key"] for item in base_manifest["images"])
+
+    project = load_project(str(project_path))
+    frozen_test_source = next(item["source_image"] for item in base_manifest["images"] if item["split"] == "test")
+    changed_test_image = next(item for item in project["images"] if item["path"] == frozen_test_source)
+    changed_test_image["status"] = "ready"
+    changed_test_image["annotations"] = []
+    new_source = tmp_path / "source-e.mp4"
+    new_image = tmp_path / "images" / "source-e" / "new.png"
+    new_image.parent.mkdir(parents=True)
+    cv2.imwrite(str(new_image), np.full((48, 64, 3), 235, dtype=np.uint8))
+    project["sources"].append({"path": str(new_source), "kind": "video", "fps": 10.0})
+    project["images"].append({
+        "path": str(new_image), "source_path": str(new_source), "source_id": "source-e",
+        "frame_index": 1, "timestamp_seconds": 0.1, "width": 64, "height": 48,
+        "status": "reviewed", "annotations": [{
+            "id": "source-e-box", "class_id": 0,
+            "x_min": 10, "y_min": 4, "x_max": 34, "y_max": 35,
+        }],
+    })
+    save_project(str(project_path), project)
+
+    report = validate_dataset(
+        str(project_path), "source", 0.8, 0.2, 0.0, 23,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new",
+    )
+    assert report["valid"] is True
+    assert report["new_image_count"] == 1
+    assert report["replayed_image_count"] == 0
+    assert report["fixed_validation_count"] == base["split_counts"]["val"]
+    assert report["frozen_test_count"] == base["split_counts"]["test"]
+
+    child = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.8, 0.2, 0.0, 23,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new",
+    )
+    child_manifest = json.loads((Path(child["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert child["version"] == 2
+    assert child["parent_dataset_id"] == base["dataset_id"]
+    assert child_manifest["parent_manifest_sha256"] == hashlib.sha256((base_root / "manifest.json").read_bytes()).hexdigest()
+    assert child_manifest["replay_strategy"] == "new"
+    for split in ("val", "test"):
+        before = sorted((item["sha256"], item["label_sha256"]) for item in base_manifest["images"] if item["split"] == split)
+        after = sorted((item["sha256"], item["label_sha256"]) for item in child_manifest["images"] if item["split"] == split)
+        assert after == before
+    parent_train_digests = {item["sha256"] for item in base_manifest["images"] if item["split"] == "train"}
+    child_train_digests = {item["sha256"] for item in child_manifest["images"] if item["split"] == "train"}
+    assert parent_train_digests.isdisjoint(child_train_digests)
+    assert child_train_digests == {hashlib.sha256(new_image.read_bytes()).hexdigest()}
+
+    all_replay = validate_dataset(
+        str(project_path), "source", 0.8, 0.2, 0.0, 23,
+        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="all",
+    )
+    assert all_replay["valid"] is True
+    assert all_replay["replayed_image_count"] == base["split_counts"]["train"]
+
+
+def test_balanced_replay_selects_deterministic_class_groups():
+    samples = [
+        {"group_key": "a", "annotations": [{"class_id": 0}]},
+        {"group_key": "b", "annotations": [{"class_id": 0}]},
+        {"group_key": "c", "annotations": [{"class_id": 0}]},
+        {"group_key": "d", "annotations": [{"class_id": 1}]},
+        {"group_key": "negative", "annotations": []},
+    ]
+
+    first = _balanced_replay_groups(samples, 23)
+    second = _balanced_replay_groups(samples, 23)
+
+    assert first == second
+    assert "d" in first
+    assert len(first & {"a", "b", "c"}) == 1
+    assert len(first & {"negative"}) == 1
 
 
 def test_dataset_validation_blocks_invalid_class_ids_and_corrupt_images(tmp_path: Path):

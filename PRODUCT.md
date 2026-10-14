@@ -19,6 +19,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 - Huấn luyện YOLO11n trên CPU hoặc backend GPU mà PyTorch báo khả dụng; kiểm tra dataset trước train, queue nhiều imgsz độc lập, theo dõi progress/metrics thật, dừng tại ranh giới epoch và lưu registry/checkpoint. Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký và checksum còn khớp.
 - Engine inference nhận crop images, xác minh checkpoint và class schema, rồi trả box pixel, class ID và confidence từ Ultralytics. Tab Gán nhãn chạy inference cho ảnh hiện tại hoặc cả project: nạp model một lần, xử lý batch/chunk có giới hạn, kiểm fingerprint trước khi lưu và giữ các chunk đã hoàn tất khi hủy. Box AI được lưu ở trạng thái `needs_review`; ảnh không có detection trở thành candidate negative có provenance/fingerprint và chỉ được export sau khi người dùng xác nhận ảnh trống.
 - Dataset export chỉ đưa box thủ công, gợi ý AI đã duyệt và candidate negative đã xác nhận vào YOLO labels. Gợi ý/candidate đang chờ hoặc bị loại không được export.
+- Dataset có thể đóng băng validation/test khi toàn bộ ảnh đã review. Phiên bản con xác minh manifest/checksum parent, giữ nguyên ảnh và labels của hai split cố định, chia dữ liệu mới theo nhóm và hỗ trợ replay train `all`, `balanced` hoặc `new`; manifest và training metadata ghi lineage.
 - Training preflight xử lý dataset lớn theo luồng, giữ `cache=False`, hỗ trợ hơn 20.000 ảnh và cấu hình hơn 300 epoch cho mỗi imgsz. Fixture tổng hợp 20.003 ảnh cùng hai job 301 epoch đã được kiểm tra bằng fake trainer; đây là kiểm tra cấu hình, không phải benchmark hoặc train thật ở quy mô đó. Patience = 0 tắt early stopping.
 - Lưu metadata run đã quét vào registry chỉ sau thao tác của người dùng; checkpoint ngoài giữ trạng thái chưa xác minh và không được đưa vào lựa chọn fine-tune.
 
@@ -26,7 +27,7 @@ FrameForge là ứng dụng desktop local-first giúp người dùng tạo dữ 
 
 - Xác minh an toàn/khả năng tương thích và nạp checkpoint `.pt` từ nguồn ngoài.
 - Tự khôi phục phiên làm việc sau khi mở lại ứng dụng.
-- Dataset lineage/replay và frozen test set; đánh giá cố định cùng Champion/Challenger.
+- Đánh giá model trên fixed validation/test set, quality targets và so sánh/promote Champion/Challenger.
 - Resume training sau khi tiến trình bị gián đoạn.
 - Benchmark model, experiment tracking và export ONNX/TensorRT/OpenVINO.
 - Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch; hiện chỉ xác nhận plumbing bằng fake trainer và smoke nhỏ.

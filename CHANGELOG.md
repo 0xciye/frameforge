@@ -2,6 +2,8 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Thêm dataset lineage: đóng băng val/test sau review, tạo phiên bản con xác minh parent và checksum, giữ nguyên ảnh/label evaluation, replay dữ liệu train theo `all`/`balanced`/`new`; truyền lineage vào training queue/run.
+- Giữ giới hạn video đầu vào tối đa FHD 1920×1080; nguồn lớn hơn bị từ chối ở import, preview và extraction, không có lựa chọn độ phân giải video cao hơn và không tự scale.
 - Thêm inference toàn project: nạp model một lần, chạy theo batch/chunk có giới hạn, kiểm fingerprint khi lưu và giữ phần đã hoàn tất khi hủy.
 - Thêm candidate negative kèm model/checkpoint provenance và fingerprint ảnh; chỉ export sau khi người dùng xác nhận ảnh trống. Nâng SQLite project lên schema v4, migrate từ v1/v2/v3.
 - Mở rộng training preflight cho dataset trên 20.000 ảnh và cấu hình trên 300 epoch mỗi imgsz; ghi rõ Patience = 0 để tắt early stopping. Test 20.003 ảnh/301 epoch dùng fake trainer, chưa xác nhận hiệu năng train YOLO thật.

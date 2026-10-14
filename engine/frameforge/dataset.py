@@ -63,6 +63,292 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _safe_parent_asset(root: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        raise ValueError("Parent dataset thiếu đường dẫn {0} tương đối hợp lệ.".format(label))
+    relative = Path(value)
+    if ".." in relative.parts:
+        raise ValueError("Parent dataset có đường dẫn {0} vượt khỏi thư mục phiên bản.".format(label))
+    try:
+        asset = (root / relative).resolve(strict=True)
+        asset.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise ValueError("Không đọc được {0} trong parent dataset: {1}".format(label, value)) from error
+    if not asset.is_file():
+        raise ValueError("Parent dataset thiếu tệp {0}: {1}".format(label, value))
+    return asset
+
+
+def _read_parent_dataset(manifest_value: str, class_names: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    manifest_path = Path(manifest_value).expanduser().resolve(strict=True)
+    if not manifest_path.is_file() or manifest_path.name.casefold() != "manifest.json":
+        raise ValueError("Chọn manifest.json của một phiên bản FrameForge đã xuất.")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Không đọc được manifest parent: {0}".format(error)) from error
+    if not isinstance(manifest, dict) or manifest.get("format") != "FrameForge YOLO dataset":
+        raise ValueError("Parent phải là dataset YOLO do FrameForge tạo.")
+    dataset_id = manifest.get("dataset_id")
+    version = manifest.get("version")
+    if not isinstance(dataset_id, str) or not dataset_id or isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("Manifest parent thiếu dataset ID hoặc version hợp lệ.")
+    expected_mapping = {str(index): name for index, name in enumerate(class_names)}
+    if manifest.get("class_mapping") != expected_mapping:
+        raise ValueError("Class schema của parent không khớp dự án hiện tại.")
+    parent_split = manifest.get("split")
+    if not isinstance(parent_split, dict) or parent_split.get("mode") != config["split_mode"]:
+        raise ValueError("Cách chia của parent phải khớp cách chia hiện tại.")
+    if config["split_mode"] == "segment" and not math.isclose(
+        float(parent_split.get("segment_seconds", -1)), config["segment_seconds"], abs_tol=1e-9
+    ):
+        raise ValueError("Độ dài đoạn của parent phải khớp cấu hình hiện tại.")
+    frozen_test = manifest.get("frozen_test_set")
+    fixed_validation = manifest.get("fixed_validation_set")
+    if not isinstance(frozen_test, dict) or not frozen_test.get("enabled"):
+        raise ValueError("Parent chưa có test set cố định đã review; hãy chọn phiên bản đã đóng băng val/test.")
+    if not isinstance(fixed_validation, dict) or not fixed_validation.get("enabled"):
+        raise ValueError("Parent chưa có validation set cố định.")
+
+    parent_root = manifest_path.parent.resolve(strict=True)
+    rows = manifest.get("images")
+    if not isinstance(rows, list):
+        raise ValueError("Manifest parent thiếu danh sách ảnh.")
+    by_split: Dict[str, List[Dict[str, Any]]] = {split: [] for split in SPLITS}
+    digest_splits: Dict[str, str] = {}
+    group_splits: Dict[str, str] = {}
+    valid_class_ids = set(range(len(class_names)))
+    for row in rows:
+        if not isinstance(row, dict) or row.get("split") not in SPLITS:
+            raise ValueError("Manifest parent có bản ghi ảnh hoặc split không hợp lệ.")
+        split = row["split"]
+        digest = row.get("sha256")
+        group_key = row.get("group_key")
+        if not isinstance(digest, str) or len(digest) != 64 or not isinstance(group_key, str) or not group_key:
+            raise ValueError("Parent cần fingerprint và group key cho từng ảnh.")
+        prior_split = digest_splits.setdefault(digest, split)
+        if prior_split != split:
+            raise ValueError("Parent có ảnh trùng nội dung nằm ở nhiều split.")
+        prior_group_split = group_splits.setdefault(group_key, split)
+        if prior_group_split != split:
+            raise ValueError("Parent có nhóm nguồn bị chia qua nhiều split.")
+        image_asset = _safe_parent_asset(parent_root, row.get("exported_image"), "ảnh")
+        label_asset = _safe_parent_asset(parent_root, row.get("exported_label"), "label")
+        if _sha256(image_asset) != digest:
+            raise ValueError("Ảnh parent không khớp SHA-256 manifest: {0}".format(row.get("exported_image")))
+        label_bytes = label_asset.read_bytes()
+        label_digest = row.get("label_sha256")
+        if not isinstance(label_digest, str) or hashlib.sha256(label_bytes).hexdigest() != label_digest:
+            raise ValueError("Label parent không khớp SHA-256 manifest: {0}".format(row.get("exported_label")))
+        with Image.open(image_asset) as image_file:
+            width, height = image_file.size
+            image_file.verify()
+        if width != row.get("width") or height != row.get("height"):
+            raise ValueError("Kích thước ảnh parent không khớp manifest.")
+        if split in {"val", "test"} and row.get("status") != "reviewed":
+            raise ValueError("Validation/test cố định chỉ được chứa ảnh đã được review.")
+
+        provenance = row.get("annotation_provenance", [])
+        if not isinstance(provenance, list):
+            raise ValueError("Provenance annotation của parent không hợp lệ.")
+        annotations: List[Dict[str, Any]] = []
+        try:
+            label_text = label_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Label parent không phải UTF-8.") from error
+        for index, line in enumerate(label_text.splitlines()):
+            fields = line.split()
+            if len(fields) != 5:
+                raise ValueError("Label parent không đúng định dạng YOLO.")
+            try:
+                class_id = int(fields[0])
+                x_center, y_center, box_width, box_height = (float(value) for value in fields[1:])
+            except ValueError as error:
+                raise ValueError("Label parent chứa tọa độ không hợp lệ.") from error
+            if class_id not in valid_class_ids or not all(math.isfinite(value) for value in (x_center, y_center, box_width, box_height)):
+                raise ValueError("Label parent chứa class hoặc tọa độ không hợp lệ.")
+            x_min = (x_center - box_width / 2) * width
+            y_min = (y_center - box_height / 2) * height
+            x_max = (x_center + box_width / 2) * width
+            y_max = (y_center + box_height / 2) * height
+            if not (0 <= x_min < x_max <= width and 0 <= y_min < y_max <= height):
+                raise ValueError("Label parent có box vượt ngoài ảnh.")
+            source_provenance = provenance[index] if index < len(provenance) and isinstance(provenance[index], dict) else {}
+            if source_provenance.get("class_id", class_id) != class_id:
+                raise ValueError("Class provenance parent không khớp label YOLO.")
+            annotations.append({
+                "class_id": class_id,
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+                "source": source_provenance.get("source", "manual"),
+                "review_status": source_provenance.get("review_status", "unreviewed"),
+                "confidence": source_provenance.get("confidence"),
+                "source_model_id": source_provenance.get("source_model_id"),
+                "checkpoint_sha256": source_provenance.get("checkpoint_sha256"),
+            })
+        if len(annotations) != row.get("annotation_count") or len(provenance) != len(annotations):
+            raise ValueError("Số label parent không khớp provenance manifest.")
+        parent_sample = {
+            "path": str(row.get("source_image") or image_asset),
+            "parent_asset_path": str(image_asset),
+            "parent_label_path": str(label_asset),
+            "parent_entry": dict(row),
+            "origin_dataset_id": row.get("origin_dataset_id") or dataset_id,
+            "source_path": row.get("source_path"),
+            "source_id": row.get("source_id"),
+            "timestamp_seconds": row.get("timestamp_seconds"),
+            "frame_index": row.get("frame_index"),
+            "width": width,
+            "height": height,
+            "status": row.get("status"),
+            "annotations": annotations,
+            "sha256": digest,
+            "group_key": group_key,
+            "crop_rect": row.get("crop_rect"),
+            "extraction_settings": row.get("extraction_settings"),
+            "negative_candidate_provenance": row.get("negative_candidate_provenance", []),
+            "split": split,
+        }
+        by_split[split].append(parent_sample)
+
+    def frozen_hashes(value: Dict[str, Any], split: str) -> set[str]:
+        recorded = value.get("image_sha256s")
+        actual = sorted(item["sha256"] for item in by_split[split])
+        if not isinstance(recorded, list) or sorted(recorded) != actual or not actual:
+            raise ValueError("Manifest parent không khớp danh sách ảnh của {0} cố định.".format(split))
+        return set(actual)
+
+    frozen_hashes(fixed_validation, "val")
+    frozen_hashes(frozen_test, "test")
+    if not by_split["train"] or not by_split["val"] or not by_split["test"]:
+        raise ValueError("Parent cần có ảnh train, validation và test trước khi làm lineage.")
+    return {
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256(manifest_path),
+        "manifest": manifest,
+        "dataset_id": dataset_id,
+        "version": version,
+        "by_split": by_split,
+        "digest_splits": digest_splits,
+    }
+
+
+def _balanced_replay_groups(samples: List[Dict[str, Any]], seed: int) -> set[str]:
+    class_groups: Dict[int, set[str]] = {}
+    negative_groups: set[str] = set()
+    for sample in samples:
+        classes = {annotation["class_id"] for annotation in sample["annotations"]}
+        if not classes:
+            negative_groups.add(sample["group_key"])
+        for class_id in classes:
+            class_groups.setdefault(class_id, set()).add(sample["group_key"])
+    if not class_groups:
+        return set()
+    target = min(len(groups) for groups in class_groups.values())
+    selected: set[str] = set()
+    for class_id, groups in class_groups.items():
+        ordered = sorted(groups, key=lambda key: hashlib.sha256(
+            (str(seed) + ":" + str(class_id) + ":" + key).encode("utf-8")
+        ).hexdigest())
+        selected.update(ordered[:target])
+    negative_order = sorted(negative_groups, key=lambda key: hashlib.sha256(
+        (str(seed) + ":negative:" + key).encode("utf-8")
+    ).hexdigest())
+    selected.update(negative_order[:target])
+    return selected
+
+
+def _compose_lineage_samples(
+    current_samples: List[Dict[str, Any]],
+    parent: Dict[str, Any],
+    config: Dict[str, Any],
+    replay_strategy: str,
+) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, int]]:
+    parent_splits = parent["by_split"]
+    fixed_val = parent_splits["val"]
+    frozen_test = parent_splits["test"]
+    historical = parent_splits["train"]
+    fixed_groups = {sample["group_key"] for sample in fixed_val + frozen_test}
+    historical_groups = {sample["group_key"] for sample in historical}
+    if replay_strategy == "all":
+        replay_groups = historical_groups
+    elif replay_strategy == "balanced":
+        replay_groups = _balanced_replay_groups(historical, config["seed"])
+    else:
+        replay_groups = set()
+
+    warnings: List[str] = []
+    if replay_strategy == "balanced" and not replay_groups:
+        warnings.append("Parent không có nhóm positive đủ class để chọn replay cân bằng; chỉ dùng dữ liệu mới và các split cố định.")
+    by_digest: Dict[str, List[Dict[str, Any]]] = {}
+    for sample in current_samples:
+        by_digest.setdefault(sample["sha256"], []).append(sample)
+    parent_digest_split = parent["digest_splits"]
+    used_current_paths: set[str] = set()
+    result: List[Dict[str, Any]] = []
+
+    for split, fixed_samples in (("val", fixed_val), ("test", frozen_test)):
+        for sample in fixed_samples:
+            result.append({**sample, "split": split})
+
+    replayed_image_count = 0
+    for old_sample in historical:
+        if old_sample["group_key"] not in replay_groups:
+            continue
+        current_matches = by_digest.get(old_sample["sha256"], [])
+        replacement = next((item for item in current_matches if item["path"] not in used_current_paths), None)
+        if replacement is not None:
+            used_current_paths.add(replacement["path"])
+            result.append({**replacement, "split": "train", "origin_dataset_id": old_sample["origin_dataset_id"]})
+        else:
+            result.append({**old_sample, "split": "train"})
+        replayed_image_count += 1
+
+    new_samples: List[Dict[str, Any]] = []
+    for sample in current_samples:
+        if sample["path"] in used_current_paths:
+            continue
+        if sample["group_key"] in fixed_groups:
+            continue
+        old_split = parent_digest_split.get(sample["sha256"])
+        if old_split is not None:
+            if old_split == "train" and sample["group_key"] in replay_groups:
+                result.append({**sample, "split": "train"})
+                replayed_image_count += 1
+            continue
+        if sample["group_key"] in historical_groups:
+            if sample["group_key"] in replay_groups:
+                result.append({**sample, "split": "train"})
+                replayed_image_count += 1
+            continue
+        new_samples.append(sample)
+
+    new_split_config = {
+        **config,
+        "ratios": {
+            "train": config["ratios"]["train"],
+            "val": config["ratios"]["val"],
+            "test": 0.0,
+        },
+    }
+    assignments, split_warnings = _split_groups(new_samples, new_split_config)
+    warnings.extend(split_warnings)
+    new_image_count = 0
+    for sample in new_samples:
+        split = assignments.get(sample["path"], "train")
+        result.append({**sample, "split": split, "origin_dataset_id": None})
+        new_image_count += 1
+
+    return result, warnings, {
+        "new_image_count": new_image_count,
+        "replayed_image_count": replayed_image_count,
+        "fixed_validation_count": len(fixed_val),
+        "frozen_test_count": len(frozen_test),
+    }
+
+
 def _source_key(image: Dict[str, Any]) -> Optional[str]:
     source_id = image.get("source_id")
     if isinstance(source_id, str) and source_id.strip():
@@ -192,6 +478,9 @@ def _analyze(
     test_ratio: float,
     seed: int,
     segment_seconds: float,
+    parent_manifest_path: Optional[str] = None,
+    replay_strategy: str = "all",
+    freeze_evaluation_set: bool = False,
 ) -> Dict[str, Any]:
     config = _config(split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds)
     project = load_project(path_value)
@@ -199,6 +488,12 @@ def _analyze(
     images = project.get("images", [])
     errors: List[str] = []
     warnings: List[str] = []
+    if replay_strategy not in {"all", "balanced", "new"}:
+        errors.append("Replay phải là toàn bộ ảnh train cũ, tập cũ cân bằng hoặc chỉ ảnh mới.")
+        replay_strategy = "all"
+    if not isinstance(freeze_evaluation_set, bool):
+        errors.append("Cờ đóng băng validation/test không hợp lệ.")
+        freeze_evaluation_set = False
     if not isinstance(class_names, list) or not class_names or any(not isinstance(name, str) or not name.strip() for name in class_names):
         errors.append("Dự án thiếu danh sách class hợp lệ.")
         class_names = []
@@ -460,23 +755,60 @@ def _analyze(
             "Phát hiện {0} ảnh trùng nội dung byte; các bản trùng được giữ cùng split để tránh rò rỉ.".format(exact_duplicate_count)
         )
 
-    split_assignments, split_warnings = _split_groups(samples, config)
-    warnings.extend(split_warnings)
+    parent = None
+    parent_value = parent_manifest_path.strip() if isinstance(parent_manifest_path, str) else ""
+    if parent_manifest_path is not None and not isinstance(parent_manifest_path, str):
+        errors.append("Đường dẫn parent manifest không hợp lệ.")
+    if parent_value:
+        try:
+            parent = _read_parent_dataset(parent_value, class_names, config)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            errors.append(str(error))
+
+    lineage_counts = {
+        "new_image_count": 0,
+        "replayed_image_count": 0,
+        "fixed_validation_count": 0,
+        "frozen_test_count": 0,
+    }
+    if parent is not None:
+        if config["ratios"]["test"] != 0:
+            errors.append("Khi dùng parent, đặt tỷ lệ test của dữ liệu mới bằng 0 để giữ nguyên test set đã đóng băng.")
+        if freeze_evaluation_set:
+            errors.append("Bộ val/test của parent đã đóng băng; không thể tạo bộ mới trong cùng lượt xuất.")
+        samples, lineage_warnings, lineage_counts = _compose_lineage_samples(samples, parent, config, replay_strategy)
+        warnings.extend(lineage_warnings)
+    else:
+        split_assignments, split_warnings = _split_groups(samples, config)
+        warnings.extend(split_warnings)
+        for sample in samples:
+            sample["split"] = split_assignments.get(sample["path"], "train")
+        if freeze_evaluation_set:
+            if not samples or not config["ratios"]["val"] or not config["ratios"]["test"]:
+                errors.append("Đóng băng cần có ảnh trong cả validation và test.")
+            if (
+                not any(sample["split"] == "val" for sample in samples)
+                or not any(sample["split"] == "test" for sample in samples)
+            ):
+                errors.append("Đóng băng cần ít nhất một ảnh trong cả validation và test sau khi chia nhóm.")
+            unreviewed = [sample for sample in samples if sample["split"] in {"val", "test"} and sample["status"] != "reviewed"]
+            if unreviewed:
+                errors.append("Chỉ đóng băng được val/test khi mọi ảnh đã được người dùng review ({0} ảnh còn lại).".format(len(unreviewed)))
+            lineage_counts["fixed_validation_count"] = sum(sample["split"] == "val" for sample in samples)
+            lineage_counts["frozen_test_count"] = sum(sample["split"] == "test" for sample in samples)
+
     split_counts = {name: 0 for name in SPLITS}
     split_group_keys: Dict[str, set[str]] = {name: set() for name in SPLITS}
-    group_to_split: Dict[str, str] = {}
     for sample in samples:
-        split = split_assignments.get(sample["path"], "train")
-        sample["split"] = split
+        split = sample["split"]
         split_counts[split] += 1
         split_group_keys[split].add(sample["group_key"])
-        group_to_split[sample["group_key"]] = split
     if split_counts["train"] == 0 and samples:
         errors.append("Split train không có ảnh; hãy đổi seed hoặc cấu hình split.")
-    for split in SPLITS:
+    for split in (SPLITS if parent is None else ("train", "val")):
         if config["ratios"][split] > 0 and split_counts[split] == 0:
             warnings.append("Split {0} đang trống dù tỷ lệ được đặt lớn hơn 0%.".format(split))
-    if samples:
+    if samples and parent is None:
         for split in SPLITS:
             actual_ratio = split_counts[split] / len(samples)
             if abs(actual_ratio - config["ratios"][split]) > 0.15:
@@ -486,6 +818,21 @@ def _analyze(
                     )
                 )
 
+    class_counts = [0 for _ in class_names]
+    positive_count = 0
+    reviewed_negative_count = 0
+    annotation_count = 0
+    exact_hash_counts: Dict[str, int] = {}
+    for sample in samples:
+        exact_hash_counts[sample["sha256"]] = exact_hash_counts.get(sample["sha256"], 0) + 1
+        if sample["annotations"]:
+            positive_count += 1
+            annotation_count += len(sample["annotations"])
+            for annotation in sample["annotations"]:
+                class_counts[annotation["class_id"]] += 1
+        elif sample["status"] == "reviewed":
+            reviewed_negative_count += 1
+    exact_duplicate_count = sum(count - 1 for count in exact_hash_counts.values() if count > 1)
     class_distribution = [
         {"class_id": class_id, "name": name, "box_count": class_counts[class_id]}
         for class_id, name in enumerate(class_names)
@@ -497,14 +844,30 @@ def _analyze(
         ))
     elif len(positive_class_counts) > 1 and max(positive_class_counts) > 10 * min(positive_class_counts):
         warnings.append("Phân bố class lệch hơn 10:1; hãy kiểm tra class hiếm trước khi huấn luyện.")
-    if not samples and images:
+    if not samples and images and parent is None:
         errors.append("Không có ảnh hợp lệ để export sau khi loại negative chưa review.")
+    if not samples:
+        errors.append("Dataset không có ảnh sau khi áp dụng lineage/replay.")
+
+    lineage = {
+        "parent_dataset_id": parent["dataset_id"] if parent else None,
+        "parent_version": parent["version"] if parent else None,
+        "parent_manifest_path": str(parent["manifest_path"]) if parent else None,
+        "parent_manifest_sha256": parent["manifest_sha256"] if parent else None,
+        "replay_strategy": replay_strategy if parent else "none",
+        "freeze_evaluation_set": bool(freeze_evaluation_set and parent is None),
+        **lineage_counts,
+    }
 
     summary = {
         "valid": not errors,
         "project_name": project.get("name", "Dự án FrameForge"),
         "image_count": len(images),
         "included_image_count": len(samples),
+        "new_image_count": lineage_counts["new_image_count"] if parent else len(samples),
+        "replayed_image_count": lineage_counts["replayed_image_count"],
+        "fixed_validation_count": lineage_counts["fixed_validation_count"],
+        "frozen_test_count": lineage_counts["frozen_test_count"],
         "positive_image_count": positive_count,
         "reviewed_negative_count": reviewed_negative_count,
         "candidate_negative_excluded_count": candidate_negative_count,
@@ -523,7 +886,7 @@ def _analyze(
         "errors": errors,
         "warnings": warnings,
     }
-    return {"summary": summary, "samples": samples, "project": project, "config": config}
+    return {"summary": summary, "samples": samples, "project": project, "config": config, "lineage": lineage, "parent": parent}
 
 
 def validate_dataset(
@@ -534,9 +897,15 @@ def validate_dataset(
     test_ratio: float = 0.1,
     seed: int = 42,
     segment_seconds: float = 30.0,
+    parent_manifest_path: Optional[str] = None,
+    replay_strategy: str = "all",
+    freeze_evaluation_set: bool = False,
 ) -> Dict[str, Any]:
     """Validate a saved project and return a stable, source-grouped split preview."""
-    return _analyze(path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds)["summary"]
+    return _analyze(
+        path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds,
+        parent_manifest_path, replay_strategy, freeze_evaluation_set,
+    )["summary"]
 
 
 def _safe_filename(path: Path, digest: str, reserved: set[str]) -> str:
@@ -554,6 +923,21 @@ def _safe_filename(path: Path, digest: str, reserved: set[str]) -> str:
     return name
 
 
+def _project_annotation_revision(project: Dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(json.dumps(project.get("class_names", []), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    for image in sorted(project.get("images", []), key=lambda item: str(item.get("path", ""))):
+        value = {
+            "path": image.get("path"),
+            "status": image.get("status"),
+            "annotations": image.get("annotations", []),
+            "negative_candidates": image.get("negative_candidates", []),
+        }
+        digest.update(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def export_yolo_dataset(
     path_value: str,
     output_dir: str,
@@ -563,9 +947,15 @@ def export_yolo_dataset(
     test_ratio: float = 0.1,
     seed: int = 42,
     segment_seconds: float = 30.0,
+    parent_manifest_path: Optional[str] = None,
+    replay_strategy: str = "all",
+    freeze_evaluation_set: bool = False,
 ) -> Dict[str, Any]:
     """Create a new immutable YOLO dataset version without modifying source images."""
-    analysis = _analyze(path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds)
+    analysis = _analyze(
+        path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds,
+        parent_manifest_path, replay_strategy, freeze_evaluation_set,
+    )
     summary = analysis["summary"]
     if not summary["valid"]:
         raise ValueError("Dataset chưa hợp lệ:\n- " + "\n- ".join(summary["errors"]))
@@ -576,7 +966,10 @@ def export_yolo_dataset(
     project = analysis["project"]
     samples = analysis["samples"]
     config = analysis["config"]
+    lineage = analysis["lineage"]
+    parent = analysis["parent"]
     dataset_id = str(uuid.uuid4())
+    version = parent["version"] + 1 if parent else 1
     created_at = datetime.now(timezone.utc).isoformat()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dataset_name = "frameforge_dataset_{0}_{1}".format(stamp, dataset_id[:8])
@@ -592,7 +985,7 @@ def export_yolo_dataset(
             (temporary_root / "labels" / split).mkdir(parents=True)
 
         for sample in samples:
-            source = Path(sample["path"])
+            source = Path(sample.get("parent_asset_path") or sample["path"])
             split = sample["split"]
             filename = _safe_filename(source, sample["sha256"], reserved_names)
             image_relative = Path("images") / split / filename
@@ -601,6 +994,21 @@ def export_yolo_dataset(
             shutil.copy2(source, image_destination)
             if _sha256(image_destination) != sample["sha256"]:
                 raise ValueError("Ảnh nguồn thay đổi trong lúc export: {0}".format(source))
+
+            parent_entry = sample.get("parent_entry")
+            if isinstance(parent_entry, dict):
+                parent_label = Path(sample["parent_label_path"])
+                label_bytes = parent_label.read_bytes()
+                if hashlib.sha256(label_bytes).hexdigest() != parent_entry.get("label_sha256"):
+                    raise ValueError("Label parent thay đổi trong lúc export: {0}".format(parent_label))
+                (temporary_root / label_relative).write_bytes(label_bytes)
+                manifest_images.append({
+                    **parent_entry,
+                    "exported_image": image_relative.as_posix(),
+                    "exported_label": label_relative.as_posix(),
+                    "split": split,
+                })
+                continue
 
             label_lines = []
             for annotation in sample["annotations"]:
@@ -615,12 +1023,14 @@ def export_yolo_dataset(
                 label_lines.append("{0} {1:.8f} {2:.8f} {3:.8f} {4:.8f}".format(
                     annotation["class_id"], x_center, y_center, box_width, box_height
                 ))
-            (temporary_root / label_relative).write_text("\n".join(label_lines) + ("\n" if label_lines else ""), encoding="utf-8")
+            label_text = "\n".join(label_lines) + ("\n" if label_lines else "")
+            (temporary_root / label_relative).write_text(label_text, encoding="utf-8")
             manifest_images.append({
                 "source_image": sample["path"],
                 "exported_image": image_relative.as_posix(),
                 "exported_label": label_relative.as_posix(),
                 "sha256": sample["sha256"],
+                "label_sha256": hashlib.sha256(label_text.encode("utf-8")).hexdigest(),
                 "width": sample["width"],
                 "height": sample["height"],
                 "source_path": sample["source_path"],
@@ -631,9 +1041,12 @@ def export_yolo_dataset(
                 "extraction_settings": sample["extraction_settings"],
                 "status": sample["status"],
                 "split": split,
+                "group_key": sample["group_key"],
+                "origin_dataset_id": sample.get("origin_dataset_id") or dataset_id,
                 "annotation_count": len(sample["annotations"]),
                 "annotation_provenance": [
                     {
+                        "class_id": annotation["class_id"],
                         "source": annotation["source"],
                         "review_status": annotation["review_status"],
                         "confidence": annotation["confidence"],
@@ -656,18 +1069,49 @@ def export_yolo_dataset(
         (temporary_root / "data.yaml").write_text(
             yaml.safe_dump(dataset_yaml, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
+        if parent is not None:
+            fixed_validation_set = parent["manifest"]["fixed_validation_set"]
+            frozen_test_set = parent["manifest"]["frozen_test_set"]
+        elif freeze_evaluation_set:
+            fixed_validation_set = {
+                "enabled": True,
+                "set_id": dataset_id + ":validation",
+                "dataset_id": dataset_id,
+                "image_sha256s": sorted(sample["sha256"] for sample in samples if sample["split"] == "val"),
+                "created_at": created_at,
+            }
+            frozen_test_set = {
+                "enabled": True,
+                "set_id": dataset_id + ":test",
+                "dataset_id": dataset_id,
+                "image_sha256s": sorted(sample["sha256"] for sample in samples if sample["split"] == "test"),
+                "created_at": created_at,
+            }
+        else:
+            fixed_validation_set = {"enabled": False, "image_sha256s": []}
+            frozen_test_set = {"enabled": False, "image_sha256s": []}
         manifest = {
             "format": "FrameForge YOLO dataset",
             "dataset_id": dataset_id,
-            "version": 1,
+            "version": version,
+            "parent_manifest_path": lineage["parent_manifest_path"],
+            "parent_dataset_id": lineage["parent_dataset_id"],
+            "parent_version": lineage["parent_version"],
+            "parent_manifest_sha256": lineage["parent_manifest_sha256"],
+            "replay_strategy": lineage["replay_strategy"],
+            "lineage": lineage,
+            "annotation_revision": _project_annotation_revision(project),
             "created_at": created_at,
             "project_id": project.get("id"),
             "project_name": project.get("name"),
             "class_mapping": names,
+            "fixed_validation_set": fixed_validation_set,
+            "frozen_test_set": frozen_test_set,
             "source_files": sorted({sample["source_path"] for sample in samples if sample["source_path"]}),
             "split": {
                 "algorithm": "stable-seeded-group-greedy-v1",
                 "mode": config["split_mode"],
+                "assignment_scope": "new_project_images" if parent else "all_project_images",
                 "ratios": config["ratios"],
                 "seed": config["seed"],
                 "segment_seconds": config["segment_seconds"],
@@ -677,7 +1121,8 @@ def export_yolo_dataset(
             "summary": {
                 key: summary[key]
                 for key in (
-                    "image_count", "included_image_count", "positive_image_count",
+                    "image_count", "included_image_count", "new_image_count", "replayed_image_count",
+                    "fixed_validation_count", "frozen_test_count", "positive_image_count",
                     "reviewed_negative_count", "candidate_negative_excluded_count",
                     "annotation_count", "pending_suggestion_count", "class_distribution", "exact_duplicate_count",
                 )
@@ -695,10 +1140,16 @@ def export_yolo_dataset(
 
     return {
         "dataset_id": dataset_id,
-        "version": 1,
+        "version": version,
+        "parent_dataset_id": lineage["parent_dataset_id"],
+        "replay_strategy": lineage["replay_strategy"],
         "path": str(final_root),
         "data_yaml": str(final_root / "data.yaml"),
         "image_count": summary["included_image_count"],
+        "new_image_count": summary["new_image_count"],
+        "replayed_image_count": summary["replayed_image_count"],
+        "fixed_validation_count": summary["fixed_validation_count"],
+        "frozen_test_count": summary["frozen_test_count"],
         "split_counts": summary["split_counts"],
         "warnings": summary["warnings"],
     }
