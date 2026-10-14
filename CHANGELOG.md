@@ -7,7 +7,7 @@
 - Mở rộng GitHub Actions sang Ubuntu/macOS/Windows, thêm Tauri `cargo check` và build macOS app/Windows MSI trên runner tương ứng.
 - Ghi label YOLO bằng byte UTF-8 ổn định để SHA-256 manifest khớp trên Windows; đọc/ghi ảnh qua I/O Unicode-aware để hỗ trợ tên file Unicode.
 - Tạo được macOS `FrameForge.app` 4,50 MiB; engine trong bundle trả health `status: ok` với Python `.venv` hiện có. Engine tests local 110/110, Rust unit test 1/1, frontend build, Rust compile và bundle health thành công.
-- CI run đầu: Ubuntu/macOS thành công; Windows có 5/110 engine test lỗi (permission Unix trong test, ảnh Unicode và checksum label do newline). Đã sửa cục bộ; chờ workflow mới xác nhận và MSI Windows chưa được cài trên máy Windows.
+- CI run `38564201938`: Ubuntu/macOS/Windows đều thành công; Windows runner chạy engine tests, Rust checks và build MSI. MSI chưa được cài/click-through trên máy Windows thật.
 - Chưa phát hành v1.0. Runtime/dependencies Python chưa được bundle; ký/notarize chưa cấu hình. Xem các cổng trong `DEVELOPMENT.md`.
 
 ## Chưa phát hành — Khởi tạo train và kế thừa imgsz

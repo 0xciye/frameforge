@@ -31,4 +31,4 @@
 - Trạng thái production release phải nêu rõ Python runtime/dependencies, ký/notarize macOS, ký Windows, kiểm chứng Windows và test với dữ liệu/model thật. Không gắn nhãn 1.0.0 hoặc tuyên bố production-ready khi một trong các cổng phát hành này còn mở.
 - Trước khi commit/push, kiểm tra `git status`, nhánh và remote; không đưa cache, media, model weights hoặc credentials vào Git. Chỉ ghi đã publish khi lệnh push thành công.
 - Sau mỗi lượt hoàn thành, cập nhật `README.md`, `AGENTS.md` và `DEVELOPMENT.md`; đồng bộ `PRODUCT.md`, `DESIGN.md` và `CHANGELOG.md` khi có thay đổi liên quan. Dùng `AGENTS.md` làm hướng dẫn agent chuẩn, không tạo file hướng dẫn hoặc task ledger trùng lặp.
-- Ghi đúng trạng thái Windows CI/build trong tài liệu; không khẳng định hỗ trợ trên máy người dùng trước khi xác nhận cài/chạy thực tế. DirectML và RX 6600 còn chờ kiểm chứng trên phần cứng Windows.
+- Tách riêng trạng thái Windows CI/build khỏi cài/chạy trên máy người dùng; CI pass chỉ xác nhận runner và artifact. Không tuyên bố tương thích thực tế trước khi cài/click-through; DirectML và RX 6600 cần kiểm chứng riêng trên phần cứng Windows.
