@@ -11,6 +11,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import sqlite3
 import sys
 import time
@@ -65,6 +66,25 @@ def _registry_connection() -> sqlite3.Connection:
             image_size INTEGER NOT NULL,
             checkpoint_path TEXT,
             checkpoint_sha256 TEXT,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_evaluations (
+            evaluation_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_targets (
+            target_id TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL,
             record_json TEXT NOT NULL
         )
         """
@@ -562,6 +582,516 @@ def inspect_training_dataset(data_yaml: str, progress: ProgressCallback = None) 
         "warnings": list(dict.fromkeys(warnings)),
         "errors": list(dict.fromkeys(errors))[:200],
     }
+
+
+def _safe_evaluation_asset(root: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value or Path(value).is_absolute() or ".." in Path(value).parts:
+        raise ValueError("Manifest fixed set thiếu đường dẫn {0} tương đối hợp lệ.".format(label))
+    try:
+        asset = (root / value).resolve(strict=True)
+        asset.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise ValueError("Không đọc được {0} trong fixed set: {1}".format(label, value)) from error
+    if not asset.is_file():
+        raise ValueError("Fixed set thiếu tệp {0}: {1}".format(label, value))
+    return asset
+
+
+def _inspect_fixed_evaluation_set(
+    data_yaml: str,
+    split: str,
+    progress: ProgressCallback = None,
+    cancel_file: Optional[Path] = None,
+) -> Dict[str, Any]:
+    if split not in {"val", "test"}:
+        raise ValueError("Chỉ đánh giá trên split validation hoặc test cố định.")
+    data_file = Path(data_yaml).expanduser().resolve(strict=True)
+    if not data_file.is_file() or data_file.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("Chọn data.yaml của dataset FrameForge đã export.")
+    try:
+        config = yaml.safe_load(data_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise ValueError("Không đọc được data.yaml: {0}".format(error)) from error
+    if not isinstance(config, dict):
+        raise ValueError("data.yaml phải là một object YAML.")
+    names = _class_names(config.get("names"))
+    root = _resolve_dataset_root(data_file, config).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("Thư mục dataset không còn tồn tại.")
+    manifest_path = data_file.parent / "manifest.json"
+    try:
+        manifest_path = manifest_path.resolve(strict=True)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Fixed evaluation yêu cầu manifest.json FrameForge hợp lệ: {0}".format(error)) from error
+    if not isinstance(manifest, dict) or manifest.get("format") != "FrameForge YOLO dataset":
+        raise ValueError("Fixed evaluation chỉ nhận manifest FrameForge YOLO.")
+    if manifest_path.parent != root:
+        raise ValueError("data.yaml và manifest phải trỏ cùng thư mục dataset FrameForge.")
+    dataset_id = manifest.get("dataset_id")
+    version = manifest.get("version")
+    if not isinstance(dataset_id, str) or not dataset_id or isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("Manifest thiếu dataset ID hoặc version hợp lệ.")
+    expected_mapping = {str(index): name for index, name in enumerate(names)}
+    if manifest.get("class_mapping") != expected_mapping:
+        raise ValueError("Class schema trong data.yaml không khớp manifest.")
+    set_key = "fixed_validation_set" if split == "val" else "frozen_test_set"
+    fixed_set = manifest.get(set_key)
+    if not isinstance(fixed_set, dict) or fixed_set.get("enabled") is not True:
+        raise ValueError("Dataset chưa có {0} cố định đã review.".format("validation" if split == "val" else "test"))
+    set_id = fixed_set.get("set_id")
+    recorded_hashes = fixed_set.get("image_sha256s")
+    if not isinstance(set_id, str) or not set_id or not isinstance(recorded_hashes, list) or not recorded_hashes:
+        raise ValueError("Manifest fixed set thiếu ID hoặc danh sách ảnh.")
+    if any(not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value.casefold()) for value in recorded_hashes):
+        raise ValueError("Danh sách fingerprint của fixed set không hợp lệ.")
+
+    errors: List[str] = []
+    split_images: Dict[str, List[Path]] = {}
+    for split_name in ("train", "val", "test"):
+        sources = _split_sources(config.get(split_name), split_name)
+        images = _resolve_split_images(root, sources, split_name, errors)
+        if not images:
+            errors.append("Split {0} không có ảnh.".format(split_name))
+        for image in images:
+            try:
+                image.relative_to(root)
+            except ValueError:
+                errors.append("Ảnh split {0} nằm ngoài dataset FrameForge.".format(split_name))
+        split_images[split_name] = images
+    if errors:
+        raise ValueError("Dataset fixed evaluation không hợp lệ:\n- " + "\n- ".join(list(dict.fromkeys(errors))[:20]))
+
+    rows = manifest.get("images")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Manifest không có danh sách ảnh để xác minh.")
+    rows_by_split: Dict[str, List[Dict[str, Any]]] = {name: [] for name in ("train", "val", "test")}
+    paths_by_split: Dict[str, set[Path]] = {name: set() for name in rows_by_split}
+    digest_splits: Dict[str, str] = {}
+    group_splits: Dict[str, str] = {}
+    all_manifest_paths: set[Path] = set()
+    integrity_errors: List[str] = []
+    for index, row in enumerate(rows, start=1):
+        if cancel_file and cancel_file.exists():
+            raise RuntimeError("Đã hủy đánh giá theo yêu cầu.")
+        if not isinstance(row, dict) or row.get("split") not in rows_by_split:
+            raise ValueError("Manifest có split hoặc bản ghi ảnh không hợp lệ.")
+        row_split = row["split"]
+        image_path = _safe_evaluation_asset(root, row.get("exported_image"), "ảnh")
+        label_path = _safe_evaluation_asset(root, row.get("exported_label"), "label")
+        if image_path in all_manifest_paths:
+            raise ValueError("Manifest có đường dẫn ảnh trùng lặp.")
+        all_manifest_paths.add(image_path)
+        paths_by_split[row_split].add(image_path)
+        digest = row.get("sha256")
+        label_digest = row.get("label_sha256")
+        group_key = row.get("group_key")
+        if (
+            not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest.casefold())
+            or not isinstance(label_digest, str) or len(label_digest) != 64
+            or any(char not in "0123456789abcdef" for char in label_digest.casefold())
+        ):
+            raise ValueError("Manifest fixed set cần SHA-256 cho ảnh và label.")
+        if not isinstance(group_key, str) or not group_key:
+            raise ValueError("Manifest fixed set thiếu group key để kiểm tra rò rỉ.")
+        prior_split = digest_splits.setdefault(digest, row_split)
+        if prior_split != row_split:
+            raise ValueError("Ảnh trùng fingerprint bị rò rỉ qua các split.")
+        prior_group = group_splits.setdefault(group_key, row_split)
+        if prior_group != row_split:
+            raise ValueError("Nhóm nguồn bị rò rỉ qua train và evaluation.")
+        if _sha256_file(image_path) != digest:
+            integrity_errors.append("Ảnh split {0} khác SHA-256 manifest: {1}".format(row_split, image_path))
+        rows_by_split[row_split].append({**row, "_image_path": image_path, "_label_path": label_path})
+        if progress and (index == len(rows) or index % 50 == 0):
+            progress({"stage": "verifying_fixed_set", "checked_images": index, "total_images": len(rows)})
+    if integrity_errors:
+        raise ValueError("Dataset FrameForge không còn khớp manifest:\n- " + "\n- ".join(integrity_errors[:20]))
+    for split_name in rows_by_split:
+        if paths_by_split[split_name] != set(split_images[split_name]):
+            raise ValueError("Danh sách ảnh split {0} không khớp manifest FrameForge.".format(split_name))
+
+    evaluation_rows = rows_by_split[split]
+    image_hashes = [row["sha256"] for row in evaluation_rows]
+    if not image_hashes or len(image_hashes) != len(set(image_hashes)) or sorted(recorded_hashes) != sorted(image_hashes):
+        raise ValueError("Danh sách ảnh trong {0} cố định không khớp manifest.".format(split))
+    errors = []
+    class_instance_counts = {name: 0 for name in names}
+    instance_count = 0
+    evaluation_fingerprint = hashlib.sha256()
+    for row in evaluation_rows:
+        image_path = row["_image_path"]
+        label_path = row["_label_path"]
+        if row.get("status") != "reviewed":
+            errors.append("Ảnh trong fixed set chưa được review: {0}".format(row.get("exported_image")))
+        if _label_path(image_path).resolve() != label_path:
+            errors.append("Đường dẫn label không khớp quy ước YOLO: {0}".format(row.get("exported_label")))
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            errors.append("Ảnh fixed set không giải mã được: {0}".format(image_path))
+        elif image.shape[1] != row.get("width") or image.shape[0] != row.get("height"):
+            errors.append("Kích thước ảnh fixed set không khớp manifest: {0}".format(image_path))
+        if _sha256_file(image_path) != row["sha256"]:
+            errors.append("Ảnh fixed set khác SHA-256 manifest: {0}".format(image_path))
+        label_bytes = label_path.read_bytes()
+        if hashlib.sha256(label_bytes).hexdigest() != row["label_sha256"]:
+            errors.append("Label fixed set khác SHA-256 manifest: {0}".format(label_path))
+        label_errors: List[str] = []
+        instance_count += _validate_label_file(label_path, len(names), split, label_errors)
+        errors.extend(label_errors)
+        for line in label_bytes.decode("utf-8").splitlines():
+            fields = line.split()
+            if len(fields) == 5:
+                try:
+                    class_id = int(fields[0])
+                    class_instance_counts[names[class_id]] += 1
+                except (ValueError, IndexError):
+                    pass
+        evaluation_fingerprint.update(row["sha256"].encode("ascii"))
+        evaluation_fingerprint.update(row["label_sha256"].encode("ascii"))
+    if errors:
+        raise ValueError("Fixed evaluation set không còn hợp lệ:\n- " + "\n- ".join(list(dict.fromkeys(errors))[:20]))
+    warnings = []
+    if len(evaluation_rows) < 20:
+        warnings.append("Fixed {0} chỉ có {1} ảnh; kết quả có thể chưa ổn định.".format(split, len(evaluation_rows)))
+    for class_name, count in class_instance_counts.items():
+        if count == 0:
+            warnings.append("Class '{0}' không có ground-truth trong fixed {1}; AP/Recall của class không thể đo.".format(class_name, split))
+    dataset_fingerprint = hashlib.sha256(data_file.read_bytes() + manifest_path.read_bytes()).hexdigest()
+    return {
+        "data_yaml": str(data_file),
+        "dataset_root": str(root),
+        "dataset_id": dataset_id,
+        "dataset_version": version,
+        "dataset_fingerprint": dataset_fingerprint,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "split": split,
+        "fixed_set_id": set_id,
+        "class_names": names,
+        "image_count": len(evaluation_rows),
+        "instance_count": instance_count,
+        "class_instance_counts": class_instance_counts,
+        "evaluation_fingerprint": evaluation_fingerprint.hexdigest(),
+        "warnings": warnings,
+    }
+
+
+_QUALITY_TARGET_KEYS = ("precision", "recall", "f1", "map50", "map50_95")
+_TARGET_DIRECTIONS = {
+    "precision": "min", "recall": "min", "f1": "min", "map50": "min", "map50_95": "min",
+    "avg_latency_ms": "max", "p50_latency_ms": "max", "p95_latency_ms": "max", "p99_latency_ms": "max",
+    "fps": "min", "throughput": "min", "max_model_size_mb": "max", "max_memory_mb": "max",
+}
+
+
+def _normalize_target_values(value: Any, allowed: Iterable[str]) -> Dict[str, Optional[float]]:
+    if not isinstance(value, dict) or any(key not in set(allowed) for key in value):
+        raise ValueError("Chỉ số mục tiêu không hợp lệ.")
+    result: Dict[str, Optional[float]] = {}
+    for key in allowed:
+        target = value.get(key)
+        if target is None or target == "":
+            continue
+        if isinstance(target, bool) or not isinstance(target, (int, float)) or not math.isfinite(target):
+            raise ValueError("Mục tiêu {0} phải là số hữu hạn hoặc để trống.".format(key))
+        number = float(target)
+        if key in _QUALITY_TARGET_KEYS and not 0 <= number <= 1:
+            raise ValueError("Mục tiêu {0} phải nằm trong khoảng 0–1.".format(key))
+        if key in _TARGET_DIRECTIONS and key not in _QUALITY_TARGET_KEYS and number <= 0:
+            raise ValueError("Mục tiêu {0} phải lớn hơn 0.".format(key))
+        result[key] = number
+    return result
+
+
+def get_evaluation_targets() -> Dict[str, Any]:
+    connection = _registry_connection()
+    try:
+        row = connection.execute("SELECT record_json FROM evaluation_targets WHERE target_id='default'").fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return {"targets": {}, "per_class": {}}
+    try:
+        record = json.loads(row["record_json"])
+    except (json.JSONDecodeError, TypeError):
+        return {"targets": {}, "per_class": {}}
+    return record if isinstance(record, dict) else {"targets": {}, "per_class": {}}
+
+
+def save_evaluation_targets(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    data_file = Path(str(arguments.get("data_yaml", ""))).expanduser().resolve(strict=True)
+    config = yaml.safe_load(data_file.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("Chọn data.yaml hợp lệ để lưu chỉ số mục tiêu.")
+    names = _class_names(config.get("names"))
+    overall = _normalize_target_values(arguments.get("targets", {}), _TARGET_DIRECTIONS)
+    raw_per_class = arguments.get("per_class", {})
+    if not isinstance(raw_per_class, dict) or any(name not in names for name in raw_per_class):
+        raise ValueError("Mục tiêu theo class phải dùng tên class trong data.yaml.")
+    per_class: Dict[str, Dict[str, Optional[float]]] = {}
+    for name, values in raw_per_class.items():
+        normalized = _normalize_target_values(values, _QUALITY_TARGET_KEYS)
+        if normalized:
+            per_class[name] = normalized
+    record = {"targets": overall, "per_class": per_class, "class_names": names, "updated_at": _now()}
+    connection = _registry_connection()
+    try:
+        connection.execute(
+            "INSERT INTO evaluation_targets(target_id, updated_at, record_json) VALUES('default', ?, ?) "
+            "ON CONFLICT(target_id) DO UPDATE SET updated_at=excluded.updated_at, record_json=excluded.record_json",
+            (_now(), json.dumps(record, ensure_ascii=False, allow_nan=False)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return record
+
+
+def _target_status(target: Optional[float], value: Optional[float], direction: str) -> Optional[str]:
+    if target is None:
+        return None
+    if value is None:
+        return "not_measured"
+    return "met" if (value >= target if direction == "min" else value <= target) else "not_met"
+
+
+def _invalid_measurement(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return not math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _evaluation_target_statuses(metrics: Dict[str, Any], per_class: Dict[str, Any], targets: Dict[str, Any]) -> Dict[str, Any]:
+    overall_targets = targets.get("targets", {}) if isinstance(targets, dict) else {}
+    class_targets = targets.get("per_class", {}) if isinstance(targets, dict) else {}
+    measured_metrics = {"max_model_size_mb": "model_size_mb"}
+    statuses: Dict[str, Any] = {
+        key: _target_status(target, metrics.get(measured_metrics.get(key, key)), _TARGET_DIRECTIONS[key])
+        for key, target in overall_targets.items() if key in _TARGET_DIRECTIONS
+    }
+    class_statuses: Dict[str, Dict[str, Optional[str]]] = {}
+    for class_name, goals in class_targets.items():
+        measured = per_class.get(class_name, {})
+        class_statuses[class_name] = {
+            key: _target_status(target, measured.get(key), _TARGET_DIRECTIONS[key])
+            for key, target in goals.items() if key in _QUALITY_TARGET_KEYS
+        }
+    return {"overall": statuses, "per_class": class_statuses}
+
+
+def evaluate_yolo_checkpoint(arguments: Dict[str, Any], progress: ProgressCallback = None) -> Dict[str, Any]:
+    checkpoint = Path(str(arguments.get("checkpoint", ""))).expanduser().resolve(strict=True)
+    if not checkpoint.is_file() or checkpoint.suffix.lower() != ".pt":
+        raise ValueError("Chọn checkpoint YOLO11n nội bộ đã đăng ký.")
+    run = verified_checkpoint_record(checkpoint)
+    if not run:
+        raise ValueError("Chỉ đánh giá checkpoint YOLO11n nội bộ có registry và SHA-256 còn khớp.")
+    split = arguments.get("split", "val")
+    cancel_value = arguments.get("cancel_file")
+    cancel_file: Optional[Path] = None
+    if isinstance(cancel_value, str) and cancel_value:
+        candidate = Path(cancel_value).expanduser().resolve()
+        allowed_parent = (_training_root() / "cancel").resolve()
+        allowed_parent.mkdir(parents=True, exist_ok=True)
+        if candidate.parent != allowed_parent:
+            raise ValueError("Cancel marker đánh giá nằm ngoài thư mục quản lý training của FrameForge.")
+        cancel_file = candidate
+    dataset = _inspect_fixed_evaluation_set(str(arguments.get("data_yaml", "")), split, progress, cancel_file)
+    if run.get("class_names") != dataset["class_names"]:
+        raise ValueError("Class schema của checkpoint không khớp dataset fixed evaluation.")
+    try:
+        image_size = arguments.get("imgsz", run.get("effective_imgsz") or run.get("requested_imgsz"))
+        batch = arguments.get("batch", 8)
+        confidence = arguments.get("confidence_threshold", 0.001)
+        nms_iou = arguments.get("iou_threshold", 0.7)
+        if isinstance(image_size, bool) or not isinstance(image_size, int) or not 1 <= image_size <= MAX_IMAGE_SIZE:
+            raise ValueError("imgsz phải là số nguyên từ 1 đến {0} px.".format(MAX_IMAGE_SIZE))
+        if isinstance(batch, bool) or not isinstance(batch, int) or not 1 <= batch <= 512:
+            raise ValueError("Batch phải là số nguyên từ 1 đến 512.")
+        for name, value in (("Confidence", confidence), ("NMS IoU", nms_iou)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError("{0} phải nằm trong khoảng 0–1.".format(name))
+        capabilities = training_capabilities()
+        requested_device = arguments.get("device", "auto")
+        devices = capabilities["devices"]
+        if requested_device == "auto":
+            device = capabilities["preferred_device"]
+        elif requested_device == "cpu":
+            device = "cpu"
+        elif requested_device == "mps" and devices.get("mps"):
+            device = "mps"
+        elif requested_device in {"cuda", "cuda:0"} and devices.get("cuda"):
+            device = "0"
+        else:
+            raise ValueError("Thiết bị {0} không khả dụng theo PyTorch hiện tại.".format(requested_device))
+        evaluation_id = str(uuid.uuid4())
+        if progress:
+            progress({"stage": "evaluation_started", "evaluation_id": evaluation_id, "split": split, "image_count": dataset["image_count"]})
+        model = _load_yolo_model(str(checkpoint))
+        if getattr(model, "task", "detect") != "detect":
+            raise ValueError("Checkpoint không phải model object detection.")
+        model_names = getattr(model, "names", {})
+        if isinstance(model_names, dict):
+            model_names = [model_names[index] for index in sorted(model_names)]
+        if isinstance(model_names, (list, tuple)) and list(model_names) != dataset["class_names"]:
+            raise ValueError("Class schema bên trong checkpoint không khớp dataset.")
+        run_dir = Path(str(run.get("output_dir", checkpoint.parent))).resolve(strict=True)
+        evaluation_dir = run_dir / "evaluations"
+        evaluation_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        def on_validation_batch_end(validator: Any) -> None:
+            if cancel_file and cancel_file.exists():
+                raise RuntimeError("Đã hủy đánh giá theo yêu cầu.")
+            if progress:
+                loader = getattr(validator, "dataloader", None)
+                total_batches = len(loader) if loader is not None else 0
+                batch_index = int(getattr(validator, "batch_i", -1)) + 1
+                total_images = len(getattr(loader, "dataset", [])) if loader is not None else 0
+                checked_images = min(batch_index * batch, total_images) if total_images else batch_index * batch
+                progress({
+                    "stage": "evaluation_progress", "evaluation_id": evaluation_id,
+                    "checked_images": checked_images, "total_images": total_images,
+                    "batch": batch_index, "total_batches": total_batches,
+                })
+
+        actual_device = {"value": device}
+
+        def on_validation_start(validator: Any) -> None:
+            actual_device["value"] = str(getattr(validator, "device", device))
+
+        if callable(getattr(model, "add_callback", None)):
+            model.add_callback("on_val_start", on_validation_start)
+            model.add_callback("on_val_batch_end", on_validation_batch_end)
+        try:
+            results = model.val(
+                data=dataset["data_yaml"], split=split, imgsz=image_size,
+                conf=float(confidence), iou=float(nms_iou), batch=batch, device=device,
+                project=str(evaluation_dir), name=evaluation_id, exist_ok=True,
+                plots=False, verbose=False,
+            )
+        except RuntimeError as error:
+            if str(error).startswith("Đã hủy đánh giá"):
+                shutil.rmtree(evaluation_dir / evaluation_id, ignore_errors=True)
+            raise
+        raw_metrics = getattr(results, "results_dict", {})
+        if not isinstance(raw_metrics, dict):
+            raw_metrics = {}
+        box_metrics = getattr(results, "box", None)
+        raw_quality = {
+            "precision": raw_metrics.get("metrics/precision(B)", getattr(box_metrics, "mp", None)),
+            "recall": raw_metrics.get("metrics/recall(B)", getattr(box_metrics, "mr", None)),
+            "map50": raw_metrics.get("metrics/mAP50(B)", getattr(box_metrics, "map50", None)),
+            "map50_95": raw_metrics.get("metrics/mAP50-95(B)", getattr(box_metrics, "map", None)),
+        }
+        invalid_overall = {key for key, value in raw_quality.items() if _invalid_measurement(value)}
+        precision = _finite_number(raw_quality["precision"])
+        recall = _finite_number(raw_quality["recall"])
+        map50 = _finite_number(raw_quality["map50"])
+        map50_95 = _finite_number(raw_quality["map50_95"])
+        if "precision" in invalid_overall or "recall" in invalid_overall:
+            invalid_overall.add("f1")
+        f1 = 2 * precision * recall / (precision + recall) if precision is not None and recall is not None and precision + recall else 0.0 if precision == 0 and recall == 0 else None
+        metrics: Dict[str, Any] = {
+            "precision": precision, "recall": recall, "f1": f1, "map50": map50, "map50_95": map50_95,
+            "avg_latency_ms": None, "p50_latency_ms": None, "p95_latency_ms": None, "p99_latency_ms": None,
+            "fps": None, "throughput": None, "model_size_mb": checkpoint.stat().st_size / 1_000_000, "max_memory_mb": None,
+        }
+        class_metrics = {
+            name: {"precision": None, "recall": None, "f1": None, "map50": None, "map50_95": None,
+                   "ground_truth_instances": count}
+            for name, count in dataset["class_instance_counts"].items()
+        }
+        summaries = results.summary() if callable(getattr(results, "summary", None)) else []
+        invalid_class_metrics: Dict[str, set[str]] = {}
+        for item in summaries:
+            if not isinstance(item, dict) or item.get("Class") not in class_metrics:
+                continue
+            class_name = item["Class"]
+            invalid_class_metrics[class_name] = {
+                key for key, summary_key in (("precision", "Box-P"), ("recall", "Box-R"), ("f1", "Box-F1"),
+                                             ("map50", "mAP50"), ("map50_95", "mAP50-95"))
+                if _invalid_measurement(item.get(summary_key))
+            }
+            class_metrics[item["Class"]].update({
+                "precision": _finite_number(item.get("Box-P")), "recall": _finite_number(item.get("Box-R")),
+                "f1": _finite_number(item.get("Box-F1")), "map50": _finite_number(item.get("mAP50")),
+                "map50_95": _finite_number(item.get("mAP50-95")),
+            })
+        targets = get_evaluation_targets()
+        per_class_targets = targets.get("per_class", {}) if isinstance(targets, dict) else {}
+        scoped_targets = {
+            "targets": targets.get("targets", {}) if isinstance(targets, dict) else {},
+            "per_class": {name: per_class_targets[name] for name in dataset["class_names"] if name in per_class_targets},
+        }
+        target_status = _evaluation_target_statuses(metrics, class_metrics, scoped_targets)
+        for key in invalid_overall:
+            if key in target_status["overall"]:
+                target_status["overall"][key] = "invalid_measurement"
+        for class_name, invalid_keys in invalid_class_metrics.items():
+            for key in invalid_keys:
+                if key in target_status["per_class"].get(class_name, {}):
+                    target_status["per_class"][class_name][key] = "invalid_measurement"
+        if _sha256_file(checkpoint) != run.get("checkpoint_sha256"):
+            raise ValueError("Checkpoint đã thay đổi trong lúc đánh giá; kết quả chưa được lưu.")
+        evaluation = {
+            "evaluation_id": evaluation_id, "created_at": _now(), "run_id": run["run_id"],
+            "checkpoint_path": str(checkpoint), "checkpoint_sha256": run["checkpoint_sha256"],
+            "dataset_id": dataset["dataset_id"], "dataset_version": dataset["dataset_version"],
+            "dataset_fingerprint": dataset["dataset_fingerprint"], "manifest_sha256": dataset["manifest_sha256"],
+            "split": split, "fixed_set_id": dataset["fixed_set_id"],
+            "evaluation_fingerprint": dataset["evaluation_fingerprint"],
+            "image_count": dataset["image_count"], "instance_count": dataset["instance_count"],
+            "class_names": dataset["class_names"], "class_instance_counts": dataset["class_instance_counts"],
+            "metrics": metrics, "per_class": class_metrics, "targets": scoped_targets,
+            "target_status": target_status, "warnings": dataset["warnings"],
+            "conditions": {
+                "imgsz": image_size, "confidence_threshold": float(confidence), "nms_iou_threshold": float(nms_iou),
+                "batch": batch, "device_requested": requested_device, "device_actual": actual_device["value"],
+                "hardware": capabilities["hardware"], "framework": "Ultralytics", "framework_version": capabilities["ultralytics_version"],
+                "checkpoint_sha256": run["checkpoint_sha256"], "dataset_fingerprint": dataset["dataset_fingerprint"],
+                "latency_status": "not_measured",
+            },
+        }
+        connection = _registry_connection()
+        try:
+            connection.execute(
+                "INSERT INTO model_evaluations(evaluation_id, run_id, created_at, record_json) VALUES(?, ?, ?, ?)",
+                (evaluation_id, run["run_id"], evaluation["created_at"], json.dumps(evaluation, ensure_ascii=False, allow_nan=False)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        (evaluation_dir / (evaluation_id + ".json")).write_text(json.dumps(evaluation, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        if progress:
+            progress({"stage": "evaluation_completed", "evaluation_id": evaluation_id, "metrics": metrics})
+        return evaluation
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError(str(error)) from error
+
+
+def list_model_evaluations(run_id: Optional[str] = None) -> Dict[str, Any]:
+    connection = _registry_connection()
+    try:
+        if run_id:
+            rows = connection.execute(
+                "SELECT record_json FROM model_evaluations WHERE run_id=? ORDER BY created_at DESC LIMIT 100", (run_id,)
+            ).fetchall()
+        else:
+            rows = connection.execute("SELECT record_json FROM model_evaluations ORDER BY created_at DESC LIMIT 100").fetchall()
+    finally:
+        connection.close()
+    evaluations = []
+    for row in rows:
+        try:
+            record = json.loads(row["record_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict):
+            evaluations.append(record)
+    return {"evaluations": evaluations}
 
 
 def list_training_runs() -> Dict[str, Any]:

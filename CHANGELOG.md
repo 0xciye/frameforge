@@ -2,6 +2,7 @@
 
 ## Chưa phát hành — Workspace trích xuất
 
+- Thêm đánh giá YOLO11n trên fixed validation/test: chỉ dùng checkpoint nội bộ đã xác minh; kiểm tra manifest, hash ảnh/nhãn, class schema và chống leakage; lưu metric tổng/per-class, mục tiêu người dùng, điều kiện, cảnh báo và lịch sử. Có thể huỷ giữa các batch mà không lưu kết quả dở dang. Latency/FPS/throughput/RAM tiếp tục hiện `not_measured` đến khi có benchmark deployment.
 - Thêm dataset lineage: đóng băng val/test sau review, tạo phiên bản con xác minh parent và checksum, giữ nguyên ảnh/label evaluation, replay dữ liệu train theo `all`/`balanced`/`new`; truyền lineage vào training queue/run.
 - Giữ giới hạn video đầu vào tối đa FHD 1920×1080; nguồn lớn hơn bị từ chối ở import, preview và extraction, không có lựa chọn độ phân giải video cao hơn và không tự scale.
 - Thêm inference toàn project: nạp model một lần, chạy theo batch/chunk có giới hạn, kiểm fingerprint khi lưu và giữ phần đã hoàn tất khi hủy.

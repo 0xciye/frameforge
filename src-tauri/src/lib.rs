@@ -92,11 +92,15 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     let mut cancellation_marker = None;
     if matches!(
         command.as_str(),
-        "train_yolo_queue" | "scan_project_folder" | "predict_crops" | "auto_label_project"
+        "train_yolo_queue"
+            | "evaluate_yolo_checkpoint"
+            | "scan_project_folder"
+            | "predict_crops"
+            | "auto_label_project"
     ) {
         let marker_dir = app_data_dir
             .join(match command.as_str() {
-                "train_yolo_queue" => "training",
+                "train_yolo_queue" | "evaluate_yolo_checkpoint" => "training",
                 "scan_project_folder" => "discovery",
                 _ => "inference",
             })
@@ -124,6 +128,7 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         command.as_str(),
         "extract_frames"
             | "train_yolo_queue"
+            | "evaluate_yolo_checkpoint"
             | "scan_project_folder"
             | "predict_crops"
             | "auto_label_project"
@@ -296,7 +301,21 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
         .ok_or_else(|| "Arguments phải là một JSON object.".to_string())?;
     match command {
         "health" => Ok(()),
-        "training_capabilities" | "list_training_runs" | "load_session" => Ok(()),
+        "training_capabilities"
+        | "list_training_runs"
+        | "get_evaluation_targets"
+        | "load_session" => Ok(()),
+        "list_model_evaluations" => {
+            if let Some(run_id) = arguments.get("run_id").filter(|value| !value.is_null()) {
+                if run_id
+                    .as_str()
+                    .is_none_or(|value| value.is_empty() || value.len() > 128)
+                {
+                    return Err("Mã training run không hợp lệ.".to_string());
+                }
+            }
+            Ok(())
+        }
         "save_session" => {
             if arguments
                 .get("project")
@@ -399,6 +418,151 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .and_then(Value::as_str)
                 .ok_or("Thiếu đường dẫn data.yaml.")?,
         ),
+        "evaluate_yolo_checkpoint" => {
+            let checkpoint = canonical_existing_path(
+                arguments
+                    .get("checkpoint")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu checkpoint cần đánh giá.")?,
+            )?;
+            if !checkpoint.is_file()
+                || !checkpoint
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+            {
+                return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
+            }
+            validate_yaml_file(
+                arguments
+                    .get("data_yaml")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu data.yaml của fixed set.")?,
+            )?;
+            let split = arguments
+                .get("split")
+                .and_then(Value::as_str)
+                .unwrap_or("val");
+            if !["val", "test"].contains(&split) {
+                return Err("Chỉ đánh giá split validation hoặc test.".to_string());
+            }
+            let image_size = arguments
+                .get("imgsz")
+                .and_then(Value::as_u64)
+                .ok_or("imgsz đánh giá phải là số nguyên từ 1 đến 2048 px.")?;
+            if !(1..=2048).contains(&image_size) {
+                return Err("imgsz đánh giá phải nằm trong khoảng 1–2048 px.".to_string());
+            }
+            let batch = match arguments.get("batch") {
+                None => 8,
+                Some(value) => value
+                    .as_u64()
+                    .ok_or("Batch đánh giá phải là số nguyên từ 1 đến 512.")?,
+            };
+            if !(1..=512).contains(&batch) {
+                return Err("Batch đánh giá phải nằm trong khoảng 1–512.".to_string());
+            }
+            for (key, default) in [("confidence_threshold", 0.001), ("iou_threshold", 0.7)] {
+                let value = match arguments.get(key) {
+                    None => default,
+                    Some(value) => value
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or("Confidence và NMS IoU phải là số hữu hạn.")?,
+                };
+                if !(0.0..=1.0).contains(&value) {
+                    return Err("Confidence và NMS IoU phải nằm trong khoảng 0–1.".to_string());
+                }
+            }
+            let device = arguments
+                .get("device")
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            if !["auto", "cpu", "mps", "cuda", "cuda:0"].contains(&device) {
+                return Err("Thiết bị đánh giá không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
+        "save_evaluation_targets" => {
+            validate_yaml_file(
+                arguments
+                    .get("data_yaml")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu data.yaml để kiểm tra class mục tiêu.")?,
+            )?;
+            let allowed = [
+                "precision",
+                "recall",
+                "f1",
+                "map50",
+                "map50_95",
+                "avg_latency_ms",
+                "p50_latency_ms",
+                "p95_latency_ms",
+                "p99_latency_ms",
+                "fps",
+                "throughput",
+                "max_model_size_mb",
+                "max_memory_mb",
+            ];
+            for key in ["targets", "per_class"] {
+                let values = arguments
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .filter(|values| values.len() <= 64)
+                    .ok_or("Cấu hình chỉ số mục tiêu không hợp lệ.")?;
+                if key == "targets" {
+                    for (metric, target) in values {
+                        if !allowed.contains(&metric.as_str()) {
+                            return Err("Tên chỉ số mục tiêu không được hỗ trợ.".to_string());
+                        }
+                        if let Some(number) = target.as_f64() {
+                            if !number.is_finite()
+                                || (allowed[..5].contains(&metric.as_str())
+                                    && !(0.0..=1.0).contains(&number))
+                                || (allowed[..5].contains(&metric.as_str()) == false
+                                    && number <= 0.0)
+                            {
+                                return Err(
+                                    "Giá trị mục tiêu phải hữu hạn và nằm trong phạm vi hợp lệ."
+                                        .to_string(),
+                                );
+                            }
+                        } else if !target.is_null() {
+                            return Err("Mỗi chỉ số mục tiêu phải là số hoặc để trống.".to_string());
+                        }
+                    }
+                } else {
+                    for (class_name, class_values) in values {
+                        if class_name.is_empty() || class_name.len() > 128 {
+                            return Err("Tên class mục tiêu không hợp lệ.".to_string());
+                        }
+                        let class_values = class_values
+                            .as_object()
+                            .filter(|items| items.len() <= 5)
+                            .ok_or("Mục tiêu theo class không hợp lệ.")?;
+                        for (metric, target) in class_values {
+                            if !allowed[..5].contains(&metric.as_str()) {
+                                return Err(
+                                    "Mục tiêu theo class chỉ nhận metric chất lượng.".to_string()
+                                );
+                            }
+                            if let Some(number) = target.as_f64() {
+                                if !number.is_finite() || !(0.0..=1.0).contains(&number) {
+                                    return Err("Mục tiêu chất lượng phải nằm trong khoảng 0–1."
+                                        .to_string());
+                                }
+                            } else if !target.is_null() {
+                                return Err(
+                                    "Mỗi mục tiêu class phải là số hoặc để trống.".to_string()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         "train_yolo_queue" => {
             validate_yaml_file(
                 arguments

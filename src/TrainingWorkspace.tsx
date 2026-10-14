@@ -52,9 +52,37 @@ type TrainProgress = {
   warnings?: string[]; status?: string; error?: string; best_checkpoint?: string | null; last_checkpoint?: string | null;
 };
 type MetricPoint = { key: string; epoch: number; loss: number | null; map50: number | null };
+type EvaluationRecord = {
+  evaluation_id: string; run_id: string; dataset_id: string; dataset_version: number; split: "val" | "test";
+  fixed_set_id: string; image_count: number; instance_count: number; warnings: string[];
+  metrics: Record<string, number | null>;
+  per_class: Record<string, Record<string, number | null>>;
+  target_status: { overall: Record<string, string | null>; per_class: Record<string, Record<string, string | null>> };
+  conditions: { imgsz: number; confidence_threshold: number; nms_iou_threshold: number; batch: number; device_actual: string; framework_version: string | null };
+};
+type EvaluationProgress = { stage: string; checked_images?: number; total_images?: number; batch?: number; total_batches?: number };
+type EvaluationTargetResponse = { targets?: Record<string, number>; per_class?: Record<string, Record<string, number>> };
 type Props = { initialDataYaml?: string | null; onInitialDataYamlConsumed?(): void };
 
 const IMAGE_SIZE_PRESETS = [192, 224, 256, 288, 320, 352, 416, 512, 640];
+const QUALITY_TARGETS = ["precision", "recall", "f1", "map50", "map50_95"] as const;
+const DEPLOYMENT_TARGETS = ["avg_latency_ms", "p50_latency_ms", "p95_latency_ms", "p99_latency_ms", "fps", "throughput", "max_model_size_mb", "max_memory_mb"] as const;
+const QUALITY_LABELS: Record<(typeof QUALITY_TARGETS)[number], string> = {
+  precision: "Precision", recall: "Recall", f1: "F1", map50: "mAP50", map50_95: "mAP50–95",
+};
+const DEPLOYMENT_LABELS: Record<(typeof DEPLOYMENT_TARGETS)[number], string> = {
+  avg_latency_ms: "Latency TB (ms)", p50_latency_ms: "P50 (ms)", p95_latency_ms: "P95 (ms)", p99_latency_ms: "P99 (ms)",
+  fps: "FPS tối thiểu", throughput: "Thông lượng tối thiểu", max_model_size_mb: "Model tối đa (MB)", max_memory_mb: "RAM tối đa (MB)",
+};
+
+function targetStatusLabel(status?: string | null) {
+  if (status === "met") return "Đạt";
+  if (status === "not_met") return "Chưa đạt";
+  if (status === "invalid_measurement") return "Số đo không hợp lệ";
+  if (status === "incompatible_comparison") return "Điều kiện không tương thích";
+  if (status === "not_measured") return "Chưa đo";
+  return "Chưa đặt";
+}
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `train-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -137,7 +165,23 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
   const [operationError, setOperationError] = useState<string | null>(null);
   const [queueResult, setQueueResult] = useState<QueueResult | null>(null);
   const [history, setHistory] = useState<MetricPoint[]>([]);
+  const [targetInputs, setTargetInputs] = useState<Record<string, string>>({});
+  const [classTargetInputs, setClassTargetInputs] = useState<Record<string, Record<string, string>>>({});
+  const [targetSaving, setTargetSaving] = useState(false);
+  const [evaluationRunId, setEvaluationRunId] = useState("");
+  const [evaluationSplit, setEvaluationSplit] = useState<"val" | "test">("val");
+  const [evaluationImgSize, setEvaluationImgSize] = useState(640);
+  const [evaluationBatch, setEvaluationBatch] = useState(8);
+  const [evaluationConfidence, setEvaluationConfidence] = useState(0.001);
+  const [evaluationIou, setEvaluationIou] = useState(0.7);
+  const [evaluating, setEvaluating] = useState(false);
+  const [evaluationCancelRequested, setEvaluationCancelRequested] = useState(false);
+  const [evaluationProgress, setEvaluationProgress] = useState<EvaluationProgress | null>(null);
+  const [evaluation, setEvaluation] = useState<EvaluationRecord | null>(null);
+  const [evaluationHistory, setEvaluationHistory] = useState<EvaluationRecord[]>([]);
+  const [evaluationMessage, setEvaluationMessage] = useState<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
+  const evaluationRequestId = useRef<string | null>(null);
 
   const selectedParent = useMemo(
     () => runs.find((run) => run.checkpoint_path === baseModel) ?? null,
@@ -147,11 +191,15 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
   const refreshRuns = useCallback(async () => {
     const response = await engineRequest<RunList>("list_training_runs");
     setRuns(response.runs);
+    setEvaluationRunId((current) => current || response.runs.find((run) => run.checkpoint_usable)?.run_id || "");
   }, []);
 
   const inspectDatasetPath = useCallback(async (selected: string) => {
     setDataYaml(selected);
     setDataset(null);
+    setEvaluation(null);
+    setEvaluationSplit("val");
+    setEvaluationMessage(null);
     setOperationError(null);
     setInspecting(true);
     try {
@@ -172,10 +220,18 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
     void Promise.all([
       engineRequest<TrainingCapabilities>("training_capabilities"),
       engineRequest<RunList>("list_training_runs"),
-    ]).then(([status, registry]) => {
+      engineRequest<EvaluationTargetResponse>("get_evaluation_targets"),
+      engineRequest<{ evaluations: EvaluationRecord[] }>("list_model_evaluations"),
+    ]).then(([status, registry, savedTargets, pastEvaluations]) => {
       if (!active) return;
       setCapabilities(status);
       setRuns(registry.runs);
+      setEvaluationRunId(registry.runs.find((run) => run.checkpoint_usable)?.run_id ?? "");
+      const targets = savedTargets.targets ?? {};
+      const perClass = savedTargets.per_class ?? {};
+      setTargetInputs(Object.fromEntries(Object.entries(targets).map(([key, value]) => [key, String(value)])));
+      setClassTargetInputs(Object.fromEntries(Object.entries(perClass).map(([name, values]) => [name, Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)]))])));
+      setEvaluationHistory(pastEvaluations.evaluations ?? []);
       setSettings({
         epochs: status.recommendation?.epochs ?? 100,
         batch: status.recommendation?.batch ?? 8,
@@ -205,6 +261,10 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
     let dispose: (() => void) | undefined;
     let active = true;
     void listen<{ id: string; progress: TrainProgress }>("engine-progress", (event) => {
+      if (event.payload.id === evaluationRequestId.current) {
+        setEvaluationProgress(event.payload.progress);
+        return;
+      }
       if (event.payload.id !== activeRequestId.current) return;
       const next = event.payload.progress;
       setActiveProgress((current) => ({ ...current, ...next }));
@@ -253,6 +313,85 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
         const updated = await engineRequest<TrainingCapabilities>("training_capabilities", { output_dir: selected });
         setCapabilities(updated);
       }
+    } catch (reason) {
+      setOperationError(String(reason));
+    }
+  }
+
+  async function saveTargets() {
+    if (!dataYaml || !dataset?.class_names.length) return;
+    const targets = Object.fromEntries([...QUALITY_TARGETS, ...DEPLOYMENT_TARGETS].map((key) => [key, targetInputs[key]?.trim() ? Number(targetInputs[key]) : null]));
+    const perClass = Object.fromEntries(dataset.class_names.map((name) => [
+      name,
+      Object.fromEntries(QUALITY_TARGETS.map((key) => [key, classTargetInputs[name]?.[key]?.trim() ? Number(classTargetInputs[name][key]) : null])),
+    ]));
+    setTargetSaving(true);
+    setEvaluationMessage(null);
+    try {
+      const saved = await engineRequest<EvaluationTargetResponse>("save_evaluation_targets", { data_yaml: dataYaml, targets, per_class: perClass });
+      const nextTargets = saved.targets ?? {};
+      const nextPerClass = saved.per_class ?? {};
+      setTargetInputs(Object.fromEntries(Object.entries(nextTargets).map(([key, value]) => [key, String(value)])));
+      setClassTargetInputs(Object.fromEntries(Object.entries(nextPerClass).map(([name, values]) => [name, Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)]))])));
+      setEvaluationMessage("Đã lưu chỉ số mục tiêu. Mục tiêu không đặt vẫn để trống.");
+    } catch (reason) {
+      setOperationError(String(reason));
+    } finally {
+      setTargetSaving(false);
+    }
+  }
+
+  async function evaluateSelectedCheckpoint() {
+    const selected = bestRuns.find((run) => run.run_id === evaluationRunId);
+    if (!selected?.checkpoint_path || !dataYaml || !dataset?.valid) {
+      setOperationError("Chọn checkpoint nội bộ và dataset hợp lệ trước khi đánh giá.");
+      return;
+    }
+    if ((evaluationSplit === "val" && !dataset.fixed_validation_set_id) || (evaluationSplit === "test" && !dataset.frozen_test_set_id)) {
+      setOperationError("Split này chưa được đóng băng thành fixed set FrameForge.");
+      return;
+    }
+    setEvaluating(true);
+    setEvaluationCancelRequested(false);
+    setEvaluation(null);
+    setEvaluationProgress({ stage: "evaluation_started" });
+    setOperationError(null);
+    setEvaluationMessage(null);
+    const id = requestId();
+    evaluationRequestId.current = id;
+    try {
+      const result = await invoke<EvaluationRecord>("engine_request", {
+        request: { id, command: "evaluate_yolo_checkpoint", arguments: {
+          checkpoint: selected.checkpoint_path,
+          data_yaml: dataYaml,
+          split: evaluationSplit,
+          imgsz: evaluationImgSize,
+          confidence_threshold: evaluationConfidence,
+          iou_threshold: evaluationIou,
+          batch: evaluationBatch,
+          device,
+        } },
+      });
+      setEvaluation(result);
+      setEvaluationHistory((current) => [result, ...current.filter((entry) => entry.evaluation_id !== result.evaluation_id)].slice(0, 100));
+      setEvaluationMessage("Đã hoàn tất đánh giá và lưu điều kiện đo.");
+    } catch (reason) {
+      if (String(reason).includes("Đã hủy đánh giá")) setEvaluationMessage("Đã hủy đánh giá; không lưu kết quả dở dang.");
+      else setOperationError(String(reason));
+    } finally {
+      evaluationRequestId.current = null;
+      setEvaluating(false);
+      setEvaluationCancelRequested(false);
+    }
+  }
+
+  async function requestEvaluationCancel() {
+    const id = evaluationRequestId.current;
+    if (!id || evaluationCancelRequested) return;
+    try {
+      const accepted = await invoke<boolean>("cancel_engine_request", { requestId: id });
+      if (accepted) setEvaluationCancelRequested(true);
+      else setOperationError("Tác vụ đánh giá đã kết thúc trước khi nhận yêu cầu hủy.");
     } catch (reason) {
       setOperationError(String(reason));
     }
@@ -337,6 +476,8 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
         },
       });
       setQueueResult(result);
+      const newestCheckpoint = result.jobs.find((job) => job.status === "completed" && job.checkpoint_path);
+      if (newestCheckpoint) setEvaluationRunId(newestCheckpoint.run_id);
       setActiveProgress((current) => ({ ...current, stage: "queue_completed", status: result.status }));
       await refreshRuns();
     } catch (reason) {
@@ -510,6 +651,95 @@ export default function TrainingWorkspace({ initialDataYaml, onInitialDataYamlCo
           <section className="train-charts-grid">
             <MetricChart title="Box loss · thấp hơn thường tốt hơn" points={history} field="loss" color="#f0b365" />
             <MetricChart title="mAP50 · validation thực tế" points={history} field="map50" color="#68b996" />
+          </section>
+
+          <section className="train-card train-evaluation-card">
+            <div className="train-card-heading"><div><Activity size={15} /><h2>Đánh giá model trên fixed set</h2></div><span>{evaluating ? "Đang đánh giá" : evaluation ? "Đã lưu kết quả" : "Chưa đo"}</span></div>
+            <p className="train-eval-note">Chỉ chạy trên validation/test đã đóng băng trong manifest FrameForge. Confidence và NMS IoU được lưu cùng kết quả.</p>
+            <label className="train-field">Checkpoint nội bộ
+              <select value={evaluationRunId} onChange={(event) => {
+                const runId = event.target.value;
+                setEvaluationRunId(runId);
+                const run = bestRuns.find((candidate) => candidate.run_id === runId);
+                if (run) setEvaluationImgSize(run.effective_imgsz ?? run.requested_imgsz);
+              }} disabled={evaluating || !bestRuns.length}>
+                <option value="">Chọn checkpoint đã xác minh</option>
+                {bestRuns.map((run) => <option key={run.run_id} value={run.run_id}>YOLO11n · {run.effective_imgsz ?? run.requested_imgsz}px · {run.run_id.slice(0, 8)}</option>)}
+              </select>
+            </label>
+            <div className="train-eval-settings">
+              <label className="train-field">Fixed set
+                <select value={evaluationSplit} onChange={(event) => setEvaluationSplit(event.target.value as "val" | "test")} disabled={evaluating}>
+                  <option value="val" disabled={!dataset?.fixed_validation_set_id}>Validation · {dataset?.fixed_validation_set_id?.slice(0, 12) ?? "chưa đóng băng"}</option>
+                  <option value="test" disabled={!dataset?.frozen_test_set_id}>Test · {dataset?.frozen_test_set_id?.slice(0, 12) ?? "chưa đóng băng"}</option>
+                </select>
+              </label>
+              <label className="train-field">imgsz<input type="number" min="1" max="2048" value={evaluationImgSize} onChange={(event) => setEvaluationImgSize(Number(event.target.value))} disabled={evaluating} /></label>
+              <label className="train-field">Batch<input type="number" min="1" max="512" value={evaluationBatch} onChange={(event) => setEvaluationBatch(Number(event.target.value))} disabled={evaluating} /></label>
+              <label className="train-field">Confidence<input type="number" min="0" max="1" step="0.001" value={evaluationConfidence} onChange={(event) => setEvaluationConfidence(Number(event.target.value))} disabled={evaluating} /></label>
+              <label className="train-field">NMS IoU<input type="number" min="0" max="1" step="0.01" value={evaluationIou} onChange={(event) => setEvaluationIou(Number(event.target.value))} disabled={evaluating} /></label>
+              <label className="train-field">Thiết bị<select value={device} onChange={(event) => setDevice(event.target.value as TrainingDevice)} disabled={evaluating}>
+                <option value="auto">Tự động · {capabilities?.preferred_device ?? "CPU"}</option>
+                <option value="mps" disabled={!capabilities?.devices.mps}>Apple MPS</option>
+                <option value="cuda" disabled={!capabilities?.devices.cuda}>NVIDIA CUDA</option>
+                <option value="cpu">CPU</option>
+              </select></label>
+            </div>
+            {evaluationSplit === "test" && <p className="train-warning"><CircleHelp size={12} />Dùng test như holdout cuối; hãy dùng validation cho các vòng so sánh và tinh chỉnh.</p>}
+            <button className="train-primary-button" type="button" onClick={() => void evaluateSelectedCheckpoint()} disabled={evaluating || running || !dataset?.valid || !bestRuns.length || (evaluationSplit === "val" ? !dataset?.fixed_validation_set_id : !dataset?.frozen_test_set_id)}>
+              {evaluating ? <LoaderCircle className="spin" size={14} /> : <Activity size={14} />} {evaluating ? "Đang tính metric thật…" : "Chạy đánh giá"}
+            </button>
+            {evaluating && <div className="train-eval-running-row">
+              <span>{evaluationProgress?.stage === "verifying_fixed_set" ? `Đang xác minh ảnh và manifest ${evaluationProgress.checked_images ?? 0}/${evaluationProgress.total_images ?? 0}…` : evaluationProgress?.total_images ? `${evaluationProgress.checked_images ?? 0}/${evaluationProgress.total_images} ảnh · batch ${evaluationProgress.batch ?? 0}/${evaluationProgress.total_batches ?? 0}` : "Đang chuẩn bị model và fixed set…"}{evaluationCancelRequested ? " · đang hủy" : ""}</span>
+              <button className="train-cancel-button" type="button" onClick={() => void requestEvaluationCancel()} disabled={evaluationCancelRequested}>{evaluationCancelRequested ? "Đang hủy" : "Hủy đánh giá"}</button>
+            </div>}
+
+            <details className="train-target-details">
+              <summary>Chỉ số mục tiêu · không có ngưỡng mặc định</summary>
+              <p className="train-eval-note">Để trống chỉ số không dùng. Giá trị phải từ 0 đến 1; metric latency/FPS chưa có benchmark nên không thể đạt mục tiêu.</p>
+              <div className="train-target-grid">
+                {QUALITY_TARGETS.map((key) => <label className="train-field" key={key}>{QUALITY_LABELS[key]} tối thiểu
+                  <input type="number" min="0" max="1" step="0.001" value={targetInputs[key] ?? ""} onChange={(event) => setTargetInputs((current) => ({ ...current, [key]: event.target.value }))} disabled={targetSaving} placeholder="Không đặt" />
+                </label>)}
+              </div>
+              <div className="train-target-grid train-deployment-target-grid">
+                {DEPLOYMENT_TARGETS.map((key) => <label className="train-field" key={key}>{DEPLOYMENT_LABELS[key]}
+                  <input type="number" min="0.001" step={key.includes("latency") || key === "fps" || key === "throughput" ? "0.1" : "1"} value={targetInputs[key] ?? ""} onChange={(event) => setTargetInputs((current) => ({ ...current, [key]: event.target.value }))} disabled={targetSaving} placeholder="Không đặt" />
+                </label>)}
+              </div>
+              {dataset?.class_names.map((name) => <div className="train-class-targets" key={name}>
+                <strong>{name}</strong>
+                <div className="train-target-grid">
+                  {QUALITY_TARGETS.map((key) => <label className="train-field" key={key}>{QUALITY_LABELS[key]} tối thiểu
+                    <input type="number" min="0" max="1" step="0.001" aria-label={`${name} ${QUALITY_LABELS[key]} tối thiểu`} value={classTargetInputs[name]?.[key] ?? ""} onChange={(event) => setClassTargetInputs((current) => ({ ...current, [name]: { ...current[name], [key]: event.target.value } }))} disabled={targetSaving} placeholder="Không đặt" />
+                  </label>)}
+                </div>
+              </div>)}
+              <button className="train-secondary-button" type="button" onClick={() => void saveTargets()} disabled={targetSaving || !dataset?.class_names.length}>{targetSaving ? "Đang lưu…" : "Lưu chỉ số mục tiêu"}</button>
+            </details>
+
+            {evaluationMessage && <p className="train-inline-status" role="status"><Check size={13} />{evaluationMessage}</p>}
+            {evaluation && <>
+              <div className="train-eval-result-meta">{evaluation.split === "val" ? "Validation" : "Test"} · {evaluation.image_count} ảnh · {evaluation.instance_count} box · dataset v{evaluation.dataset_version} · {evaluation.conditions.device_actual} · imgsz {evaluation.conditions.imgsz}</div>
+              <div className="train-current-metrics train-eval-metrics">
+                {QUALITY_TARGETS.map((key) => <span key={key}><small>{QUALITY_LABELS[key]}</small><strong>{formatMetric(evaluation.metrics[key])}</strong><em className={evaluation.target_status.overall[key] ?? "unconfigured"}>{targetStatusLabel(evaluation.target_status.overall[key])}</em></span>)}
+              </div>
+              <div className="train-deployment-results">
+                {DEPLOYMENT_TARGETS.map((key) => {
+                  const metricKey = key === "max_model_size_mb" ? "model_size_mb" : key;
+                  const value = evaluation.metrics[metricKey];
+                  const status = evaluation.target_status.overall[key];
+                  return <span key={key}><small>{DEPLOYMENT_LABELS[key]}</small><strong>{value == null ? "Chưa đo" : `${formatMetric(value, 2)}${key.includes("latency") ? " ms" : key === "max_model_size_mb" || key === "max_memory_mb" ? " MB" : key === "fps" ? " FPS" : ""}`}</strong><em className={status ?? "unconfigured"}>{targetStatusLabel(status)}</em></span>;
+                })}
+              </div>
+              <div className="train-class-eval-list">{Object.entries(evaluation.per_class).map(([name, values]) => <div className="train-class-eval-row" key={name}>
+                <strong>{name}<small>{values.ground_truth_instances ?? 0} box thật</small></strong>
+                {QUALITY_TARGETS.map((key) => <span key={key}><small>{QUALITY_LABELS[key]}</small><b>{formatMetric(values[key])}</b><em className={evaluation.target_status.per_class[name]?.[key] ?? "unconfigured"}>{targetStatusLabel(evaluation.target_status.per_class[name]?.[key])}</em></span>)}
+              </div>)}</div>
+              <p className="train-eval-note">P95/P99 latency và FPS: chưa đo. Điều kiện: confidence {formatMetric(evaluation.conditions.confidence_threshold, 3)} · NMS IoU {formatMetric(evaluation.conditions.nms_iou_threshold, 2)} · batch {evaluation.conditions.batch} · Ultralytics {evaluation.conditions.framework_version ?? "—"}.</p>
+              {evaluation.warnings.map((warning) => <p className="train-warning" key={warning}><CircleHelp size={12} />{warning}</p>)}
+            </>}
+            {evaluationHistory.length > 0 && <div className="train-eval-history"><strong>Lịch sử đánh giá gần đây</strong>{evaluationHistory.filter((item) => item.fixed_set_id === evaluation?.fixed_set_id || item.dataset_id === dataset?.dataset_id).slice(0, 5).map((item) => <span key={item.evaluation_id}>{item.split} · {item.run_id.slice(0, 8)} · mAP50 {formatMetric(item.metrics.map50)} · {item.image_count} ảnh</span>)}</div>}
           </section>
 
           {operationError && <div className="train-operation-error" role="alert"><AlertCircle size={14} /><span>{operationError}</span></div>}

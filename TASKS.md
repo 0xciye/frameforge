@@ -10,9 +10,10 @@ This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay wa
 - A one-hour synthetic H.264 FHD fixture was extracted at 1 frame/second: 3,600 crops in 132.27 seconds, no extraction errors, sampled peak RSS 807.3 MiB. See `DEVELOPMENT.md` for fixture limits.
 - Dataset lineage is implemented: freeze reviewed validation/test sets, verify parent manifest and image/label hashes, preserve fixed images and labels across child versions, and replay historical training groups with `all`, `balanced`, or `new`. Training preflight/queue/run metadata records the lineage.
 - Manual annotation persistence, dataset validation, grouped split, YOLO export, Smart Folder Discovery, and real training queue have engine tests.
+- The fixed-set evaluator has fake-runtime engine coverage for internal checkpoint trust, manifest/class/split checks, image and label hashes, cross-split leakage, target status/persistence, history, and cancellation; it records overall/per-class Precision/Recall/F1/mAP and evaluation conditions.
 - Fine-tune accepts only a registered FrameForge YOLO11n detection checkpoint in its run directory with matching file, JSON and SQLite SHA-256. Unregistered and discovered external `.pt` files are rejected before model load.
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
-- Verification for this turn: 68 engine tests, TypeScript/Vite production build, Rust format/check and `git diff --check`; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
+- Earlier verification: 68 engine tests, TypeScript/Vite production build, Rust format/check; dataset UI has not been click-through tested in a fresh macOS app bundle. Full-scale actual YOLO training remains unverified.
 - A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.
 - Commit `f6ad23c` adds project-wide inference, reviewed negative candidates and large-dataset training plumbing; it is local and unpushed. The inherited base includes commit `85dc842` for FHD/training/discovery and checkpoint-trust recovery.
 
@@ -22,6 +23,7 @@ This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay wa
 - Per-image and project-wide inference are connected to the labeling UI. Batch engine tests use a fake YOLO runtime for 130 images over multiple persistence chunks; UI workflow has not been click-through-tested with a real checkpoint because the local registry has no usable model.
 - Candidate-negative persistence/review is tested for fingerprints, rejection/retry, confirmed-negative export provenance, and prevention of pending candidates becoming negatives. YOLO export filters pending/rejected AI boxes and candidates.
 - The MPS training smoke is one real YOLO11n epoch on a small synthetic dataset. A scale test creates 20,003 uniform 320×320 JPEGs, runs dataset preflight twice, and checks two imgsz jobs receive 301 epochs each through a fake trainer (9.53 seconds including fixture creation). This verifies capacity/configuration plumbing, not real 20k-image YOLO throughput, 301 completed epochs, or soak stability.
+- Fixed-set evaluation is wired through engine, Rust validation and Training workspace; the local Ultralytics API and per-class summary are confirmed. Current checks use fake YOLO metrics because no usable registered checkpoint is available for a real-model smoke test; app-bundle click-through remains unverified.
 
 ## PARTIALLY_COMPLETED
 
@@ -38,7 +40,8 @@ This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay wa
 
 - Negative-image sampling policy and sampling ratios remain unimplemented; candidate-negative decisions require human review.
 - Guided workspace, contextual next actions, full workflow status, active-learning suggestions, and model quality dashboard.
-- Fixed validation/test evaluation, minimum quality targets, model-generation comparison, Champion/Challenger promotion and rollback.
+- Champion/Challenger comparison, regression tolerances, explicit promotion history and rollback.
+- Actual deployment latency/FPS/throughput/memory benchmark and model-generation comparison. These targets remain `not_measured`; the video extraction benchmark is not a model benchmark.
 - Training resume and session restoration in the frontend.
 - ONNX, TensorRT and OpenVINO export; FP16/INT8 calibration and accuracy verification; deployment-target benchmarking. The existing video extraction benchmark is not a model benchmark.
 - Remote execution, transfer package, remote job tracking, and completion notifications.
@@ -51,10 +54,11 @@ This ledger recovers branch `feature/manual-labeling`; dataset lineage/replay wa
 
 ## Dependencies and next work
 
-1. **Next:** implement fixed-set evaluation and record metrics per training run, then build Champion/Challenger comparison and promotion policy.
+1. **Next:** run evaluator on a real registered checkpoint/fixed set, then implement Champion/Challenger comparison and explicit promotion policy.
 2. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
-3. Complete resume training and session restoration.
-4. Validate real YOLO training throughput/stability on a representative 20,000+ image dataset for 300+ epochs per size.
-5. Complete Windows validation when a Windows target is available.
+3. Implement real deployment-target benchmarking; keep latency/FPS/RAM targets `not_measured` until measured.
+4. Complete resume training and session restoration.
+5. Validate real YOLO training throughput/stability on a representative 20,000+ image dataset for 300+ epochs per size.
+6. Complete Windows validation when a Windows target is available.
 
 Update this file and `README.md`, `AGENTS.md`, `agent.md`, and `DEVELOPMENT.md` after each completed task; update product/design notes and `CHANGELOG.md` when applicable. Do not clear inherited working-tree changes.

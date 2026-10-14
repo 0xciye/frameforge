@@ -26,6 +26,8 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 
 - Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Mỗi imgsz chạy thành run riêng từ cùng checkpoint nền; fine-tune chỉ bắt đầu từ checkpoint YOLO11n nội bộ đã đăng ký, được người dùng chọn và có checksum hợp lệ.
 - Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data. Giữ `cache=False` cho dataset lớn; nhập Patience = 0 để tắt early stopping và chạy đủ epoch đã đặt.
+- Card “Đánh giá model trên fixed set” chọn checkpoint registry, validation/test đã đóng băng, `imgsz`, batch, confidence, NMS IoU và thiết bị. Chỉ bật khi split hiện tại có fixed-set ID. Đánh giá có thể hủy giữa các batch; tác vụ dở dang không được ghi thành kết quả.
+- Hiển thị Precision/Recall/F1/mAP50/mAP50–95 tổng thể và theo class cùng mục tiêu người dùng đặt. Để trống là không đặt ngưỡng. Kèm dataset/fixed-set/checkpoint fingerprint, thiết bị/framework và cảnh báo tập nhỏ/thiếu class; latency/FPS/throughput/RAM ghi “Chưa đo” cho đến khi có benchmark triển khai.
 
 ## Quét thư mục dự án
 
