@@ -22,6 +22,7 @@ type DatasetReport = {
   included_image_count: number;
   positive_image_count: number;
   reviewed_negative_count: number;
+  unreviewed_annotation_excluded_count: number;
   candidate_negative_excluded_count: number;
   annotation_count: number;
   class_distribution: { class_id: number; name: string; box_count: number }[];
@@ -336,6 +337,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
             </div>
           </div>
           {report.candidate_negative_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.candidate_negative_excluded_count} ảnh trống chưa review.</p>}
+          {report.unreviewed_annotation_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.unreviewed_annotation_excluded_count} ảnh có box thủ công chưa review. Đánh dấu ảnh đã review để đưa nhãn vào dataset.</p>}
           {report.errors.length > 0 && <div className="dataset-findings errors"><h3>Lỗi cần sửa</h3><ul>{report.errors.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></div>}
           {report.warnings.length > 0 && <div className="dataset-findings warnings"><h3>Cảnh báo</h3><ul>{report.warnings.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></div>}
         </section>}

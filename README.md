@@ -4,7 +4,7 @@ FrameForge là ứng dụng desktop local-first để tạo bộ dữ liệu obj
 
 Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận; dataset trên 20.000 ảnh và cấu hình trên 300 epoch cho từng `imgsz` được hỗ trợ. `imgsz` chỉ đổi kích thước ảnh trong training, không thay đổi giới hạn video nguồn FHD. Mỗi kích thước train chạy thành một job riêng, không nạp toàn bộ dataset vào RAM (`cache=False`). Đặt Patience = 0 để tắt early stopping. Fixture 20.003 ảnh và queue 301 epoch đã qua kiểm tra fake trainer; chưa đo throughput YOLO thật ở quy mô đó.
 
-Fine-tune và inference nhận checkpoint YOLO11n đã đăng ký, xác minh checksum và class schema. Có thể nhập `.pt` tương thích sau khi xác nhận tin cậy; FrameForge kiểm tra task/kiến trúc YOLO11n, giới hạn file 2 GiB, lưu bản sao quản lý riêng và giữ provenance. `.pt` có thể chứa mã thực thi, nên chỉ nhập nguồn bạn tin cậy. Checkpoint được phát hiện khi quét thư mục vẫn chưa tin cậy cho đến khi nhập riêng. Gợi ý AI và candidate ảnh âm tính phải được người dùng duyệt trước khi vào dataset.
+Fine-tune và inference nhận checkpoint YOLO11n đã đăng ký, xác minh checksum và class schema. Có thể nhập `.pt` tương thích sau khi xác nhận tin cậy; FrameForge kiểm tra task/kiến trúc YOLO11n, giới hạn file 2 GiB, lưu bản sao quản lý riêng và giữ provenance. `.pt` có thể chứa mã thực thi, nên chỉ nhập nguồn bạn tin cậy. Checkpoint được phát hiện khi quét thư mục vẫn chưa tin cậy cho đến khi nhập riêng. Box AI và candidate ảnh âm tính phải được người dùng duyệt; ảnh còn box thủ công chưa review cũng bị loại khỏi dataset mặc định.
 
 Inference bỏ box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung. Nếu mọi box đều bị bỏ qua theo quy tắc này, ảnh không bị đánh dấu âm tính và vẫn cần người dùng review.
 

@@ -68,10 +68,11 @@ def create_dataset_project(tmp_path: Path, invalid_class: bool = False) -> tuple
             {
                 "path": str(image_paths["a_positive"]), "source_path": str(tmp_path / "source-a.mp4"),
                 "source_id": "source-a", "frame_index": 10, "timestamp_seconds": 1.0,
-                "width": 64, "height": 48, "status": "ready",
+                "width": 64, "height": 48, "status": "reviewed",
                 "annotations": [{
                     "id": "a-box", "class_id": 99 if invalid_class else 0,
                     "x_min": 8, "y_min": 4, "x_max": 24, "y_max": 20,
+                    "review_status": "reviewed",
                 }],
             },
             {
@@ -82,10 +83,11 @@ def create_dataset_project(tmp_path: Path, invalid_class: bool = False) -> tuple
             {
                 "path": str(image_paths["b_positive"]), "source_path": str(tmp_path / "source-b.mp4"),
                 "source_id": "source-b", "frame_index": 10, "timestamp_seconds": 1.0,
-                "width": 64, "height": 48, "status": "ready",
+                "width": 64, "height": 48, "status": "reviewed",
                 "annotations": [{
                     "id": "b-box", "class_id": 1,
                     "x_min": 16, "y_min": 12, "x_max": 48, "y_max": 36,
+                    "review_status": "reviewed",
                 }],
             },
             {
@@ -118,6 +120,7 @@ def create_reviewed_lineage_project(tmp_path: Path, reviewed: bool = True) -> Pa
             "annotations": [{
                 "id": source_id + "-box", "class_id": class_id,
                 "x_min": 8, "y_min": 5, "x_max": 32, "y_max": 36,
+                "review_status": "reviewed",
             }],
         })
     save_project(str(project_path), project)
@@ -952,6 +955,80 @@ def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(t
     assert report["duplicate_basename_groups"] == 1
 
 
+def test_dataset_export_excludes_unreviewed_manual_annotations(tmp_path: Path):
+    project_path, image_paths = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    unreviewed = next(item for item in project["images"] if item["path"] == str(image_paths["a_positive"]))
+    unreviewed["status"] = "ready"
+    unreviewed["annotations"][0]["review_status"] = "unreviewed"
+    save_project(str(project_path), project)
+
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23)
+
+    assert report["valid"] is True
+    assert report["included_image_count"] == 2
+    assert report["positive_image_count"] == 1
+    assert report["unreviewed_annotation_excluded_count"] == 1
+
+    output_root = tmp_path / "review-gated-exports"
+    output_root.mkdir()
+    result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23)
+    manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert all(item["source_image"] != str(image_paths["a_positive"]) for item in manifest["images"])
+
+
+def test_dataset_lineage_excludes_unreviewed_training_annotations_from_parent(tmp_path: Path):
+    project_path = create_reviewed_lineage_project(tmp_path)
+    output_root = tmp_path / "parent-exports"
+    output_root.mkdir()
+    base = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
+        freeze_evaluation_set=True,
+    )
+    manifest_path = Path(base["path"]) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    train_positive = next(
+        item for item in manifest["images"] if item["split"] == "train" and item["annotation_count"] > 0
+    )
+    train_positive["annotation_provenance"][0]["review_status"] = "unreviewed"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    report = validate_dataset(
+        str(project_path), "source", 0.8, 0.2, 0, 23,
+        parent_manifest_path=str(manifest_path), replay_strategy="all",
+    )
+
+    assert report["valid"] is True
+    assert report["unreviewed_parent_train_excluded_count"] == 1
+    assert any("ảnh train trong parent" in warning for warning in report["warnings"])
+
+
+def test_dataset_lineage_rejects_unreviewed_annotations_in_frozen_parent(tmp_path: Path):
+    project_path = create_reviewed_lineage_project(tmp_path)
+    output_root = tmp_path / "parent-exports"
+    output_root.mkdir()
+    base = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
+        freeze_evaluation_set=True,
+    )
+    manifest_path = Path(base["path"]) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    evaluation_positive = next(
+        item for item in manifest["images"]
+        if item["split"] in {"val", "test"} and item["annotation_count"] > 0
+    )
+    evaluation_positive["annotation_provenance"][0]["review_status"] = "unreviewed"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    report = validate_dataset(
+        str(project_path), "source", 0.8, 0.2, 0, 23,
+        parent_manifest_path=str(manifest_path), replay_strategy="all",
+    )
+
+    assert report["valid"] is False
+    assert any("Fixed validation/test" in error for error in report["errors"])
+
+
 def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_path: Path):
     project_path, image_paths = create_dataset_project(tmp_path)
     project = load_project(str(project_path))
@@ -1123,6 +1200,7 @@ def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_p
         "status": "reviewed", "annotations": [{
             "id": "source-e-box", "class_id": 0,
             "x_min": 10, "y_min": 4, "x_max": 34, "y_max": 35,
+            "review_status": "reviewed",
         }],
     })
     save_project(str(project_path), project)

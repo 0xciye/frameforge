@@ -268,6 +268,13 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Kiểm tra:** `pnpm test:engine` — 93 passed; `pnpm build` — thành công; `git diff --check` — sạch. Chưa click-through UI trên app bundle mới.
 - **Git:** Commit milestone được lưu local trên `feature/manual-labeling`; remote GitHub chưa xác thực được trong workspace.
 
+### 2026-10-14 — Chặn export và replay nhãn thủ công chưa review
+
+- **Thay đổi:** Dataset validation/export loại toàn bộ ảnh còn box thủ công `unreviewed` và báo số ảnh bị loại. Replay parent bỏ ảnh train cũ có nhãn thủ công hoặc negative chưa review; parent có fixed validation/test chứa box thủ công chưa review bị từ chối.
+- **Kiểm tra:** `./.venv/bin/python -m pytest engine/tests -q` — 96 passed trong 10,53 giây; `pnpm build` — thành công với 1.922 module bằng Node.js runtime đi kèm Codex; `git diff --check` — sạch.
+- **Phạm vi video:** Giữ nguyên giới hạn nguồn tối đa FHD 1920×1080; video lớn hơn bị từ chối ở import, preview và extraction, không scale và không thêm lựa chọn độ phân giải cao hơn. `imgsz` training vẫn riêng biệt.
+- **Chưa xác minh:** Chưa click-through UI trên app bundle mới. Benchmark media vẫn là fixture H.264 FHD tổng hợp, không phải soak test nhiều giờ trên footage thực.
+
 ## Quy trình thay đổi
 
 Đọc `AGENTS.md`, `agent.md`, `PRODUCT.md`, `DESIGN.md` và mục liên quan trong file này trước khi sửa. Sau thay đổi đáng kể, chạy kiểm tra phù hợp, ghi kết quả thật, cập nhật tài liệu và xem lại diff. Không commit môi trường `.venv`, `node_modules`, cache, media người dùng hoặc model weights.

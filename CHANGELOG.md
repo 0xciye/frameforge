@@ -3,6 +3,7 @@
 ## Chưa phát hành — Workspace trích xuất
 
 - Tự lưu snapshot project và trạng thái workspace; tự khôi phục khi mở app mà không hiện hộp thoại. Nếu `.ffproj` nguồn mất hoặc checksum thay đổi, khôi phục thành dự án chưa lưu để tránh ghi đè.
+- Dataset validation/export loại ảnh còn box thủ công `unreviewed`; báo số ảnh bị loại. Replay parent bỏ ảnh train cũ chưa review và từ chối dùng nhãn thủ công chưa review trong fixed validation/test.
 - Thêm nhập checkpoint `.pt` YOLO11n detection có xác nhận tin cậy; kiểm tra task/kiến trúc/class, giới hạn 2 GiB, SHA-256 và lưu bản sao quản lý riêng. Model đã nhập xuất hiện trong inference/fine-tune theo class schema; discovered checkpoint vẫn chưa tin cậy. Đã kiểm tra bằng fake runtime, chưa click-through với checkpoint thật.
 - Bỏ qua detection box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung; báo số box bị bỏ qua và không tạo negative candidate nếu tất cả box đều bị bỏ qua.
 - Làm rõ dHash ngay dưới thanh trượt: giá trị 5 là số bit khác tối đa giữa hai hash 64-bit, không phải số ảnh; tổng kết gallery báo số crop gần giống thực tế bị lọc.

@@ -152,6 +152,7 @@ def _read_parent_dataset(manifest_value: str, class_names: List[str], config: Di
         if not isinstance(provenance, list):
             raise ValueError("Provenance annotation của parent không hợp lệ.")
         annotations: List[Dict[str, Any]] = []
+        has_unreviewed_manual = False
         try:
             label_text = label_bytes.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -176,20 +177,26 @@ def _read_parent_dataset(manifest_value: str, class_names: List[str], config: Di
             source_provenance = provenance[index] if index < len(provenance) and isinstance(provenance[index], dict) else {}
             if source_provenance.get("class_id", class_id) != class_id:
                 raise ValueError("Class provenance parent không khớp label YOLO.")
+            annotation_source = source_provenance.get("source", "manual")
+            annotation_review_status = source_provenance.get("review_status", "unreviewed")
+            if annotation_source == "manual" and annotation_review_status != "reviewed":
+                has_unreviewed_manual = True
             annotations.append({
                 "class_id": class_id,
                 "x_min": x_min,
                 "y_min": y_min,
                 "x_max": x_max,
                 "y_max": y_max,
-                "source": source_provenance.get("source", "manual"),
-                "review_status": source_provenance.get("review_status", "unreviewed"),
+                "source": annotation_source,
+                "review_status": annotation_review_status,
                 "confidence": source_provenance.get("confidence"),
                 "source_model_id": source_provenance.get("source_model_id"),
                 "checkpoint_sha256": source_provenance.get("checkpoint_sha256"),
             })
         if len(annotations) != row.get("annotation_count") or len(provenance) != len(annotations):
             raise ValueError("Số label parent không khớp provenance manifest.")
+        if split in {"val", "test"} and has_unreviewed_manual:
+            raise ValueError("Fixed validation/test của parent chứa box thủ công chưa review; không thể dùng làm tập đánh giá.")
         parent_sample = {
             "path": str(row.get("source_image") or image_asset),
             "parent_asset_path": str(image_asset),
@@ -204,6 +211,7 @@ def _read_parent_dataset(manifest_value: str, class_names: List[str], config: Di
             "height": height,
             "status": row.get("status"),
             "annotations": annotations,
+            "replay_eligible": not has_unreviewed_manual and (bool(annotations) or row.get("status") == "reviewed"),
             "sha256": digest,
             "group_key": group_key,
             "crop_rect": row.get("crop_rect"),
@@ -269,7 +277,8 @@ def _compose_lineage_samples(
     parent_splits = parent["by_split"]
     fixed_val = parent_splits["val"]
     frozen_test = parent_splits["test"]
-    historical = parent_splits["train"]
+    all_historical = parent_splits["train"]
+    historical = [sample for sample in all_historical if sample.get("replay_eligible", True)]
     fixed_groups = {sample["group_key"] for sample in fixed_val + frozen_test}
     historical_groups = {sample["group_key"] for sample in historical}
     if replay_strategy == "all":
@@ -282,10 +291,20 @@ def _compose_lineage_samples(
     warnings: List[str] = []
     if replay_strategy == "balanced" and not replay_groups:
         warnings.append("Parent không có nhóm positive đủ class để chọn replay cân bằng; chỉ dùng dữ liệu mới và các split cố định.")
+    excluded_parent_train_count = len(all_historical) - len(historical)
+    if excluded_parent_train_count:
+        warnings.append(
+            "Đã loại {0} ảnh train trong parent vì có nhãn thủ công chưa review hoặc ảnh âm tính chưa review.".format(
+                excluded_parent_train_count
+            )
+        )
     by_digest: Dict[str, List[Dict[str, Any]]] = {}
     for sample in current_samples:
         by_digest.setdefault(sample["sha256"], []).append(sample)
-    parent_digest_split = parent["digest_splits"]
+    parent_digest_split = {
+        digest: split for digest, split in parent["digest_splits"].items() if split != "train"
+    }
+    parent_digest_split.update({sample["sha256"]: "train" for sample in historical})
     used_current_paths: set[str] = set()
     result: List[Dict[str, Any]] = []
 
@@ -344,6 +363,7 @@ def _compose_lineage_samples(
     return result, warnings, {
         "new_image_count": new_image_count,
         "replayed_image_count": replayed_image_count,
+        "unreviewed_parent_train_excluded_count": excluded_parent_train_count,
         "fixed_validation_count": len(fixed_val),
         "frozen_test_count": len(frozen_test),
     }
@@ -511,6 +531,7 @@ def _analyze(
     exact_hashes: Dict[str, List[str]] = {}
     class_counts = [0 for _ in class_names]
     reviewed_negative_count = 0
+    unreviewed_annotation_excluded_count = 0
     positive_count = 0
     annotation_count = 0
     pending_suggestion_count = 0
@@ -555,6 +576,7 @@ def _analyze(
         cleaned_annotations = []
         image_invalid = False
         has_pending_ai = False
+        has_unreviewed_manual = False
         image_pending_ai_count = 0
         for annotation in annotations:
             if not isinstance(annotation, dict):
@@ -628,6 +650,8 @@ def _analyze(
             if source == "ai" and review_status == "needs_review":
                 has_pending_ai = True
                 image_pending_ai_count += 1
+            if source == "manual" and review_status == "unreviewed":
+                has_unreviewed_manual = True
             if source == "ai" and review_status != "reviewed":
                 continue
             cleaned_annotations.append({
@@ -658,6 +682,8 @@ def _analyze(
             item for item in negative_candidates
             if isinstance(item, dict) and item.get("review_status") == "confirmed_negative"
         ]
+        if has_unreviewed_manual:
+            unreviewed_annotation_excluded_count += 1
         if pending_candidates:
             pending_negative_candidate_count += len(pending_candidates)
             candidate_negative_count += 1
@@ -666,6 +692,8 @@ def _analyze(
         status = image.get("status", "ready")
         if status not in {"ready", "reviewed"}:
             errors.append("Trạng thái review của ảnh không hợp lệ: {0}".format(image_path))
+            continue
+        if has_unreviewed_manual:
             continue
         if cleaned_annotations:
             positive_count += 1
@@ -735,6 +763,12 @@ def _analyze(
         warnings.append(
             "Đã loại {0} ảnh trống chưa review hoặc candidate âm tính chưa được xác nhận; ảnh AI không phát hiện chỉ vào dataset sau khi người dùng xác nhận.".format(candidate_negative_count)
         )
+    if unreviewed_annotation_excluded_count:
+        warnings.append(
+            "Đã loại {0} ảnh có box thủ công chưa được review; hãy đánh dấu ảnh đã review để đưa nhãn vào dataset.".format(
+                unreviewed_annotation_excluded_count
+            )
+        )
     if pending_suggestion_count:
         warnings.append(
             "Đã loại {0} gợi ý AI chưa duyệt khỏi nhãn YOLO mặc định; ảnh chỉ có gợi ý đang chờ duyệt không được dùng làm negative.".format(pending_suggestion_count)
@@ -768,6 +802,7 @@ def _analyze(
     lineage_counts = {
         "new_image_count": 0,
         "replayed_image_count": 0,
+        "unreviewed_parent_train_excluded_count": 0,
         "fixed_validation_count": 0,
         "frozen_test_count": 0,
     }
@@ -870,6 +905,8 @@ def _analyze(
         "frozen_test_count": lineage_counts["frozen_test_count"],
         "positive_image_count": positive_count,
         "reviewed_negative_count": reviewed_negative_count,
+        "unreviewed_annotation_excluded_count": unreviewed_annotation_excluded_count,
+        "unreviewed_parent_train_excluded_count": lineage_counts["unreviewed_parent_train_excluded_count"],
         "candidate_negative_excluded_count": candidate_negative_count,
         "annotation_count": annotation_count,
         "pending_suggestion_count": pending_suggestion_count,
@@ -1123,7 +1160,8 @@ def export_yolo_dataset(
                 for key in (
                     "image_count", "included_image_count", "new_image_count", "replayed_image_count",
                     "fixed_validation_count", "frozen_test_count", "positive_image_count",
-                    "reviewed_negative_count", "candidate_negative_excluded_count",
+                    "reviewed_negative_count", "unreviewed_annotation_excluded_count",
+                    "unreviewed_parent_train_excluded_count", "candidate_negative_excluded_count",
                     "annotation_count", "pending_suggestion_count", "class_distribution", "exact_duplicate_count",
                 )
             },
