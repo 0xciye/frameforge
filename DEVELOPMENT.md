@@ -304,7 +304,7 @@ Windows chưa được build hoặc xác nhận. Các việc còn lại: xác nh
 - Xóa `agent.md` và `TASKS.md` vì nội dung lặp lại hướng dẫn chuẩn trong `AGENTS.md` và trạng thái/roadmap trong `DEVELOPMENT.md`.
 - GitHub Actions chạy build frontend, engine tests và Rust formatting cho pull request và push lên `main`.
 - Kiểm tra local: `pnpm test:engine` — 100 passed; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` — thành công; `cargo check --manifest-path src-tauri/Cargo.toml` — thành công; `git diff --check` — thành công.
-- GitHub Actions lần đầu sẽ chạy trên pull request này; chưa có kết quả hosted CI tại thời điểm ghi nhận.
+- Hosted GitHub Actions của PR #3 — `verify` passed trong 51 giây, gồm frontend build, engine tests và Rust formatting.
 
 ### 2026-10-14 — Rà soát source và merge PR #1
 
