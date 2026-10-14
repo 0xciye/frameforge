@@ -43,6 +43,7 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 ## NOT_IMPLEMENTED
 
 - Negative-image sampling policy and sampling ratios remain unimplemented; candidate-negative decisions require human review.
+- Trusted user checkpoint import for inference/fine-tuning is not implemented. Add an explicit trust step, validate YOLO detection task/architecture/class schema and file checksum, preserve provenance, and keep discovered external checkpoints unavailable until imported.
 - Guided workspace, contextual next actions, full workflow status, active-learning suggestions, and model quality dashboard.
 - Actual deployment latency/FPS/throughput/memory benchmark and model-generation comparison. These targets remain `not_measured`; the video extraction benchmark is not a model benchmark.
 - Training resume and session restoration in the frontend.
@@ -57,11 +58,12 @@ This ledger recovers branch `feature/manual-labeling`; fixed-set evaluation and 
 
 ## Dependencies and next work
 
-1. **Next:** verify fixed-set evaluation and Champion/Challenger using a real registered checkpoint; the local registry currently has no usable checkpoint, so do not substitute demo metrics.
-2. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
-3. Implement real deployment-target benchmarking; keep latency/FPS/RAM targets `not_measured` until measured.
-4. Complete resume training and session restoration.
-5. Validate real YOLO training throughput/stability on a representative 20,000+ image dataset for 300+ epochs per size.
-6. Complete Windows validation when a Windows target is available.
+1. **Next:** implement trusted user checkpoint import for compatible YOLO11n detection models; require explicit user trust, preserve source/hash/class-schema provenance, and register only validated checkpoints.
+2. Use an imported or newly trained checkpoint to click-through inference, manual review, dataset export, fixed-set evaluation and Champion/Challenger; do not substitute demo detections or metrics.
+3. Add the three required deployment exports and validate precision/accuracy/runtime before claiming deployment readiness.
+4. Implement real deployment-target benchmarking; keep latency/FPS/RAM targets `not_measured` until measured.
+5. Complete resume training and session restoration.
+6. Validate real YOLO training throughput/stability on a representative 20,000+ image dataset for 300+ epochs per size.
+7. Complete Windows validation when a Windows target is available.
 
 Update this file and `README.md`, `AGENTS.md`, `agent.md`, and `DEVELOPMENT.md` after each completed task; update product/design notes and `CHANGELOG.md` when applicable. Do not clear inherited working-tree changes.

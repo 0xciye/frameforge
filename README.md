@@ -6,6 +6,8 @@ Huấn luyện YOLO11n trên CPU hoặc backend MPS/CUDA mà PyTorch xác nhận
 
 Fine-tune/inference chỉ nhận checkpoint YOLO11n nội bộ có registry và checksum còn khớp. Gợi ý AI và candidate ảnh âm tính phải được người dùng duyệt trước khi vào dataset.
 
+Nạp checkpoint `.pt` bên ngoài để dùng inference/fine-tune chưa triển khai; model được phát hiện trong thư mục ngoài vẫn chưa tin cậy và không tự động được nạp.
+
 Inference bỏ box chạm sát biên crop vì object có thể bị cắt hoặc lớn hơn khung. Nếu mọi box đều bị bỏ qua theo quy tắc này, ảnh không bị đánh dấu âm tính và vẫn cần người dùng review.
 
 Tab Huấn luyện có fixed-set evaluation và Champion/Challenger: chỉ so sánh cùng fixed validation, fingerprint/class schema và điều kiện inference/runtime/phần cứng; kiểm tra checksum, mục tiêu chất lượng và regression theo class; promote cần thao tác xác nhận và có thể rollback. Engine có fake-runtime coverage cho luồng này, nhưng máy hiện chưa có checkpoint nội bộ để xác minh với model thật. Benchmark inference triển khai và ONNX/TensorRT/OpenVINO export chưa khả dụng; ONNX Runtime hiện chỉ đọc tensor/metadata.

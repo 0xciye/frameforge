@@ -19,6 +19,7 @@
 | Champion/Challenger và promotion history | IMPLEMENTED_UNVERIFIED | Engine so sánh fixed validation cùng fingerprint/schema/điều kiện/phần cứng, chặn checksum/target/regression, yêu cầu promote thủ công và hỗ trợ rollback; fake-runtime tests pass. App chạy MPS nhưng registry không có checkpoint để click-through model thật. |
 | Smart Folder Discovery | IMPLEMENTED | Quét giới hạn có progress/hủy; fixture xác nhận YAML dataset, run, metrics, symlink, cancel và đường dẫn ngoài scope; `.pt` chỉ được liệt kê, không nạp |
 | Registry run ngoài | IMPLEMENTED | Metadata chỉ lưu khi người dùng chọn; checkpoint ngoài luôn `checkpoint_trusted=false` và không khả dụng cho fine-tune |
+| Import model YOLO bên ngoài | NOT_IMPLEMENTED | Chưa có trust flow, xác minh kiến trúc/class schema, sao chép quản lý hoặc đăng ký checkpoint cho inference/fine-tune |
 | YOLO11n training trên CPU/MPS và queue nhiều imgsz | TESTED_MACOS | Smoke một epoch YOLO11n thật trên fixture nhỏ chạy bằng MPS Apple M1 Pro. Kiểm tra synthetic 20.003 ảnh 320×320 và chuyển cấu hình 301 epoch tới hai imgsz bằng fake runtime; chưa xác nhận throughput/độ ổn định YOLO thật ở quy mô đầy đủ. |
 | Registry checkpoint và fine-tuning | TESTED_ENGINE | Fine-tune chỉ nhận checkpoint YOLO11n detection nội bộ đã đăng ký, nằm trong run và khớp checksum ở tệp, record và registry; từ chối `.pt` ngoài hoặc chưa đăng ký. |
 | Session snapshot engine | PARTIAL | Engine có `save_session`/`load_session`, nhưng frontend chưa tự lưu hoặc khôi phục phiên khi mở app. |
