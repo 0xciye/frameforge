@@ -1,6 +1,6 @@
 # FrameForge v1.0 task ledger
 
-This ledger resumes branch `feature/manual-labeling` at `f923653`; current implementation and verification are recorded in `DEVELOPMENT.md`. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
+This ledger recovered branch `feature/manual-labeling` at `f923653`; the current head is `f6ad23c`, with implementation and verification recorded in `DEVELOPMENT.md`. Preserve all existing changes. Current source-video scope is **at most 1920×1080**: reject larger sources at import, preview and extraction; do not downscale them or add higher-resolution input options. Smaller sources retain their native size.
 
 ## COMPLETED_VERIFIED
 
@@ -13,7 +13,7 @@ This ledger resumes branch `feature/manual-labeling` at `f923653`; current imple
 - `predict_crops` runs real Ultralytics inference on batches, matches the checkpoint class schema, runs NMS once, applies inclusive confidence/class filters, and returns pixel-space boxes. Checkpoint identity/hash is rechecked before loading.
 - Verification for this turn: 63 engine tests, TypeScript/Vite production build, Rust format/check and `git diff --check`; current source changes have not yet been rebuilt into a macOS app bundle. Full-scale actual YOLO training remains unverified.
 - A prior 4.33 MiB macOS app bundle passed bundled-engine JSON-lines health before the current batch-inference changes.
-- Commit `85dc842` records the inherited FHD/training/discovery implementation plus checkpoint-trust recovery. GitHub push failed because no HTTPS username credential was available.
+- Commit `f6ad23c` adds project-wide inference, reviewed negative candidates and large-dataset training plumbing; it is local and unpushed. The inherited base includes commit `85dc842` for FHD/training/discovery and checkpoint-trust recovery.
 
 ## IMPLEMENTED_UNVERIFIED
 
@@ -47,7 +47,7 @@ This ledger resumes branch `feature/manual-labeling` at `f923653`; current imple
 ## BLOCKED
 
 - Windows 10/11 x64 packaging and RX 6600/DirectML hardware validation require access to a Windows target machine; do not mark Windows support verified before those checks.
-- GitHub push is currently blocked. Feature commit `f202b4b` and its documentation follow-up are local and unpushed; HTTPS push returned `could not read Username for 'https://github.com': Device not configured`, and SSH push returned `Host key verification failed`. Retry after HTTPS credentials or the GitHub SSH host key are configured.
+- GitHub push is currently blocked. `git push origin feature/manual-labeling` for `f6ad23c` returned `could not read Username for 'https://github.com': Device not configured`. Retry after HTTPS credentials are available; previous SSH push also failed because the GitHub host key was not verified.
 
 ## Dependencies and next work
 

@@ -177,6 +177,7 @@ Response cuối có `id`, `ok` và `data` hoặc `error`; progress là các resp
 - **Giới hạn video:** Chỉ nhận nguồn video tối đa FHD 1920×1080; nguồn vượt chiều rộng hoặc chiều cao bị từ chối tại import, preview và extraction, không tự scale. Nguồn nhỏ hơn giữ nguyên độ phân giải gốc.
 - **Kiểm tra lượt này:** `./.venv/bin/python -m pytest engine/tests -q` — 63 passed trong 10,19 giây; `pnpm build` — thành công; `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`, `cargo check --manifest-path src-tauri/Cargo.toml` và `git diff --check` — thành công.
 - **Chưa xác minh:** Chưa build lại app bundle hoặc click-through inference UI bằng checkpoint thật. Phép đo media một giờ ở mục trước là một lượt extraction, không phải soak test nhiều giờ. Train YOLO thật trên hơn 20.000 ảnh trong hơn 300 epoch vẫn chưa được chạy.
+- **Git:** Commit `f6ad23c` (`feat: add batch inference and large dataset support`) đã lưu local. Push `origin feature/manual-labeling` thất bại vì terminal không có GitHub HTTPS username (`could not read Username for 'https://github.com': Device not configured`).
 - **Bước tiếp:** Dataset lineage/replay và frozen test set, rồi evaluation cố định và Champion/Challenger.
 
 ### 2026-10-14 — YOLO11n training và xác nhận preview
