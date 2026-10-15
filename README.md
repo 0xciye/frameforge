@@ -57,7 +57,7 @@ Media, gán nhãn, dataset, inference và workflow YOLO11n đã được triển
 
 ## Tình trạng phát hành v1.0
 
-FrameForge vẫn là bản tiền phát hành `0.1.0`, chưa được xác nhận production-ready. App macOS portable đã bundle Python, PyTorch và Ultralytics; mở trực tiếp `FrameForge.app`, không cần cài Python riêng. Bundle hiện tại khoảng 1,44 GiB và engine self-check thành công. Windows portable folder được cấu hình build trong CI nhưng chưa cài/chạy trên máy Windows thật. Ký/notarize, kiểm tra máy sạch, click-through inference với model/dataset thật và soak video thực vẫn là cổng phát hành. Xem [DEVELOPMENT.md](DEVELOPMENT.md).
+FrameForge vẫn là bản tiền phát hành `0.1.0`, chưa được xác nhận production-ready. App macOS portable đã bundle Python, PyTorch và Ultralytics; mở trực tiếp `FrameForge.app`, không cần cài Python riêng. Bundle hiện tại khoảng 1,44 GiB và engine self-check thành công. CI run `38723939528` build/smoke-check thành công app macOS và Windows portable folder; Windows vẫn chưa được cài/chạy trên máy thật. Ký/notarize, kiểm tra máy sạch, click-through inference với model/dataset thật và soak video thực vẫn là cổng phát hành. Xem [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Giấy phép
 
