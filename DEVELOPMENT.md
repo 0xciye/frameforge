@@ -13,7 +13,7 @@
 | Migration ngưỡng dHash project/session | TESTED_ENGINE | Giá trị legacy 5 chuyển về 1 một lần; version marker giữ lựa chọn mới; `extraction_settings` của ảnh không đổi |
 | Nạp và kiểm tra metadata ONNX | IMPLEMENTED | Rust xác thực phần mở rộng; engine chạy session CPU; chưa có model fixture để xác nhận model cụ thể |
 | YOLO11n inference adapter | TESTED_ENGINE | Chỉ nạp checkpoint YOLO11n đã đăng ký/khớp SHA-256 và class schema; gồm model train nội bộ hoặc checkpoint đã qua trust flow; Ultralytics NMS một lần, confidence filter inclusive, bỏ box sát biên crop; fake-runtime test |
-| Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Engine test batch nhiều chunk, fingerprint recheck, candidate negative và export; box bị bỏ qua sát biên không tạo negative; UI có nút chạy project, tiến độ và review negative; chưa click-through vì registry không có checkpoint khả dụng |
+| Auto-label ảnh hiện tại, batch project và candidate negative | IMPLEMENTED_UNVERIFIED | Nút Auto label trên toolbar mở tab Gán nhãn; inference ảnh hiện tại/batch project, progress, review và candidate negative dùng engine thật. Engine test batch nhiều chunk, fingerprint recheck và export; box sát biên không tạo negative. Chưa click-through inference vì registry không có checkpoint khả dụng. |
 | Gán nhãn thủ công | IMPLEMENTED | Vẽ/sửa/di chuyển/resize/xóa box Head (0), Body (1); undo/redo, review, autosave SQLite; lưu dự án trước khi chỉnh sửa |
 | Dataset validation, negative sampling, grouped splits, YOLO export and lineage | TESTED_ENGINE | Negative sampling theo seed (mặc định 10%, 0–100%), loại ảnh gần như trùng bằng dHash ≤1; fixed val/test giữ negative kể cả khi vượt quota; export loại box/candidate AI đang chờ hoặc bị loại |
 | Đánh giá model trên fixed validation/test | IMPLEMENTED_UNVERIFIED | UI, engine và Rust validation đã nối; lưu metric tổng/per-class, target, conditions và history; fake-runtime tests bao phủ hash/leakage/trust/cancel. Chưa xác minh bằng checkpoint nội bộ thật; registry local hiện không có model usable. |
@@ -27,26 +27,26 @@
 | Khôi phục phiên làm việc | TESTED_ENGINE + BUILT_UI | Snapshot riêng tư lưu project và trạng thái workspace; frontend tự lưu sau debounce, tự khôi phục không hiện hộp thoại. Nếu dự án gốc mất hoặc checksum đổi, snapshot mở thành dự án chưa lưu. Engine có regression tests; UI đã build nhưng chưa click-through trên app bundle mới. |
 | Resume run sau khi dừng/gián đoạn | NOT_STARTED | Chưa có thao tác tiếp tục tiến trình từ checkpoint gần nhất. |
 | Benchmark triển khai và model export | PARTIAL | Fixed-set evaluation và Champion/Challenger đã triển khai; latency/FPS/throughput/memory benchmark và deployment export chưa triển khai. Media batch benchmark FHD 4 giờ là phép đo extraction, không phải model benchmark. |
-| Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Run CI `38564201938` pass tests và build MSI trên runner Windows; chưa cài/click-through trên máy người dùng/GPU. DirectML và RX 6600 chưa được kiểm chứng. |
-| CI frontend/engine/Rust đa nền tảng | PASSED_GITHUB_ACTIONS | Run `38564201938`: Ubuntu 3m05s, macOS 6m35s, Windows 13m10s đều pass; Windows MSI được tạo thành công. Có cảnh báo action Node.js 20 đang chạy Node.js 24; chưa ảnh hưởng kết quả. CI không xác nhận GPU/DirectML hoặc cài đặt trên máy người dùng. |
-| Đóng gói macOS | TESTED_MACOS | `pnpm tauri build --bundles app` tạo `FrameForge.app` 4,50 MiB; health JSON-lines từ Python engine trong bundle trả `status: ok` khi chạy bằng `.venv`. Chưa thử cài trên máy sạch. |
-| Đóng gói Windows MSI | BUILT_WINDOWS_CI | Windows MSI build pass trong run `38564201938`; chưa cài/click-through trên máy Windows và chưa ký để phân phối. |
-| Python runtime và dependencies trong installer | RELEASE_BLOCKER | Bundle hiện chỉ mang mã nguồn engine; người dùng phải tự cài Python cùng dependencies, và `engine[train]` cho training/inference. |
-| Ký phát hành macOS/Windows | RELEASE_BLOCKER | Chưa cấu hình notarization macOS hoặc ký MSI Windows; app bundle vừa build không phải installer đã ký để phân phối công khai. |
+| Windows 10/11, DirectML, RX 6600, đóng gói | PENDING_WINDOWS_VALIDATION | Workflow hiện build Windows portable folder; cần CI xanh cho commit này và cài/chạy click-through trên Windows thật. DirectML và RX 6600 chưa được kiểm chứng. |
+| CI frontend/engine/Rust đa nền tảng | PENDING_CURRENT_CHANGE | CI cũ `38564201938` chỉ xác nhận build MSI trước khi chuyển sang portable. Workflow mới build app macOS và Windows folder nhưng chưa có run kết quả cho thay đổi hiện tại. CI không xác nhận GPU/DirectML hoặc cài đặt trên máy người dùng. |
+| Đóng gói macOS portable | TESTED_MACOS | `pnpm build:portable` tạo `FrameForge.app` 1,44 GiB có Python/PyTorch/Ultralytics bundle. Engine health/training self-check pass; app mở được, UI hiện Engine sẵn sàng. Chưa kiểm tra trên máy Mac sạch hoặc ký/notarize. |
+| Đóng gói Windows portable folder | BUILT_WINDOWS_CI | Workflow CI dựng thư mục `FrameForge` gồm app executable và engine runtime, không dùng installer; cần xác minh artifact CI mới và cài/chạy click-through trên máy Windows thật. |
+| Python runtime và dependencies trong app portable | TESTED_MACOS | Runtime được bundle cùng app; app không yêu cầu người dùng cài Python riêng. PyTorch/Ultralytics self-check pass trên macOS hiện tại. |
+| Ký phát hành macOS/Windows | RELEASE_BLOCKER | Chưa cấu hình notarization macOS hoặc ký executable Windows; app portable chưa sẵn sàng phân phối công khai. |
 
 Thứ tự tiếp theo: dùng checkpoint YOLO11n thật đã nhập hoặc train để click-through inference → manual review → dataset export → fixed-set evaluation/Champion-Challenger. Sau đó tiếp tục deployment benchmark/export, resume training và Windows validation. Engine suite xác minh trust flow; registry local hiện chưa có checkpoint thật để kiểm tra luồng end-to-end. Video đầu vào tối đa FHD (1920×1080); nguồn lớn hơn bị từ chối, không scale hoặc thêm lựa chọn độ phân giải cao. `imgsz` là cấu hình training, không phải lựa chọn độ phân giải video.
 
 ## Cổng phát hành v1.0
 
-**Trạng thái: chưa production-ready; giữ phiên bản `0.1.0`.** Bundle macOS đã build được nhưng chưa cài được độc lập trên máy sạch. Trước khi gắn tag hoặc phát hành `1.0.0`, cần đóng các cổng sau:
+**Trạng thái: chưa production-ready; giữ phiên bản `0.1.0`.** App portable macOS đã mở được trên máy phát triển này; app sạch và Windows thật chưa xác minh. Trước khi gắn tag hoặc phát hành `1.0.0`, cần đóng các cổng sau:
 
-- Đóng gói hoặc cung cấp installer có thể thiết lập/kiểm tra Python runtime và dependencies trên máy sạch; xác nhận rõ phần cài thêm `engine[train]` nếu giữ nó tùy chọn.
-- Nhận kết quả CI mới trên Ubuntu/macOS/Windows; Windows MSI phải build và cài/chạy được trên máy Windows thật. DirectML/RX 6600 vẫn cần kiểm chứng riêng trên phần cứng đích.
-- Cấu hình và xác minh chữ ký/notarization macOS cùng chữ ký MSI Windows trước khi phân phối tải xuống công khai.
+- Thử mở app portable macOS trên máy sạch, không cài Python; ký và notarize app trước khi phân phối công khai.
+- Xác minh Windows portable folder từ CI bằng cài/chạy click-through trên máy Windows thật. DirectML/RX 6600 vẫn cần kiểm chứng riêng trên phần cứng đích.
+- Nhận CI xanh mới cho thay đổi hiện tại; cấu hình ký Windows portable executable trước khi phân phối tải xuống công khai.
 - Click-through inference/review/export/evaluation bằng checkpoint YOLO11n thật và dataset đã review; không dùng fixture để kết luận chất lượng model.
 - Chạy soak extraction bằng video FHD thực, nhiều codec/nội dung và thời lượng dài hơn batch fixture tổng hợp đã ghi ở trên.
 
-Thay đổi trong lượt rà soát này: nhập checkpoint `.pt` bằng bản sao riêng đã xác minh trước khi nạp, kiểm tra lại sau khi nạp và giới hạn đọc/sao chép 2 GiB; Rust chỉ giữ tối đa 256 KiB stderr cho mỗi request nhưng vẫn drain pipe. Sửa Windows để ghi hash label trên đúng byte UTF-8 và dùng đường dẫn Unicode khi đọc/ghi ảnh. Local: engine tests 110 passed, Rust format/check/test pass, frontend production build pass; `FrameForge.app` 4,50 MiB dựng thành công và engine trong bundle trả `status: ok`. CI `38564201938` pass Ubuntu/macOS/Windows, gồm build Windows MSI. Runtime Python, ký/notarize, cài Windows, checkpoint thật và soak footage thật vẫn là cổng mở.
+Thay đổi trong lượt rà soát này: nhập checkpoint `.pt` bằng bản sao riêng đã xác minh trước khi nạp, kiểm tra lại sau khi nạp và giới hạn đọc/sao chép 2 GiB; Rust chỉ giữ tối đa 256 KiB stderr cho mỗi request nhưng vẫn drain pipe. Sửa Windows để ghi hash label trên đúng byte UTF-8 và dùng đường dẫn Unicode khi đọc/ghi ảnh. Runtime PyInstaller được bundle cho app portable, workflow CI chuyển từ build MSI sang app macOS và Windows folder. Nút Auto label mở tab Gán nhãn để dùng inference thật. Bản macOS hiện tại 1,44 GiB, engine health/training self-check pass, app mở với Engine sẵn sàng; frontend build, 110 engine tests, Rust fmt/check đều pass. Windows thật, máy Mac sạch, ký/notarize, checkpoint thật và soak footage thật vẫn là cổng mở.
 
 ## Đo hiệu năng media
 

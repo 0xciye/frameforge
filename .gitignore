@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 .venv/
+engine/build/
+engine/dist/*
+!engine/dist/.gitkeep
 dist
 dist-ssr
 *.local

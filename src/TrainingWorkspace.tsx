@@ -132,7 +132,7 @@ async function engineRequest<T>(command: string, args: Record<string, unknown> =
 
 function formatBytes(value?: number | null) {
   if (!Number.isFinite(value) || !value) return "—";
-  const units = ["B", "KB", "GB", "TB"];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let size = value;
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }

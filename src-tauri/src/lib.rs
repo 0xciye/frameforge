@@ -168,20 +168,20 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         return Err("Mã tác vụ đang được sử dụng.".to_string());
     }
 
-    let script = engine_script_path(&app)?;
-    let python = engine_program(&script);
-    let mut child = Command::new(python)
-        .arg(script)
+    let (engine_program, engine_script) = engine_invocation(&app)?;
+    let mut engine_command = Command::new(engine_program);
+    if let Some(script) = engine_script {
+        engine_command.arg(script);
+    }
+    engine_command
         .env("FRAMEFORGE_APP_DATA", &app_data_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "Không chạy được Python engine. Hãy cài Python 3.10 trở lên hoặc đặt FRAMEFORGE_PYTHON. ({error})"
-            )
-        })?;
+        .stderr(Stdio::piped());
+    configure_engine_command(&mut engine_command);
+    let mut child = engine_command.spawn().map_err(|error| {
+        format!("Không chạy được engine tích hợp. Hãy đóng rồi mở lại ứng dụng. ({error})")
+    })?;
 
     let stdout = child
         .stdout
@@ -1306,23 +1306,47 @@ fn validate_existing_project_path(value: &str) -> Result<(), String> {
     }
 }
 
-fn engine_script_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let bundled_path = app
+fn engine_binary_path(resource_dir: &Path) -> PathBuf {
+    let executable = if cfg!(target_os = "windows") {
+        "frameforge-engine.exe"
+    } else {
+        "frameforge-engine"
+    };
+    resource_dir
+        .join("engine-runtime")
+        .join("frameforge-engine")
+        .join(executable)
+}
+
+fn engine_invocation(app: &AppHandle) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let resource_dir = app
         .path()
         .resource_dir()
-        .map_err(|error| format!("Không xác định được thư mục tài nguyên: {error}"))?
-        .join("engine")
-        .join("frameforge_engine.py");
-    if bundled_path.is_file() {
-        return Ok(bundled_path);
+        .map_err(|error| format!("Không xác định được thư mục tài nguyên: {error}"))?;
+    let bundled_engine = engine_binary_path(&resource_dir);
+    if bundled_engine.is_file() {
+        return Ok((bundled_engine, None));
     }
 
-    let development_path = project_root().join("engine").join("frameforge_engine.py");
-    if development_path.is_file() {
-        return Ok(development_path);
+    if !cfg!(debug_assertions) {
+        return Err("Không tìm thấy engine tích hợp trong app bundle.".to_string());
     }
-    Err("Không tìm thấy Python engine trong gói ứng dụng.".to_string())
+
+    let script = project_root().join("engine").join("frameforge_engine.py");
+    if !script.is_file() {
+        return Err("Không tìm thấy engine Python trong workspace phát triển.".to_string());
+    }
+    Ok((engine_program(), Some(script)))
 }
+
+#[cfg(target_os = "windows")]
+fn configure_engine_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_engine_command(_: &mut Command) {}
 
 fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1331,7 +1355,7 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn engine_program(script: &Path) -> PathBuf {
+fn engine_program() -> PathBuf {
     if let Some(program) = std::env::var_os("FRAMEFORGE_PYTHON") {
         return PathBuf::from(program);
     }
@@ -1347,7 +1371,6 @@ fn engine_program(script: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         PathBuf::from("python")
     } else {
-        let _ = script;
         PathBuf::from("python3")
     }
 }
@@ -1367,8 +1390,23 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ENGINE_DIAGNOSTIC_BYTES, read_engine_diagnostics};
+    use super::{MAX_ENGINE_DIAGNOSTIC_BYTES, engine_binary_path, read_engine_diagnostics};
     use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn packaged_engine_path_is_inside_app_resources() {
+        let path = engine_binary_path(Path::new("/app/Resources"));
+        let executable = if cfg!(target_os = "windows") {
+            "frameforge-engine.exe"
+        } else {
+            "frameforge-engine"
+        };
+        assert_eq!(
+            path,
+            PathBuf::from("/app/Resources/engine-runtime/frameforge-engine").join(executable)
+        );
+    }
 
     #[test]
     fn engine_diagnostics_are_bounded_and_the_pipe_is_drained() {

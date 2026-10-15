@@ -1138,7 +1138,7 @@ function App() {
             {inspectingModel ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
             <span>{inspectingModel ? "Đang kiểm tra" : "Kiểm tra model"}</span>
           </button>
-          <button className="tool-button tool-button-disabled" type="button" disabled title="Suy luận chưa được triển khai">
+          <button className="tool-button" type="button" onClick={() => void openLabelWorkspace()} title="Mở Gán nhãn để chọn checkpoint và chạy gợi ý AI">
             <Sparkles size={15} /><span>Auto label</span>
           </button>
           <button className="tool-button" type="button" onClick={() => void openDatasetWorkspace()} disabled={engineStatus !== "ready"} title="Kiểm tra và xuất dataset YOLO">

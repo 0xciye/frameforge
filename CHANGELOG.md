@@ -1,5 +1,11 @@
 # Nhật ký thay đổi
 
+## Chưa phát hành — Khôi phục lối vào Auto label
+
+- Nút Auto label trên toolbar trước đây bị disable với tooltip “Suy luận chưa được triển khai”, gây hiểu nhầm dù inference thật đã có trong tab Gán nhãn.
+- Nối nút này tới workflow Gán nhãn; người dùng chọn checkpoint đã xác minh và chạy inference ảnh/batch trong tab đó.
+- Đóng gói Python/PyTorch/Ultralytics vào app portable macOS và thư mục portable Windows, không dùng installer. App macOS hiện tại 1,44 GiB; engine self-check, app launch, 110 engine tests, frontend build và Rust fmt/check đã pass.
+
 ## Chưa phát hành — Rà soát production v1.0
 
 - Nhập checkpoint `.pt` qua bản sao trong vùng quản lý riêng; giới hạn kích thước cả khi đọc/sao chép, xác minh nguồn và bản sao trước khi nạp, rồi xác minh lại checksum sau khi nạp.
