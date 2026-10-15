@@ -64,6 +64,13 @@ jobs:
       - name: Run engine tests
         run: python -m pytest engine/tests -q
 
+      - name: Prepare packaged engine resource path for Rust checks
+        run: python -c "from pathlib import Path; Path('engine/dist').mkdir(parents=True, exist_ok=True)"
+
+      - name: Install self-contained runtime dependencies
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        run: python -m pip install -e "engine[package,train]"
+
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -73,10 +80,18 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
 
-      - name: Build macOS application bundle
-        if: runner.os == 'macOS'
-        run: pnpm tauri build --bundles app
+      - name: Build portable macOS or Windows app
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        run: pnpm build:portable
 
-      - name: Build Windows MSI
+      - name: Verify packaged engine in macOS app bundle
+        if: runner.os == 'macOS'
+        run: >-
+          python scripts/package_engine.py --smoke-only
+          "src-tauri/target/release/bundle/macos/FrameForge.app/Contents/Resources/engine-runtime/frameforge-engine/frameforge-engine"
+
+      - name: Verify packaged engine in Windows app folder
         if: runner.os == 'Windows'
-        run: pnpm tauri build --bundles msi
+        run: >-
+          python scripts/package_engine.py --smoke-only
+          "src-tauri/target/release/FrameForge/engine-runtime/frameforge-engine/frameforge-engine.exe"

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:engine && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -27,15 +27,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../engine/frameforge_engine.py": "engine/frameforge_engine.py",
-      "../engine/frameforge/__init__.py": "engine/frameforge/__init__.py",
-      "../engine/frameforge/media.py": "engine/frameforge/media.py",
-      "../engine/frameforge/project.py": "engine/frameforge/project.py",
-      "../engine/frameforge/dataset.py": "engine/frameforge/dataset.py",
-      "../engine/frameforge/discovery.py": "engine/frameforge/discovery.py",
-      "../engine/frameforge/inference.py": "engine/frameforge/inference.py",
-      "../engine/frameforge/session.py": "engine/frameforge/session.py",
-      "../engine/frameforge/training.py": "engine/frameforge/training.py"
+      "../engine/dist": "engine-runtime"
     },
     "icon": [
       "icons/32x32.png",

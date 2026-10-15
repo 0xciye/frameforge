@@ -12,7 +12,7 @@ FrameForge đưa quy trình từ media nguồn tới dataset và model vào mộ
 | Bước | Khả năng |
 |---|---|
 | Trích xuất | Preview frame thật, Exact Center Crop theo pixel, lọc blur và ảnh gần trùng bằng dHash. |
-| Gán nhãn | Vẽ và review bounding box; lưu nhãn cùng dự án SQLite `.ffproj`. |
+| Gán nhãn | Vẽ và review bounding box; nút **Auto label** mở tab này để chọn checkpoint YOLO11n đã xác minh, chạy gợi ý cho ảnh hoặc batch project và review kết quả trước khi xuất. |
 | Dataset | Kiểm tra dữ liệu, chia theo video/đoạn, xuất YOLO có provenance, negative sampling và lineage. |
 | Model | Train/fine-tune YOLO11n, suy luận có xác minh checkpoint, đánh giá trên fixed set và quản lý Champion/Challenger. |
 | Chuyển máy | Nhập thư mục làm việc đã chuyển để nối lại dataset; ảnh được dùng tại chỗ, checkpoint `.pt` cần xác nhận tin cậy riêng. |
@@ -49,7 +49,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-UI dùng React/TypeScript; Tauri gọi Python engine qua JSON-lines. Python runtime và dependencies cần cài riêng, standalone sidecar chưa có.
+UI dùng React/TypeScript; Tauri gọi Python engine qua JSON-lines. Bản app portable đang được đóng gói kèm Python runtime và dependencies; xem trạng thái và giới hạn xác minh trong [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Trạng thái
 
@@ -57,7 +57,7 @@ Media, gán nhãn, dataset, inference và workflow YOLO11n đã được triển
 
 ## Tình trạng phát hành v1.0
 
-FrameForge hiện vẫn là bản tiền phát hành `0.1.0`; chưa xác nhận production-ready. App yêu cầu Python 3.10+ và engine dependencies cài riêng; PyTorch/Ultralytics là phần cài thêm cho training/inference. CI run `38564201938` đã pass Ubuntu/macOS/Windows và build được Windows MSI; MSI chưa được cài/click-through trên máy Windows. Cài sạch Python dependencies và ký/notarize macOS/Windows cũng chưa hoàn tất. Không phát hành hoặc gắn nhãn `1.0.0` cho đến khi đóng các cổng này. Xem [DEVELOPMENT.md](DEVELOPMENT.md).
+FrameForge vẫn là bản tiền phát hành `0.1.0`, chưa được xác nhận production-ready. App macOS portable đã bundle Python, PyTorch và Ultralytics; mở trực tiếp `FrameForge.app`, không cần cài Python riêng. Bundle hiện tại khoảng 1,44 GiB và engine self-check thành công. CI run `38723939528` build/smoke-check thành công app macOS và Windows portable folder; Windows vẫn chưa được cài/chạy trên máy thật. Ký/notarize, kiểm tra máy sạch, click-through inference với model/dataset thật và soak video thực vẫn là cổng phát hành. Xem [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Giấy phép
 

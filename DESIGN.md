@@ -7,7 +7,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 ## Bố cục
 
 - Thanh công cụ trên cùng: dự án mới/mở/lưu, kiểm tra ONNX và trạng thái engine.
-- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Inference được gọi ngay trong tab Gán nhãn cho ảnh đang mở.
+- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Nút Auto label trên toolbar mở tab Gán nhãn; inference ảnh hiện tại hoặc cả project được chạy từ khu vực AI trong tab này.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
 - Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
