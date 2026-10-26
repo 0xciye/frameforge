@@ -491,6 +491,23 @@ fn run_engine_request(
     result
 }
 
+fn validate_checkpoint_argument(value: Option<&Value>) -> Result<(), String> {
+    let checkpoint = canonical_existing_path(
+        value
+            .and_then(Value::as_str)
+            .ok_or("Thiếu checkpoint inference.")?,
+    )?;
+    if !checkpoint.is_file()
+        || !checkpoint
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
+    {
+        return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
+    }
+    Ok(())
+}
+
 fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
     let arguments = arguments
         .as_object()
@@ -616,7 +633,10 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     );
                 }
             }
-            if arguments.get("replace").is_some_and(|value| !value.is_boolean()) {
+            if arguments
+                .get("replace")
+                .is_some_and(|value| !value.is_boolean())
+            {
                 return Err("Tùy chọn gợi ý lại không hợp lệ.".to_string());
             }
             Ok(())
@@ -795,6 +815,47 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     ));
                 }
             }
+            if let Some(detection) = options.get("detection").filter(|value| !value.is_null()) {
+                let detection = detection
+                    .as_object()
+                    .ok_or("Cài đặt lọc bằng model không hợp lệ.")?;
+                validate_checkpoint_argument(detection.get("checkpoint"))?;
+                if detection
+                    .get("confidence_threshold")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|value| !(value > 0.0 && value < 1.0))
+                {
+                    return Err("Confidence threshold phải nằm trong khoảng 0–1.".to_string());
+                }
+                if detection.get("trust_source").and_then(Value::as_bool) != Some(true) {
+                    return Err(
+                        "Hãy xác nhận bạn tin cậy nguồn checkpoint trước khi nạp tệp `.pt`."
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
+        "save_extraction_suggestions" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            validate_checkpoint_argument(arguments.get("checkpoint"))?;
+            let items = arguments
+                .get("items")
+                .and_then(Value::as_array)
+                .filter(|items| !items.is_empty() && items.len() <= 100_000)
+                .ok_or("Danh sách gợi ý trích xuất phải có từ 1 đến 100000 ảnh.")?;
+            // The engine checks every box, fingerprint and that each image belongs to the project.
+            if items.iter().any(|item| {
+                item.get("image_path")
+                    .and_then(Value::as_str)
+                    .is_none_or(|image| !Path::new(image).is_absolute())
+            }) {
+                return Err("Đường dẫn ảnh phải là đường dẫn tuyệt đối.".to_string());
+            }
             Ok(())
         }
         "create_project" => {
@@ -906,7 +967,10 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     return Err("Số box bị bỏ qua do chạm biên crop không hợp lệ.".to_string());
                 }
             }
-            if arguments.get("replace").is_some_and(|value| !value.is_boolean()) {
+            if arguments
+                .get("replace")
+                .is_some_and(|value| !value.is_boolean())
+            {
                 return Err("Tùy chọn gợi ý lại không hợp lệ.".to_string());
             }
             Ok(())
@@ -1394,7 +1458,10 @@ mod tests {
         let project = project.to_string_lossy().into_owned();
         let image = root.join("a.png").to_string_lossy().into_owned();
         let request = |images: Value| {
-            validate_request("review_images", &json!({"path": project, "image_paths": images}))
+            validate_request(
+                "review_images",
+                &json!({"path": project, "image_paths": images}),
+            )
         };
         assert!(request(json!([image])).is_ok());
         assert!(request(json!([])).is_err());
@@ -1412,9 +1479,23 @@ mod tests {
         let project = project.to_string_lossy().into_owned();
         let folder = root.to_string_lossy().into_owned();
         assert!(validate_request("relocate_images", &json!({"path": project})).is_ok());
-        assert!(validate_request("relocate_images", &json!({"path": project, "root": folder})).is_ok());
-        assert!(validate_request("relocate_images", &json!({"path": project, "root": "relative"})).is_err());
-        assert!(validate_request("relocate_images", &json!({"path": project, "root": project})).is_err());
+        assert!(
+            validate_request("relocate_images", &json!({"path": project, "root": folder})).is_ok()
+        );
+        assert!(
+            validate_request(
+                "relocate_images",
+                &json!({"path": project, "root": "relative"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                "relocate_images",
+                &json!({"path": project, "root": project})
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

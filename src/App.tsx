@@ -28,12 +28,14 @@ import {
   Scissors,
   Settings2,
   Sparkles,
+  Upload,
   X,
 } from "lucide-react";
 import "./App.css";
 import DatasetManager from "./DatasetManager";
 import ProjectGallery, { type GalleryImage } from "./ProjectGallery";
 import ManualLabeling, { type Annotation, type InferenceAttempt, type NegativeCandidate } from "./ManualLabeling";
+import { availableModels, modelMatchesClasses, pickAndImportCheckpoint, type RegisteredModel } from "./modelImport";
 
 type MediaSource = {
   path: string;
@@ -83,6 +85,10 @@ type ExtractionOptions = {
   image_format: "jpg" | "png";
   jpeg_quality: number;
   existing_file_behavior: "skip" | "overwrite" | "rename";
+  /** Registered model run that filters crops and pre-labels them while extracting; "" = off. */
+  detect_model_id: string;
+  detect_confidence: number;
+  detect_keep_empty: boolean;
 };
 
 type ProjectState = {
@@ -150,6 +156,8 @@ type EngineProgress = {
   exported_images: number;
   skipped_files: number;
   failed_sources: number;
+  no_object_crops?: number;
+  detected_images?: number;
 };
 
 type ExtractionFile = ProjectImage & {
@@ -157,8 +165,21 @@ type ExtractionFile = ProjectImage & {
   thumbnail_data_url?: string;
 };
 
+type ExtractionDetection = {
+  image_fingerprint: string;
+  predictions: { class_id: number; confidence: number; bbox_xyxy: number[] }[];
+  skipped_large_objects: number;
+};
+
 type ExtractedImage = Omit<ProjectImage, "status" | "annotations" | "negative_candidates" | "inference_attempts" | "extraction_settings"> & {
   overwritten: boolean;
+  ai_detection?: ExtractionDetection;
+};
+
+type PendingExtractionSuggestions = {
+  checkpoint: string;
+  checkpoint_sha256: string;
+  items: ({ image_path: string } & ExtractionDetection)[];
 };
 
 type ExtractionResult = EngineProgress & {
@@ -166,6 +187,7 @@ type ExtractionResult = EngineProgress & {
   file_list_truncated: boolean;
   images: ExtractedImage[];
   extraction_settings: ExtractionOptions;
+  detection: { source_model_id: string; checkpoint_sha256: string; checkpoint: string } | null;
   errors: { path: string; message: string }[];
 };
 
@@ -196,6 +218,9 @@ const DEFAULT_OPTIONS: ExtractionOptions = {
   image_format: "jpg",
   jpeg_quality: 92,
   existing_file_behavior: "skip",
+  detect_model_id: "",
+  detect_confidence: 35,
+  detect_keep_empty: false,
 };
 
 const MEDIA_FILTERS = [
@@ -285,6 +310,11 @@ function App() {
   const [dropActive, setDropActive] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("extract");
   const [importingLabels, setImportingLabels] = useState(false);
+  const [models, setModels] = useState<RegisteredModel[]>([]);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [inferenceAvailable, setInferenceAvailable] = useState<boolean | null>(null);
+  const [pendingSuggestions, setPendingSuggestions] = useState<PendingExtractionSuggestions | null>(null);
+  const [detectionSummary, setDetectionSummary] = useState<string | null>(null);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
   const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const annotationSaveFailed = useRef(false);
@@ -1210,6 +1240,76 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
     setActiveTab("dataset");
   }
 
+  const refreshModels = useCallback(async () => {
+    try {
+      const [registry, capabilities] = await Promise.all([
+        callEngine<{ runs: RegisteredModel[] }>("list_models"),
+        callEngine<{ available?: boolean }>("inference_capabilities"),
+      ]);
+      setModels(registry.runs ?? []);
+      setInferenceAvailable(capabilities.available === true);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (engineStatus === "ready" && activeTab === "extract") void refreshModels();
+  }, [engineStatus, activeTab, refreshModels]);
+
+  async function importDetectionModel() {
+    setError(null);
+    setModelBusy(true);
+    try {
+      const imported = await pickAndImportCheckpoint(callEngine);
+      if (!imported) return;
+      await refreshModels();
+      if (!modelMatchesClasses(imported, project.class_names)) {
+        const labeled = project.images.some((image) => (image.annotations?.length ?? 0) > 0 || (image.negative_candidates?.length ?? 0) > 0);
+        if (labeled || !(await confirm(
+          `Model dùng class: ${imported.class_names.join(", ")}.\nDự án đang dùng: ${project.class_names.join(", ")}.\n\nDự án chưa có nhãn nào. Đổi class của dự án theo model để dùng model này?`,
+          { title: "Dùng class của model", kind: "info", okLabel: "Dùng class của model", cancelLabel: "Giữ class hiện tại" },
+        ))) {
+          setError(`Đã nhập model (${imported.class_names.join(", ")}) nhưng class khác dự án nên chưa dùng được để lọc ảnh.`);
+          return;
+        }
+        await applyModelClasses(imported.class_names);
+      }
+      updateOptions({ detect_model_id: imported.run_id });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  // Boxes found while extracting become AI suggestions once the new images are saved into the project.
+  useEffect(() => {
+    if (!pendingSuggestions) return;
+    const pending = pendingSuggestions;
+    setPendingSuggestions(null);
+    void (async () => {
+      const path = await saveProject();
+      if (!path) {
+        setError("Chưa lưu được dự án nên box model tìm thấy chưa được lưu thành gợi ý.");
+        return;
+      }
+      try {
+        const saved = await serializeProjectWrite(() => callEngine<{
+          images_with_detections: number;
+          annotation_count: number;
+          candidate_negative_count: number;
+          skipped_changed: number;
+        }>("save_extraction_suggestions", { path, ...pending }));
+        setDetectionSummary(`${saved.annotation_count} box AI trên ${saved.images_with_detections} ảnh chờ duyệt ở tab Gán nhãn${saved.candidate_negative_count ? ` · ${saved.candidate_negative_count} ảnh trống chờ xác nhận` : ""}${saved.skipped_changed ? ` · ${saved.skipped_changed} ảnh đổi nội dung bị bỏ qua` : ""}`);
+      } catch (reason) {
+        setError(`Ảnh đã vào dự án nhưng chưa lưu được box của model: ${String(reason)}`);
+      } finally {
+        await reloadLabels(path);
+      }
+    })();
+  }, [pendingSuggestions]);
+
   async function chooseOutputDirectory() {
     try {
       const chosen = await open({ title: "Chọn thư mục lưu frame", directory: true, multiple: false });
@@ -1235,12 +1335,41 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
       setError(`Kích thước tối đa là ${FHD_WIDTH} × ${FHD_HEIGHT} px (FHD).`);
       return;
     }
+    let detection: Record<string, unknown> | null = null;
+    let extractionProjectPath = projectPath;
+    if (options.detect_model_id) {
+      const model = availableModels(models).find((item) => item.run_id === options.detect_model_id);
+      if (!model?.checkpoint_path) {
+        setError("Model lọc ảnh không còn khả dụng. Chọn model khác hoặc tắt lọc bằng model.");
+        return;
+      }
+      if (!modelMatchesClasses(model, project.class_names)) {
+        setError(`Class của model (${model.class_names?.join(", ")}) khác class dự án (${project.class_names.join(", ")}). Đổi class dự án theo model ở tab Gán nhãn trước.`);
+        return;
+      }
+      if (!Number.isInteger(options.detect_confidence) || options.detect_confidence < 1 || options.detect_confidence > 99) {
+        setError("Ngưỡng confidence phải từ 1 đến 99%.");
+        return;
+      }
+      // Boxes are saved into the project as AI suggestions, so it must exist on disk first.
+      if (!extractionProjectPath) {
+        extractionProjectPath = await saveProject();
+        if (!extractionProjectPath) return;
+      }
+      detection = {
+        checkpoint: model.checkpoint_path,
+        confidence_threshold: options.detect_confidence / 100,
+        class_names: project.class_names,
+        keep_empty: options.detect_keep_empty,
+        trust_source: true,
+      };
+    }
     let destination = outputDirectory;
-    if (!destination && projectPath) {
+    if (!destination && extractionProjectPath) {
       // Default: a frames folder next to the project file, so extraction needs no folder dialog.
-      const separator = projectPath.includes("\\") ? "\\" : "/";
-      const parent = projectPath.slice(0, projectPath.lastIndexOf(separator));
-      destination = `${parent}${separator}${projectNameFromPath(projectPath)}_frames`;
+      const separator = extractionProjectPath.includes("\\") ? "\\" : "/";
+      const parent = extractionProjectPath.slice(0, extractionProjectPath.lastIndexOf(separator));
+      destination = `${parent}${separator}${projectNameFromPath(extractionProjectPath)}_frames`;
       setOutputDirectory(destination);
     }
     if (!destination) {
@@ -1268,6 +1397,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
     await progressSubscription.current;
     activeExtractionId.current = id;
     setProgress(null);
+    setDetectionSummary(null);
     setExtracting(true);
     setError(null);
     try {
@@ -1278,7 +1408,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
           arguments: {
             paths: selectedSources.map((source) => source.path),
             output_dir: destination,
-            options,
+            options: detection ? { ...options, detection } : options,
           },
         },
       });
@@ -1289,7 +1419,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
       setProject((current) => {
         const imagesByPath = new Map<string, ProjectImage>(current.images.map((image) => [image.path, image]));
         for (const written of result.images) {
-          const { overwritten, ...image } = written;
+          const { overwritten, ai_detection: _detection, ...image } = written;
           // An overwritten file has new pixels, so labels, AI candidates and attempts made on the old bytes no longer apply.
           const existing = overwritten ? undefined : imagesByPath.get(image.path);
           imagesByPath.set(image.path, {
@@ -1304,6 +1434,12 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
         return { ...current, images: [...imagesByPath.values()] };
       });
       setDirty(true);
+      if (result.detection) {
+        const items = result.images.flatMap((image) => image.ai_detection ? [{ image_path: image.path, ...image.ai_detection }] : []);
+        if (items.length) {
+          setPendingSuggestions({ checkpoint: result.detection.checkpoint, checkpoint_sha256: result.detection.checkpoint_sha256, items });
+        }
+      }
       const overwrittenLabeled = result.images.filter((image) => image.overwritten && project.images.some((existing) => (
         existing.path === image.path
         && ((existing.annotations?.length ?? 0) > 0 || (existing.negative_candidates?.length ?? 0) > 0 || existing.status === "reviewed")
@@ -1597,6 +1733,30 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
             </section>
 
             <section className="settings-section">
+              <div className="section-title-row"><h3>Lọc bằng model</h3><span className="section-caption">YOLO11n</span></div>
+              <div className="detect-model-row">
+                <select aria-label="Model lọc và gán nhãn khi trích xuất" value={options.detect_model_id} disabled={extracting || modelBusy} onChange={(event) => updateOptions({ detect_model_id: event.target.value })}>
+                  <option value="">Không dùng model</option>
+                  {availableModels(models).map((model) => {
+                    const matches = modelMatchesClasses(model, project.class_names);
+                    return <option key={model.run_id} value={model.run_id} disabled={!matches}>{model.display_name ?? "YOLO11n"} · {model.class_names?.join(", ")}{matches ? "" : " (class khác dự án)"}</option>;
+                  })}
+                </select>
+                <button type="button" className="detect-import-button" disabled={extracting || modelBusy || engineStatus !== "ready"} onClick={() => void importDetectionModel()} title="Nhập checkpoint YOLO11n .pt">
+                  {modelBusy ? <LoaderCircle size={14} className="spin" /> : <Upload size={14} />} Nhập .pt
+                </button>
+              </div>
+              {inferenceAvailable === false && <p className="crop-validation" role="alert">Engine chưa có PyTorch/Ultralytics nên chưa lọc được bằng model.</p>}
+              {options.detect_model_id && <>
+                <label className="field-label detect-confidence-field">Ngưỡng confidence (%)<input type="number" min="1" max="99" step="1" value={options.detect_confidence} disabled={extracting} onChange={(event) => updateOptions({ detect_confidence: Number(event.target.value) })} /></label>
+                <SettingToggle label="Giữ cả crop không có vật thể" checked={options.detect_keep_empty} onChange={(checked) => updateOptions({ detect_keep_empty: checked })} />
+                <p className="setting-note">{options.detect_keep_empty
+                  ? "Mọi crop đều được ghi; crop không có box thành ảnh trống chờ xác nhận ở tab Gán nhãn."
+                  : "Crop không có vật thể (kể cả chỉ có box chạm biên crop) bị bỏ, không ghi ra đĩa."} Box tìm được lưu thành gợi ý AI; tab Gán nhãn chỉ còn duyệt/sửa.</p>
+              </>}
+            </section>
+
+            <section className="settings-section">
               <div className="section-title-row"><h3>Chế độ crop</h3></div>
               <label className={`radio-option ${options.crop_mode === "center" ? "checked" : ""}`}>
                 <input type="radio" name="crop-mode" value="center" checked={options.crop_mode === "center"} onChange={() => updateOptions({ crop_mode: "center" })} />
@@ -1672,6 +1832,8 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
               {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop gần giống đã lọc</span>}
               {progress && progress.blurry_crops > 0 && <span>{progress.blurry_crops} crop mờ</span>}
+              {progress && (progress.no_object_crops ?? 0) > 0 && <span>{progress.no_object_crops} crop không có vật thể đã bỏ</span>}
+              {detectionSummary && <span><Sparkles size={13} /> {detectionSummary}</span>}
               {progress && <span>{progress.elapsed_seconds}s</span>}
             </div>
           </div>

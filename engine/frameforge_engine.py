@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
 from frameforge.deletion import delete_images
-from frameforge.inference import auto_label_project, predict_crops
+from frameforge.inference import auto_label_project, predict_crops, save_extraction_suggestions
 from frameforge.labelme import import_images, import_labelme_folder
 from frameforge.media import extract_frames, image_thumbnails, inspect_sources, preview_center_crop, preview_frame
 from frameforge.relocate import relocate_images
@@ -69,6 +69,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "inference_capabilities",
                     "yolo11n_inference",
                     "project_batch_inference",
+                    "extraction_detection",
                     "candidate_negative_review",
                     "model_registry",
                     "trusted_model_import",
@@ -208,6 +209,20 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("cancel_file"),
                 progress,
             )
+        elif command == "save_extraction_suggestions":
+            try:
+                result = save_extraction_suggestions(
+                    arguments["path"],
+                    arguments["checkpoint"],
+                    arguments.get("checkpoint_sha256"),
+                    arguments["items"],
+                )
+            finally:
+                # Chunks committed before a failure still belong in the JSON files.
+                write_sidecars(arguments["path"], [
+                    item["image_path"] for item in arguments["items"]
+                    if isinstance(item, dict) and isinstance(item.get("image_path"), str)
+                ])
         elif command == "auto_label_project":
             try:
                 result = auto_label_project(
@@ -228,7 +243,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, preview_frame, preview_center_crop, image_thumbnails, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, set_project_classes, review_images, relocate_images, import_images, import_labelme_folder, review_ai_negative_candidate, load_project, save_session, load_session, inference_capabilities, list_models, delete_model, import_yolo_checkpoint, predict_crops, auto_label_project, validate_dataset, export_yolo_dataset.",
+                    "message": "Supported commands: health, inspect_sources, preview_frame, preview_center_crop, image_thumbnails, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, save_extraction_suggestions, set_project_classes, review_images, relocate_images, import_images, import_labelme_folder, review_ai_negative_candidate, load_project, save_session, load_session, inference_capabilities, list_models, delete_model, import_yolo_checkpoint, predict_crops, auto_label_project, validate_dataset, export_yolo_dataset.",
                 },
             }
         if command in WRITES_ONE_SIDECAR:

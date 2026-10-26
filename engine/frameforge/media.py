@@ -47,18 +47,6 @@ def _read_image(path: Path, flags: int) -> Optional[np.ndarray]:
     return cv2.imdecode(encoded, flags)
 
 
-def _write_encoded_image(path: Path, frame: np.ndarray, params: Optional[List[int]] = None) -> bool:
-    """Encode image bytes through Python's Unicode-aware file handling."""
-    ok, encoded = cv2.imencode(path.suffix, frame, params or [])
-    if not ok:
-        return False
-    try:
-        path.write_bytes(encoded.tobytes())
-    except OSError:
-        return False
-    return True
-
-
 def _candidate_paths(selected_paths: Iterable[str]) -> Tuple[List[Path], int]:
     paths: List[Path] = []
     unsupported = 0
@@ -485,20 +473,25 @@ def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Di
                 break
 
 
-def _write_image(frame: np.ndarray, destination: Path, image_format: str, quality: int) -> bool:
+def _encode_image(frame: np.ndarray, image_format: str, quality: int) -> bytes:
     if image_format == "png":
-        params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
-        extension = ".png"
+        ok, encoded = cv2.imencode(".png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
     else:
-        params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        extension = ".jpg"
-    target = destination.with_suffix(extension)
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise OSError("Không mã hóa được ảnh đầu ra.")
+    return encoded.tobytes()
+
+
+def _write_bytes(target: Path, data: bytes) -> bool:
+    """Write through a temporary file so a partial image never carries the final name."""
     temporary = target.with_name(target.stem + ".partial" + target.suffix)
     try:
-        if not _write_encoded_image(temporary, frame, params):
-            return False
+        temporary.write_bytes(data)
         os.replace(str(temporary), str(target))
         return True
+    except OSError:
+        return False
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -554,6 +547,8 @@ def extract_frames(
         "exported_images": 0,
         "skipped_files": 0,
         "failed_sources": 0,
+        "no_object_crops": 0,
+        "detected_images": 0,
     }
     exported: List[Dict[str, Any]] = []
     # Every written image is returned without thumbnails so the project registers all of them;
@@ -567,6 +562,25 @@ def extract_frames(
     total_sources = len(selected_paths)
     max_frames = max(0, int(options.get("max_frames", 0)))
     extraction_settings = dict(options)
+    detection = options.get("detection")
+    detector = None
+    keep_empty = False
+    if detection is not None:
+        if not isinstance(detection, dict):
+            raise ValueError("Cài đặt lọc bằng model không hợp lệ.")
+        from frameforge.inference import CropDetector
+
+        # Loaded once, before any image is written, so a bad checkpoint stops extraction up front.
+        detector = CropDetector(
+            detection.get("checkpoint"), detection.get("confidence_threshold"), detection.get("class_names"),
+        )
+        keep_empty = detection.get("keep_empty") is True
+        extraction_settings["detection"] = {
+            "checkpoint_sha256": detector.checkpoint_sha256,
+            "source_model_id": detector.source_model_id,
+            "confidence_threshold": detector.confidence,
+            "keep_empty": keep_empty,
+        }
 
     def emit(source_index: int, source: Path, frame_index: int) -> None:
         if progress is not None:
@@ -589,6 +603,7 @@ def extract_frames(
     ) -> None:
         totals["candidate_frames"] += 1
         accepted_frame = False
+        kept = []
         for crop, suffix, crop_rect, filter_crop in _crop_frames(frame, options):
             totals["candidate_crops"] += 1
             sharpness = _blur_score(filter_crop)
@@ -602,20 +617,34 @@ def extract_frames(
             if options.get("filter_duplicates"):
                 recent_hashes.add(current_hash)
 
-            totals["accepted_crops"] += 1
-            accepted_frame = True
             base = "{0}_frame_{1:06d}_{2}".format(source.stem, frame_index, suffix)
             target = (output / base).with_suffix(".png" if image_format == "png" else ".jpg")
             if target.exists() and file_behavior == "skip":
+                totals["accepted_crops"] += 1
+                accepted_frame = True
                 totals["skipped_files"] += 1
                 continue
+            encoded = _encode_image(crop, image_format, quality)
+            kept.append((crop, suffix, crop_rect, sharpness, base, target, encoded))
+
+        # The model sees the decoded output bytes, so its boxes describe exactly the file that is written.
+        detections = detector.detect([
+            cv2.imdecode(np.frombuffer(item[6], dtype=np.uint8), cv2.IMREAD_COLOR) for item in kept
+        ]) if detector is not None else [None] * len(kept)
+        for (crop, suffix, crop_rect, sharpness, base, target, encoded), detected in zip(kept, detections):
+            if detected is not None and not detected["predictions"] and not keep_empty:
+                # No whole object (boxes touching the crop edge do not count): the crop is not written.
+                totals["no_object_crops"] += 1
+                continue
+            totals["accepted_crops"] += 1
+            accepted_frame = True
             if target.exists() and file_behavior == "rename":
                 version = 1
                 while target.exists():
                     target = output / "{0}_{1}{2}".format(base, version, ".png" if image_format == "png" else ".jpg")
                     version += 1
             overwritten = target.exists()
-            if not _write_image(crop, target, image_format, quality):
+            if not _write_bytes(target, encoded):
                 raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
             totals["exported_images"] += 1
             metadata = {
@@ -630,10 +659,21 @@ def extract_frames(
                 "sharpness_score": sharpness,
                 "overwritten": overwritten,
             }
+            if detected is not None:
+                if detected["predictions"]:
+                    totals["detected_images"] += 1
+                metadata["ai_detection"] = {
+                    "image_fingerprint": hashlib.sha256(encoded).hexdigest(),
+                    "predictions": [
+                        {key: item[key] for key in ("class_id", "confidence", "bbox_xyxy")}
+                        for item in detected["predictions"]
+                    ],
+                    "skipped_large_objects": detected["skipped_large_objects"],
+                }
             written_images.append(metadata)
             if len(exported) < MAX_GALLERY_FILES:
                 exported.append({
-                    **metadata,
+                    **{key: value for key, value in metadata.items() if key != "ai_detection"},
                     "name": target.name,
                     "extraction_settings": extraction_settings,
                     "thumbnail_data_url": _thumbnail_data_url(crop),
@@ -680,5 +720,10 @@ def extract_frames(
         "file_list_truncated": totals["exported_images"] > len(exported),
         "images": written_images,
         "extraction_settings": extraction_settings,
+        "detection": {
+            "source_model_id": detector.source_model_id,
+            "checkpoint_sha256": detector.checkpoint_sha256,
+            "checkpoint": str(detection.get("checkpoint")),
+        } if detector is not None else None,
         "errors": errors,
     }

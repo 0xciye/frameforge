@@ -1,5 +1,10 @@
 # Nhật ký thay đổi
 
+## Chưa phát hành — Lọc và gán nhãn bằng model khi trích xuất
+
+- Cài đặt trích xuất có mục **Lọc bằng model**: chọn model YOLO11n đã nhập (hoặc nhập `.pt` ngay tại đó). Crop không có vật thể bị bỏ, không ghi ra đĩa; box tìm được lưu thành gợi ý AI chờ duyệt, nên tab Gán nhãn chỉ còn duyệt/sửa.
+- Tùy chọn "Giữ cả crop không có vật thể" ghi mọi crop; crop trống thành ảnh trống chờ xác nhận.
+
 ## Chưa phát hành — Hiệu năng dự án lớn và zoom ảnh
 
 - Mở/lưu dự án và chuyển ảnh nhanh hơn nhiều với hàng chục–trăm nghìn ảnh (engine chạy nền, index, đồng bộ JSON chỉ chạm file đổi, danh sách ảnh ảo hóa, phiên nhẹ).

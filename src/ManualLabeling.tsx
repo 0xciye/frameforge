@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   ArrowRight,
@@ -25,6 +25,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import "./ManualLabeling.css";
+import { availableModels as usableCheckpoints, modelMatchesClasses, pickAndImportCheckpoint, type RegisteredModel } from "./modelImport";
 
 export type Annotation = {
   id: string;
@@ -77,17 +78,6 @@ type LabelPreview = {
 
 type SaveImage = (path: string, annotations: Annotation[], status: "ready" | "reviewed", fingerprint: string) => Promise<Annotation[]>;
 type LoadPreview = (path: string) => Promise<LabelPreview>;
-type RegisteredModel = {
-  run_id: string;
-  source?: string;
-  display_name?: string;
-  checkpoint_path?: string | null;
-  checkpoint_usable?: boolean;
-  checkpoint_sha256?: string | null;
-  class_names?: string[];
-  effective_imgsz?: number;
-  requested_imgsz?: number;
-};
 type Prediction = { class_id: number; confidence: number; bbox_xyxy: number[] };
 type InferenceProgress = { stage: string; completed_images?: number; total_images?: number; eligible_images?: number; saved_images?: number };
 type InferenceResult = { status: string; results: { predictions: Prediction[]; skipped_large_objects?: number }[] };
@@ -291,13 +281,8 @@ export default function ManualLabeling({ projectKey, deleteImage, reviewImages, 
   const activeInferenceId = useRef<string | null>(null);
   const histories = useRef(new Map<string, History>());
   const saveRevisions = useRef(new Map<string, number>());
-  const availableModels = useMemo(() => models.filter((model) => (
-    model.checkpoint_usable && typeof model.checkpoint_path === "string" && (model.class_names?.length ?? 0) > 0
-  )), [models]);
-  const usableModels = useMemo(() => availableModels.filter((model) => (
-    model.class_names?.length === classes.length
-    && model.class_names.every((name, index) => name === classes[index])
-  )), [availableModels, classes]);
+  const availableModels = useMemo(() => usableCheckpoints(models), [models]);
+  const usableModels = useMemo(() => availableModels.filter((model) => modelMatchesClasses(model, classes)), [availableModels, classes]);
   const selectedEntry = availableModels.find((model) => model.run_id === selectedModelId) ?? null;
   const selectedModel = usableModels.find((model) => model.run_id === selectedModelId) ?? null;
   const projectHasLabels = images.some((item) => (item.annotations?.length ?? 0) > 0 || (item.negative_candidates?.length ?? 0) > 0);
@@ -371,26 +356,10 @@ export default function ManualLabeling({ projectKey, deleteImage, reviewImages, 
     setModelError(null);
     setModelImportBusy(true);
     try {
-      const selected = await open({
-        title: "Chọn checkpoint YOLO11n",
-        multiple: false,
-        filters: [{ name: "YOLO checkpoint", extensions: ["pt"] }],
-      });
-      if (typeof selected !== "string") return;
-      const trusted = await confirm(
-        "Checkpoint .pt có thể chứa dữ liệu thực thi mã khi được nạp. Chỉ tiếp tục nếu bạn tự tạo tệp hoặc tin tưởng nguồn của nó. FrameForge sẽ kiểm tra task, kiến trúc YOLO11n và class, rồi sao chép checkpoint vào thư mục quản lý riêng.",
-        { title: "Xác nhận tin cậy checkpoint", kind: "warning", okLabel: "Tin cậy và nạp", cancelLabel: "Hủy" },
-      );
-      if (!trusted) return;
       setInferenceError(null);
       setInferenceMessage(null);
-      const imported = await engineRequest<{
-        run_id: string;
-        checkpoint_path: string;
-        class_names: string[];
-        architecture: string;
-        display_name: string;
-      }>("import_yolo_checkpoint", { path: selected, trust_source: true });
+      const imported = await pickAndImportCheckpoint(engineRequest);
+      if (!imported) return;
       await refreshModels();
       setSelectedModelId(imported.run_id);
       const matchesProject = imported.class_names.length === classes.length

@@ -371,3 +371,131 @@ def test_delete_model_removes_registry_entry_and_only_its_own_copy(tmp_path: Pat
     assert models.list_models()["runs"] == []
     with pytest.raises(ValueError):
         models.delete_model("run-inside")
+
+
+def install_brightness_yolo(monkeypatch: pytest.MonkeyPatch):
+    """Fake model that finds one head in bright crops and nothing in dark ones."""
+
+    class FakeBoxes:
+        def __init__(self, found: bool):
+            self.xyxy = np.array([[4, 4, 20, 18]] if found else [], dtype=np.float32).reshape(-1, 4)
+            self.conf = np.array([0.9] if found else [], dtype=np.float32)
+            self.cls = np.array([0] if found else [], dtype=np.float32)
+
+    class FakeYOLO:
+        instances = []
+
+        def __init__(self, source, task):
+            self.names = {0: "head", 1: "body"}
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def predict(self, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                SimpleNamespace(orig_shape=frame.shape[:2], boxes=FakeBoxes(float(frame.mean()) > 100))
+                for frame in kwargs["source"]
+            ]
+
+    module = ModuleType("ultralytics")
+    module.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", module)
+    monkeypatch.setattr(inference, "inference_capabilities", lambda: {"available": True, "preferred_device": "cpu"})
+    return FakeYOLO
+
+
+def extraction_sources(tmp_path: Path) -> list[str]:
+    sources = []
+    for name, value in (("bright", 200), ("dark", 10)):
+        path = tmp_path / "sources" / f"{name}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(str(path), np.full((48, 64, 3), value, dtype=np.uint8))
+        sources.append(str(path))
+    return sources
+
+
+def extraction_options(checkpoint: Path, keep_empty: bool = False, class_names=("head", "body")) -> dict:
+    return {
+        "crop_mode": "center", "output_width": 32, "output_height": 24, "image_format": "png",
+        "detection": {
+            "checkpoint": str(checkpoint), "confidence_threshold": 0.35,
+            "class_names": list(class_names), "keep_empty": keep_empty,
+        },
+    }
+
+
+def test_extraction_keeps_only_crops_with_objects_and_returns_their_boxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    FakeYOLO = install_brightness_yolo(monkeypatch)
+
+    result = extract_frames(extraction_sources(tmp_path), str(tmp_path / "out"), extraction_options(checkpoint))
+
+    assert len(FakeYOLO.instances) == 1
+    assert result["no_object_crops"] == 1
+    assert result["detected_images"] == 1
+    assert [Path(image["path"]).name for image in result["images"]] == ["bright_frame_000000_center.png"]
+    assert not (tmp_path / "out" / "dark_frame_000000_center.png").exists()
+    detected = result["images"][0]["ai_detection"]
+    assert detected["image_fingerprint"] == hashlib.sha256(Path(result["images"][0]["path"]).read_bytes()).hexdigest()
+    assert detected["predictions"] == [{"class_id": 0, "confidence": pytest.approx(0.9), "bbox_xyxy": pytest.approx([4, 4, 20, 18])}]
+    assert result["detection"]["source_model_id"] == "run-inference-fixture"
+    assert "checkpoint" not in result["extraction_settings"]["detection"]
+    assert "ai_detection" not in result["files"][0]
+
+
+def test_extraction_can_keep_empty_crops_for_negative_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    install_brightness_yolo(monkeypatch)
+
+    result = extract_frames(extraction_sources(tmp_path), str(tmp_path / "out"), extraction_options(checkpoint, keep_empty=True))
+
+    assert result["no_object_crops"] == 0
+    assert result["exported_images"] == 2
+    assert [len(image["ai_detection"]["predictions"]) for image in result["images"]] == [1, 0]
+
+
+def test_extraction_detection_rejects_class_mismatch_before_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    install_brightness_yolo(monkeypatch)
+
+    with pytest.raises(ValueError, match="class dự án"):
+        extract_frames(extraction_sources(tmp_path), str(tmp_path / "out"), extraction_options(checkpoint, class_names=("person",)))
+    assert not any((tmp_path / "out").glob("*.png"))
+
+
+def test_extraction_suggestions_are_saved_for_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    install_brightness_yolo(monkeypatch)
+    result = extract_frames(extraction_sources(tmp_path), str(tmp_path / "out"), extraction_options(checkpoint, keep_empty=True))
+    project_path = tmp_path / "extract.ffproj"
+    created = create_project(str(project_path), "Extract")
+    save_project(str(project_path), {
+        "id": created["id"], "name": "Extract", "sources": [], "settings": {}, "class_names": ["head", "body"],
+        "images": [{"path": image["path"], "width": image["width"], "height": image["height"], "status": "ready"} for image in result["images"]],
+    })
+    items = [{"image_path": image["path"], **image["ai_detection"]} for image in result["images"]]
+
+    with pytest.raises(ValueError, match="đã thay đổi"):
+        inference.save_extraction_suggestions(str(project_path), str(checkpoint), "0" * 64, items)
+    saved = inference.save_extraction_suggestions(
+        str(project_path), str(checkpoint), result["detection"]["checkpoint_sha256"], items,
+    )
+
+    assert saved["annotation_count"] == 1
+    assert saved["candidate_negative_count"] == 1
+    loaded = {Path(image["path"]).name: image for image in load_project(str(project_path))["images"]}
+    box = loaded["bright_frame_000000_center.png"]["annotations"][0]
+    assert (box["source"], box["review_status"], box["source_model_id"]) == ("ai", "needs_review", "run-inference-fixture")
+    assert loaded["dark_frame_000000_center.png"]["negative_candidates"][0]["review_status"] == "needs_review"

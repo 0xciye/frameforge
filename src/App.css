@@ -325,6 +325,13 @@ input[type="number"]::placeholder { color: #777e89; }
 select { cursor: pointer; }
 .time-range-row { margin: 0 0 8px; }
 .max-frames-field { margin: 0 0 9px; }
+.detect-model-row { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; }
+.detect-model-row select { flex: 1; }
+.detect-import-button { height: 27px; display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #3a3c42; border-radius: 4px; color: #c9ced6; background: #17181a; font-size: 9px; cursor: pointer; }
+.detect-import-button:hover:not(:disabled) { border-color: #4b78a9; background: #1b222a; }
+.detect-import-button:disabled { opacity: .5; cursor: default; }
+.detect-import-button > svg { color: #91baff; }
+.detect-confidence-field { margin: 0 0 6px; }
 .setting-toggle { min-height: 28px; display: flex; align-items: center; gap: 8px; color: #cbd0d7; font-size: 9px; cursor: pointer; }
 .setting-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .toggle-track { width: 27px; height: 15px; display: flex; align-items: center; flex: 0 0 auto; padding: 2px; border: 1px solid #4a4d54; border-radius: 8px; background: #33353a; transition: background .14s ease, border-color .14s ease; }

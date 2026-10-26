@@ -522,3 +522,111 @@ def auto_label_project(
         "skipped_changed": skipped_changed,
         "skipped_attempted": skipped_attempted,
     }
+
+
+class CropDetector:
+    """One verified checkpoint loaded once per extraction to keep only crops with objects (user request 2026-10-26).
+
+    Crops are detected on the exact bytes that will be written, so the saved boxes match the image file.
+    """
+
+    def __init__(self, checkpoint_value: Any, confidence_threshold: Any, class_names: Any) -> None:
+        if not isinstance(checkpoint_value, str) or not checkpoint_value:
+            raise ValueError("Chọn checkpoint YOLO11n đã đăng ký để lọc ảnh khi trích xuất.")
+        try:
+            checkpoint = Path(checkpoint_value).expanduser().resolve(strict=True)
+        except (OSError, ValueError) as error:
+            raise ValueError("Checkpoint không tồn tại.") from error
+        if not checkpoint.is_file() or checkpoint.suffix.casefold() != ".pt":
+            raise ValueError("Inference chỉ nhận checkpoint `.pt` nội bộ đã xác minh.")
+        run = verified_checkpoint_record(checkpoint)
+        if run is None:
+            raise ValueError("Checkpoint chưa được xác minh trong registry FrameForge hoặc checksum đã thay đổi.")
+        expected_names = _names_in_order(run.get("class_names"))
+        if not expected_names:
+            raise ValueError("Checkpoint thiếu schema class hợp lệ trong registry.")
+        if list(class_names or []) != expected_names:
+            raise ValueError("Class của model khác class dự án; đổi class dự án theo model ở tab Gán nhãn trước.")
+        if isinstance(confidence_threshold, bool) or not isinstance(confidence_threshold, (int, float)):
+            raise ValueError("Confidence threshold phải là số từ 0 đến 1.")
+        confidence = float(confidence_threshold)
+        if not math.isfinite(confidence) or not 0.0 < confidence < 1.0:
+            raise ValueError("Confidence threshold phải nằm trong khoảng 0–1.")
+        capabilities = inference_capabilities()
+        if not capabilities.get("available"):
+            raise ValueError("Lọc ảnh bằng model cần PyTorch và Ultralytics trong Python engine.")
+        try:
+            from ultralytics import YOLO
+
+            model = YOLO(str(checkpoint), task="detect")
+        except Exception as error:
+            raise ValueError("Không nạp được checkpoint YOLO11n đã xác minh: {0}".format(error)) from error
+        if _names_in_order(getattr(model, "names", None)) != expected_names:
+            raise ValueError("Schema class trong checkpoint không khớp registry; dừng để tránh sai class ID.")
+        self.model = model
+        self.names = expected_names
+        self.confidence = confidence
+        self.device = capabilities.get("preferred_device", "cpu")
+        self.imgsz = _model_imgsz(run)
+        self.source_model_id = str(run["run_id"])
+        self.checkpoint_sha256 = str(run["checkpoint_sha256"])
+
+    def detect(self, frames: Sequence[np.ndarray]) -> List[Dict[str, Any]]:
+        """Return predictions and edge-skipped counts for BGR crops, in order."""
+        if not frames:
+            return []
+        try:
+            predictions = self.model.predict(
+                source=list(frames),
+                conf=max(0.0, self.confidence - 1e-9),
+                iou=0.7,
+                imgsz=self.imgsz,
+                device=self.device,
+                batch=len(frames),
+                max_det=MAX_DETECTIONS_PER_IMAGE,
+                verbose=False,
+                stream=False,
+                save=False,
+            )
+        except Exception as error:
+            raise ValueError("YOLO inference thất bại: {0}".format(error)) from error
+        decoded = _decode_batch(predictions, ["crop"] * len(frames), self.names, self.confidence, None)
+        for frame, result in zip(frames, decoded):
+            if (result["height"], result["width"]) != tuple(frame.shape[:2]):
+                raise ValueError("Kích thước kết quả inference không khớp crop.")
+        return decoded
+
+
+def save_extraction_suggestions(
+    project_path: str,
+    checkpoint_value: str,
+    checkpoint_sha256: Any,
+    items: Any,
+) -> Dict[str, Any]:
+    """Persist boxes found while extracting, after the frontend has saved the new images into the project."""
+    if not isinstance(checkpoint_value, str) or not checkpoint_value:
+        raise ValueError("Thiếu checkpoint của lượt trích xuất.")
+    try:
+        checkpoint = Path(checkpoint_value).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ValueError("Checkpoint không tồn tại.") from error
+    run = verified_checkpoint_record(checkpoint)
+    if run is None:
+        raise ValueError("Checkpoint chưa được xác minh trong registry FrameForge hoặc checksum đã thay đổi.")
+    if run["checkpoint_sha256"] != checkpoint_sha256:
+        raise ValueError("Checkpoint đã thay đổi sau khi trích xuất; không lưu gợi ý để tránh sai provenance.")
+    expected_names = _names_in_order(run.get("class_names"))
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_PROJECT_INFERENCE_IMAGES:
+        raise ValueError("Danh sách gợi ý trích xuất phải có từ 1 đến 100.000 ảnh.")
+    totals: Dict[str, int] = {}
+    for start in range(0, len(items), PROJECT_PERSIST_BATCH_SIZE):
+        saved = _save_ai_suggestions_batch(
+            project_path,
+            items[start:start + PROJECT_PERSIST_BATCH_SIZE],
+            str(run["run_id"]),
+            str(run["checkpoint_sha256"]),
+            expected_names,
+        )
+        for key, value in saved.items():
+            totals[key] = totals.get(key, 0) + value
+    return {"checkpoint_run_id": run["run_id"], "checkpoint_sha256": run["checkpoint_sha256"], **totals}

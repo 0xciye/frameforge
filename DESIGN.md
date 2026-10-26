@@ -14,7 +14,7 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Tabs quy trình theo pipeline: Trích xuất (nhập ảnh/video), Gán nhãn (nhập model, gợi ý AI, duyệt/gán lại) và Dataset (lưu dataset). Không có tab huấn luyện. Nút Auto label trên toolbar mở tab Gán nhãn; inference ảnh hiện tại hoặc cả project được chạy từ khu vực AI trong tab này.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
-- Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
+- Cột phải: sampling, filter, **Lọc bằng model** (chọn model khớp class hoặc nút "Nhập .pt", ngưỡng confidence %, mặc định 35, công tắc "Giữ cả crop không có vật thể"), chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra. Gallery báo số crop không có vật thể đã bỏ và số box AI chờ duyệt.
 - Gallery ngang ở dưới: hiển thị mọi ảnh trong dự án (mới nhất trước), chỉ render vùng đang cuộn tới và tải thumbnail thật theo lô; ảnh đã review có ghi chú. Trạng thái tổng kết ở thanh cuối.
 
 ## Dataset
