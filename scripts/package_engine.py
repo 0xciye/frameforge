@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import argparse
+import importlib.util
 from pathlib import Path
 
 from PyInstaller.__main__ import run
@@ -52,6 +53,26 @@ def build_engine() -> Path:
         shutil.rmtree(output)
     BUILD.mkdir(parents=True, exist_ok=True)
 
+    rocm_args = []
+    if importlib.util.find_spec("rocm_sdk") is not None:
+        from rocm_sdk import _dist_info
+
+        family = _dist_info.determine_target_family()
+        for name in ("meta", "core", "libraries"):
+            package = _dist_info.ALL_PACKAGES[name]
+            if name != "libraries":
+                rocm_args.extend(["--collect-all", package.pure_py_package_name])
+            if name != "meta":
+                rocm_args.extend(["--collect-all", package.get_py_package_name(family)])
+            rocm_args.extend(["--copy-metadata", package.get_dist_package_name(family)])
+        # The portable runtime contains this GPU family's libraries; avoid invoking offload-arch on startup.
+        runtime_hook = BUILD / "rocm_runtime.py"
+        runtime_hook.write_text(
+            "import os\nos.environ.setdefault('ROCM_SDK_TARGET_FAMILY', " + repr(family) + ")\n",
+            encoding="utf-8",
+        )
+        rocm_args.extend(["--runtime-hook", str(runtime_hook)])
+
     run([
         "--noconfirm",
         "--clean",
@@ -69,6 +90,7 @@ def build_engine() -> Path:
         "--collect-all", "polars",
         "--copy-metadata", "torch",
         "--copy-metadata", "ultralytics",
+        *rocm_args,
         str(ENGINE / "frameforge_engine.py"),
     ])
 

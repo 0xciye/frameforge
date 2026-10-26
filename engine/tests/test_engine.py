@@ -325,10 +325,70 @@ def test_video_sampling_filters_and_output_dimensions(tmp_path: Path):
     assert result["candidate_frames"] == 4
     assert result["exported_images"] == 4
     assert result["files"][0]["thumbnail_data_url"].startswith("data:image/jpeg;base64,")
-    assert len(list(output_path.glob("*.jpg"))) == 4
-    for file in output_path.glob("*.jpg"):
+    assert len(list(output_path.glob("*.png"))) == 4
+    for file in output_path.glob("*.png"):
         image = cv2.imread(str(file))
         assert image.shape[:2] == (32, 32)
+
+
+@pytest.mark.parametrize("behavior", ["skip", "overwrite", "rename"])
+@pytest.mark.parametrize("image_format", ["jpg", "png"])
+def test_dotted_source_names_keep_each_frame_and_tile(tmp_path: Path, behavior: str, image_format: str):
+    video = tmp_path / "clip-SnapYT.App.avi"
+    create_video(video, [distinct_frame(i) for i in range(3)])
+    output = tmp_path / "out"
+    options = dict(interval=1, crop_mode="grid", output_width=32, output_height=24,
+                   overlap_x=0, overlap_y=0, image_format=image_format, existing_file_behavior=behavior)
+    first = extract_frames([str(video)], str(output), options)
+    assert first["exported_images"] == 12
+    paths = [item["path"] for item in first["images"]]
+    assert len(set(paths)) == 12
+    assert all(Path(p).name.startswith("clip-SnapYT.App_frame_") for p in paths)
+    second = extract_frames([str(video)], str(output), options)
+    assert not first["errors"] and not second["errors"]
+    assert second["exported_images"] == (0 if behavior == "skip" else 12)
+    assert len(list(output.iterdir())) == (24 if behavior == "rename" else 12)
+
+
+@pytest.mark.parametrize("unit,interval", [("frames", 2), ("seconds", 0.2)])
+def test_sampling_only_retrieves_selected_frames(tmp_path: Path, unit: str, interval: float):
+    video = tmp_path / "sample.avi"
+    create_video(video, [distinct_frame(i) for i in range(8)])
+    reference = cv2.VideoCapture(str(video))
+    decoded = []
+    while True:
+        ok, frame = reference.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    reference.release()
+
+    class Capture:
+        def __init__(self):
+            self.inner = cv2.VideoCapture(str(video))
+            self.retrieved = 0
+
+        def grab(self):
+            return self.inner.grab()
+
+        def get(self, key):
+            return self.inner.get(key)
+
+        def retrieve(self):
+            self.retrieved += 1
+            return self.inner.retrieve()
+
+    capture = Capture()
+    try:
+        sampled = list(media._sample_capture(capture, {"fps": 10}, dict(
+            interval_unit=unit, interval=interval, start_seconds=0.2, end_seconds=0.6, max_frames=2)))
+    finally:
+        capture.inner.release()
+    assert [index for index, _, _ in sampled] == [2, 4]
+    assert [timestamp for _, timestamp, _ in sampled] == pytest.approx([0.2, 0.4])
+    assert capture.retrieved == 2
+    for index, _, frame in sampled:
+        np.testing.assert_array_equal(frame, decoded[index])
 
 
 def test_exact_center_crop_extraction_records_geometry_and_source_identity(tmp_path: Path):
@@ -385,6 +445,7 @@ def test_blur_and_duplicate_filters_measure_extracted_crops(tmp_path: Path, monk
             "interval_unit": "frames",
             "filter_duplicates": True,
             "duplicate_threshold": 0,
+            "verify_duplicates": False,
             "filter_blurry": True,
             "blur_threshold": 0,
             "crop_mode": "center",
@@ -479,7 +540,7 @@ def test_grid_crop_creates_overlapping_tiles(tmp_path: Path):
     )
 
     assert result["exported_images"] == 6
-    assert len(list(output_path.glob("*.jpg"))) == 6
+    assert len(list(output_path.glob("*.png"))) == 6
 
 
 def test_sqlite_project_round_trips_settings_images_and_annotations(tmp_path: Path):
@@ -889,7 +950,7 @@ def test_jsonl_extraction_streams_progress_before_final_reply(tmp_path: Path):
     assert "event" in replies[0]
     assert replies[-1]["ok"] is True
     assert replies[-1]["data"]["exported_images"] == 3
-    assert len(list(output_path.glob("*.jpg"))) == 3
+    assert len(list(output_path.glob("*.png"))) == 3
 
 
 def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(tmp_path: Path):

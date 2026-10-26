@@ -8,7 +8,9 @@ const localPython = process.platform === "win32"
   ? join(root, ".venv", "Scripts", "python.exe")
   : join(root, ".venv", "bin", "python");
 const override = process.env.FRAMEFORGE_PYTHON;
-const command = override || (existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
+const gpuPython = join(root, ".venv-gpu", "Scripts", "python.exe");
+const command = override || (process.platform === "win32" && existsSync(gpuPython) ? gpuPython
+  : existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
 const result = spawnSync(command, process.argv.slice(2), { cwd: root, stdio: "inherit" });
 
 if (result.error) {

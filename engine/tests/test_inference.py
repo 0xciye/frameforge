@@ -424,6 +424,52 @@ def extraction_options(checkpoint: Path, keep_empty: bool = False, class_names=(
     }
 
 
+def test_gpu_request_fails_instead_of_silently_using_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    install_fake_yolo(monkeypatch)
+    with pytest.raises(ValueError, match="GPU chưa khả dụng"):
+        inference.CropDetector(str(checkpoint), 0.35, ["head", "body"], device="gpu")
+
+
+def test_gpu_device_selection_and_cpu_override(monkeypatch: pytest.MonkeyPatch):
+    torch = ModuleType("torch")
+    torch.version = SimpleNamespace(hip="7.2")
+    torch.backends = SimpleNamespace(cudnn=SimpleNamespace(enabled=True))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    caps = {"preferred_device": "cuda:0"}
+    assert inference._inference_device(caps, "cpu") == "cpu"
+    assert torch.backends.cudnn.enabled is True
+    assert inference._inference_device(caps, "gpu") == "cuda:0"
+    assert torch.backends.cudnn.enabled is False
+    with pytest.raises(ValueError, match="Thiết bị inference"):
+        inference._inference_device(caps, "invalid")
+
+
+def test_rejected_empty_crop_never_suppresses_a_later_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+    monkeypatch.setenv('FRAMEFORGE_APP_DATA',str(tmp_path/'app-data'))
+    checkpoint=register_checkpoint(tmp_path)
+    install_brightness_yolo(monkeypatch)
+    monkeypatch.setattr('frameforge.media._dhash',lambda frame:0)
+    options={**extraction_options(checkpoint),'filter_duplicates':True,'duplicate_threshold':0}
+    result=extract_frames(extraction_sources(tmp_path),str(tmp_path/'out'),options)
+    assert result['no_object_crops']==1 and result['exported_images']==1
+    assert result['duplicate_crops']==0
+
+
+def test_sharp_background_cannot_hide_blurry_detected_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.media import extract_frames
+    monkeypatch.setenv('FRAMEFORGE_APP_DATA',str(tmp_path/'app-data'))
+    checkpoint=register_checkpoint(tmp_path)
+    install_fake_yolo(monkeypatch)
+    monkeypatch.setattr('frameforge.media._detail_score',lambda frame:.2 if frame.shape[:2]==(24,32) else .01)
+    options={**extraction_options(checkpoint),'filter_blurry':True,'blur_threshold':0,'strict_sharpness':True}
+    result=extract_frames(extraction_sources(tmp_path)[:1],str(tmp_path/'out'),options)
+    assert result['exported_images']==0 and result['blurry_object_crops']==1
+    assert result['blurry_crops']==1 and not result['errors']
+
+
 def test_extraction_keeps_only_crops_with_objects_and_returns_their_boxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from frameforge.media import extract_frames
 

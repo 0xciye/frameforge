@@ -93,7 +93,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
         if command == "inspect_sources":
             result = inspect_sources(arguments.get("paths", []))
         elif command == "preview_frame":
-            result = preview_frame(arguments["path"], arguments.get("frame_index", 0), lossless=arguments.get("lossless") is True)
+            result = preview_frame(arguments["path"], arguments.get("frame_index", 0), lossless=arguments.get("lossless") is True, options=arguments.get("options"))
         elif command == "preview_center_crop":
             result = preview_center_crop(
                 arguments["path"],
@@ -163,7 +163,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
         elif command == "validate_dataset":
             result = validate_dataset(
                 arguments["path"],
-                arguments.get("split_mode", "source"),
+                arguments.get("split_mode", "image"),
                 arguments.get("train_ratio", 0.8),
                 arguments.get("val_ratio", 0.1),
                 arguments.get("test_ratio", 0.1),
@@ -176,7 +176,7 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = export_yolo_dataset(
                 arguments["path"],
                 arguments["output_dir"],
-                arguments.get("split_mode", "source"),
+                arguments.get("split_mode", "image"),
                 arguments.get("train_ratio", 0.8),
                 arguments.get("val_ratio", 0.1),
                 arguments.get("test_ratio", 0.1),

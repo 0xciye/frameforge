@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import atexit
 import hashlib
+import json
 import math
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -19,6 +22,8 @@ VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 FHD_WIDTH = 1920
 FHD_HEIGHT = 1080
+STRICT_DETAIL_THRESHOLD = .075
+STRICT_OBJECT_DETAIL_THRESHOLD = .15
 
 
 # Thumbnails returned for the gallery; the full image list is always returned separately.
@@ -142,6 +147,50 @@ def inspect_sources(selected_paths: Iterable[str]) -> Dict[str, Any]:
     return {"sources": sources, "unsupported_count": unsupported, "errors": errors}
 
 
+class _VideoPreviewReader:
+    """One open video per engine worker; consecutive preview frames avoid reopening and seeking."""
+
+    def __init__(self) -> None:
+        self.capture = None
+        self.identity = None
+        self.next_index = 0
+
+    def close(self) -> None:
+        if self.capture is not None:
+            self.capture.release()
+        self.capture = None
+        self.identity = None
+
+    def read(self, path: Path, frame_index: int) -> np.ndarray:
+        stat = path.stat()
+        identity = (str(path), stat.st_size, stat.st_mtime_ns)
+        index = max(0, int(frame_index))
+        if identity != self.identity:
+            self.close()
+            self.capture = cv2.VideoCapture(str(path))
+            self.identity = identity
+            self.next_index = 0
+        try:
+            if not self.capture.isOpened():
+                raise ValueError('Không mở được video nguồn.')
+            if index != self.next_index:
+                if not self.capture.set(cv2.CAP_PROP_POS_FRAMES, index):
+                    raise ValueError('Không tua được tới frame đã chọn.')
+            ok, frame = self.capture.read()
+            if not ok or frame is None:
+                raise ValueError('Không đọc được frame {0} trong video.'.format(index))
+            self.next_index = index + 1
+            _require_fhd_video(frame)
+            return frame
+        except (ValueError, cv2.error):
+            self.close()
+            raise
+
+
+_preview_reader = _VideoPreviewReader()
+atexit.register(_preview_reader.close)
+
+
 def _read_frame(path: Path, frame_index: int) -> np.ndarray:
     if path.suffix.lower() in IMAGE_EXTENSIONS:
         frame = _read_image(path, cv2.IMREAD_COLOR)
@@ -149,18 +198,7 @@ def _read_frame(path: Path, frame_index: int) -> np.ndarray:
             raise ValueError("Không đọc được ảnh nguồn.")
         return frame
 
-    capture = cv2.VideoCapture(str(path))
-    try:
-        if not capture.isOpened():
-            raise ValueError("Không mở được video nguồn.")
-        capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_index)))
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            raise ValueError("Không đọc được frame {0} trong video.".format(frame_index))
-        _require_fhd_video(frame)
-        return frame
-    finally:
-        capture.release()
+    return _preview_reader.read(path, frame_index)
 
 
 MAX_THUMBNAIL_REQUEST = 64
@@ -180,7 +218,7 @@ def image_thumbnails(path_values: Any) -> Dict[str, Any]:
     return {"thumbnails": thumbnails}
 
 
-def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600, lossless: bool = False) -> Dict[str, Any]:
+def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600, lossless: bool = False, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A frame for display. ``lossless`` (labeling) keeps full resolution and exact pixels as PNG, so
     small objects stay sharp when zoomed; otherwise a JPEG capped at ``max_edge`` (extraction preview)."""
     source_path = Path(path_value).expanduser().resolve(strict=True)
@@ -191,6 +229,18 @@ def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600, l
     if fingerprint_before != image_fingerprint:
         raise ValueError("Ảnh đang được thay đổi; hãy mở preview lại sau khi cập nhật xong.")
     source_height, source_width = frame.shape[:2]
+    sharpness = _blur_score(frame)
+    analysis = {}
+    if options is not None:
+        _validate_crop_options(options)
+        detector = _cached_preview_detector(options)
+        predictions = detector.detect([frame])[0]['predictions'] if detector is not None else []
+        crops = _object_crops(frame, options, predictions) if options.get('crop_mode') == 'object_centered' else _crop_frames(frame, options)
+        analysis = {
+            'predictions': predictions,
+            'crop_rects': [item[2] for item in crops],
+            'crop_sharpness': [_blur_score(item[3]) for item in crops],
+        }
     height, width = frame.shape[:2]
     if lossless:
         ok, encoded = cv2.imencode(".png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
@@ -211,6 +261,8 @@ def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600, l
         "source_width": source_width,
         "source_height": source_height,
         "frame_index": max(0, int(frame_index)),
+        "sharpness_score": sharpness,
+        **analysis,
     }
     if image_fingerprint is not None:
         result["image_fingerprint"] = image_fingerprint
@@ -319,6 +371,85 @@ def _blur_score(frame: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def _detail_score(frame: np.ndarray) -> float:
+    """Contrast-normalized edge detail, measured on native pixels rather than a resized preview."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
+    return float(lap.var() / (np.mean(gx * gx + gy * gy) + 1e-6))
+
+
+def _ssim(left: np.ndarray, right: np.ndarray) -> float:
+    a, b = left.astype(np.float32), right.astype(np.float32)
+    am, bm = float(a.mean()), float(b.mean())
+    covariance = float(np.mean((a-am)*(b-bm)))
+    return ((2*am*bm+6.5025)*(2*covariance+58.5225) /
+            ((am*am+bm*bm+6.5025)*(float(a.var())+float(b.var())+58.5225)))
+
+
+class _RecentCrops:
+    """Bounded visual confirmation: dHash candidates must also match colors and detected objects."""
+    def __init__(self, threshold: int, capacity: int = 4096) -> None:
+        self.threshold = threshold
+        self.capacity = capacity
+        self.masks = _RecentHashes(threshold).masks
+        self.buckets: List[Dict[int, set[int]]] = [{} for _ in self.masks]
+        self.records: OrderedDict = OrderedDict()
+        self.sequence = 0
+
+    @staticmethod
+    def signature(frame: np.ndarray, predictions: List[Dict[str, Any]]) -> Tuple:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        objects = []
+        for item in sorted(predictions, key=lambda p: (p['class_id'], *p['bbox_xyxy'])):
+            x1,y1,x2,y2 = item['bbox_xyxy']
+            roi = gray[max(0,int(y1)):min(gray.shape[0],int(math.ceil(y2))), max(0,int(x1)):min(gray.shape[1],int(math.ceil(x2)))]
+            if roi.size:
+                objects.append((item['class_id'], (x1,y1,x2,y2), cv2.resize(roi,(32,32),interpolation=cv2.INTER_AREA)))
+        return cv2.resize(gray,(128,128),interpolation=cv2.INTER_AREA), cv2.resize(frame,(16,16),interpolation=cv2.INTER_AREA), objects
+
+    def contains_near(self, value: int, signature: Tuple) -> bool:
+        candidates: set[int] = set(self.records) if self.threshold == 64 else set()
+        for (shift,mask), bucket in zip(self.masks,self.buckets):
+            candidates.update(bucket.get((value>>shift)&mask,()))
+        gray,color,objects = signature
+        for identifier in candidates:
+            old_hash,(old_gray,old_color,old_objects) = self.records[identifier]
+            if (value ^ old_hash).bit_count() > self.threshold or len(objects) != len(old_objects):
+                continue
+            if float(np.abs(color.astype(np.float32)-old_color).mean()) > 8 or _ssim(gray,old_gray) < .97:
+                continue
+            # A small changed target can disappear in global SSIM or a 32px thumbnail.
+            local_difference = cv2.resize(cv2.absdiff(gray, old_gray), (32, 32), interpolation=cv2.INTER_AREA)
+            if int(local_difference.max()) > 12 or int(cv2.absdiff(gray, old_gray).max()) > 32:
+                continue
+            matching = True
+            for (cls,box,roi),(old_cls,old_box,old_roi) in zip(objects,old_objects):
+                x1,y1,x2,y2=box; a1,b1,a2,b2=old_box
+                overlap=max(0,min(x2,a2)-max(x1,a1))*max(0,min(y2,b2)-max(y1,b1))
+                union=(x2-x1)*(y2-y1)+(a2-a1)*(b2-b1)-overlap
+                if cls != old_cls or overlap/max(1e-6,union) < .8 or _ssim(roi,old_roi) < .95:
+                    matching = False
+                    break
+            if matching:
+                return True
+        return False
+
+    def add(self, value: int, signature: Tuple) -> None:
+        if len(self.records) >= self.capacity:
+            identifier,(old_hash,_) = self.records.popitem(last=False)
+            for (shift,mask),bucket in zip(self.masks,self.buckets):
+                key=(old_hash>>shift)&mask
+                bucket[key].discard(identifier)
+                if not bucket[key]: del bucket[key]
+        identifier=self.sequence
+        self.sequence += 1
+        self.records[identifier]=(value,signature)
+        for (shift,mask),bucket in zip(self.masks,self.buckets):
+            bucket.setdefault((value>>shift)&mask,set()).add(identifier)
+
+
 def _padding_bgr(options: Dict[str, Any]) -> Tuple[int, int, int]:
     value = options.get("padding_color", "#000000")
     if not isinstance(value, str) or len(value) != 7 or not value.startswith("#"):
@@ -414,10 +545,97 @@ def _crop_frames(frame: np.ndarray, options: Dict[str, Any]) -> List[Tuple[np.nd
                 ))
         return tiles
     if mode == "object_centered":
-        raise ValueError("Crop quanh object cần model ONNX đã nạp; thao tác chưa khả dụng trong phiên này.")
+        raise ValueError("Crop theo vật thể cần checkpoint YOLO11n đã nhập.")
     if mode == "manual":
         raise ValueError("Crop thủ công cần vùng crop đã được người dùng chọn trên preview.")
     raise ValueError("Chế độ crop không hợp lệ.")
+
+
+def _validate_crop_options(options: Dict[str, Any]) -> None:
+    mode = options.get('crop_mode', 'letterbox')
+    if mode not in {'center', 'letterbox', 'grid', 'object_centered'}:
+        raise ValueError('Chế độ crop chưa khả dụng.')
+    minimum = 1 if mode in {'center', 'object_centered'} else 16
+    for key, maximum in [('output_width', FHD_WIDTH), ('output_height', FHD_HEIGHT)]:
+        size = options.get(key, 416)
+        if type(size) is not int or not minimum <= size <= maximum:
+            raise ValueError('Kích thước ảnh đầu ra tối đa là 1920 × 1080 px (FHD).')
+    if mode == 'object_centered' and not options.get('detection'):
+        raise ValueError('Crop theo vật thể cần bật lọc bằng model và chọn checkpoint YOLO11n.')
+
+
+def _extraction_detector(options: Dict[str, Any]):
+    detection = options.get('detection')
+    if detection is None:
+        return None
+    if not isinstance(detection, dict):
+        raise ValueError('Cài đặt lọc bằng model không hợp lệ.')
+    from frameforge.inference import CropDetector
+    return CropDetector(detection.get('checkpoint'), detection.get('confidence_threshold'),
+                        detection.get('class_names'), device=detection.get('device', 'auto'))
+
+
+_preview_detector = None
+_preview_detector_key = None
+
+
+def _cached_preview_detector(options: Dict[str, Any]):
+    global _preview_detector, _preview_detector_key
+    detection = options.get('detection')
+    if detection is None:
+        return None
+    key = json.dumps(detection, sort_keys=True)
+    if _preview_detector is not None and key == _preview_detector_key:
+        from frameforge.models import verified_checkpoint_record
+        record = verified_checkpoint_record(Path(detection['checkpoint']).expanduser().resolve(strict=True))
+        if record is None or record['checkpoint_sha256'] != _preview_detector.checkpoint_sha256:
+            _preview_detector = None
+            _preview_detector_key = None
+            raise ValueError('Checkpoint đã thay đổi hoặc bị xóa khỏi registry; chọn lại model để xem box.')
+        return _preview_detector
+    _preview_detector = _extraction_detector(options)
+    _preview_detector_key = key
+    return _preview_detector
+
+
+def _object_crops(frame: np.ndarray, options: Dict[str, Any], predictions: List[Dict[str, Any]]) -> List[Tuple[np.ndarray, str, Dict[str, int], np.ndarray]]:
+    width, height = int(options['output_width']), int(options['output_height'])
+    source_height, source_width = frame.shape[:2]
+    if width > source_width or height > source_height:
+        raise ValueError('Kích thước crop theo vật thể vượt khung nguồn; hãy giảm W/H.')
+    crops = []
+    seen = set()
+    for item in predictions:
+        x1, y1, x2, y2 = item['bbox_xyxy']
+        if x2 - x1 > width or y2 - y1 > height:
+            continue
+        left = max(0, min(source_width - width, math.floor((x1 + x2 - width) / 2)))
+        top = max(0, min(source_height - height, math.floor((y1 + y2 - height) / 2)))
+        if (left, top) in seen:
+            continue
+        seen.add((left, top))
+        crop = frame[top:top + height, left:left + width]
+        rect = {'x': left, 'y': top, 'width': width, 'height': height}
+        crops.append((crop, 'object_{0:03d}'.format(len(crops) + 1), rect, crop))
+    return crops
+
+
+def _crop_detections(source_result: Dict[str, Any], rect: Dict[str, int]) -> Dict[str, Any]:
+    from frameforge.inference import CLIPPED_BOX_EDGE_MARGIN_PX
+    predictions = []
+    skipped = source_result.get('skipped_large_objects', 0)
+    for item in source_result['predictions']:
+        x1, y1, x2, y2 = item['bbox_xyxy']
+        x1, x2 = x1 - rect['x'], x2 - rect['x']
+        y1, y2 = y1 - rect['y'], y2 - rect['y']
+        if x2 <= 0 or y2 <= 0 or x1 >= rect['width'] or y1 >= rect['height']:
+            continue
+        margin = CLIPPED_BOX_EDGE_MARGIN_PX
+        if x1 <= margin or y1 <= margin or x2 >= rect['width'] - margin or y2 >= rect['height'] - margin:
+            skipped += 1
+            continue
+        predictions.append({**item, 'bbox_xyxy': [x1, y1, x2, y2]})
+    return {'predictions': predictions, 'skipped_large_objects': skipped}
 
 
 def _source_identity(source: Path) -> str:
@@ -426,7 +644,7 @@ def _source_identity(source: Path) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Dict[str, Any]):
+def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Dict[str, Any], statistics: Optional[Dict[str, Any]] = None):
     unit = options.get("interval_unit", "frames")
     interval = float(options.get("interval", 10))
     if interval <= 0:
@@ -442,10 +660,11 @@ def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Di
     last_timestamp = -1.0
 
     while True:
-        ok, frame = capture.read()
-        if not ok or frame is None:
+        # Decode in order, but only convert selected frames to BGR (costly at FHD).
+        if not capture.grab():
             break
-        _require_fhd_video(frame)
+        if statistics is not None:
+            statistics['scanned_frames'] += 1
         reported = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         fallback = frame_index / fps if fps else float(frame_index)
         timestamp = reported if math.isfinite(reported) and reported > last_timestamp else fallback
@@ -467,17 +686,51 @@ def _sample_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Di
         else:
             raise ValueError("Đơn vị lấy mẫu không hợp lệ.")
         if selected:
+            ok, frame = capture.retrieve()
+            if not ok or frame is None:
+                raise ValueError("Không đọc được frame {0} trong video.".format(current_index))
+            _require_fhd_video(frame)
             yield current_index, timestamp, frame
             sampled += 1
             if max_frames and sampled >= max_frames:
                 break
 
 
-def _encode_image(frame: np.ndarray, image_format: str, quality: int) -> bytes:
-    if image_format == "png":
-        ok, encoded = cv2.imencode(".png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-    else:
-        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+def _sample_best_capture(capture: cv2.VideoCapture, info: Dict[str, Any], options: Dict[str, Any], statistics: Dict[str, Any]):
+    """One native frame per sampling bucket, choosing actual edge detail instead of the first frame."""
+    every_frame = {**options, 'interval_unit': 'frames', 'interval': 1, 'max_frames': 0}
+    interval = float(options.get('interval',10))
+    if not math.isfinite(interval) or interval <= 0: raise ValueError('Khoảng lấy mẫu phải lớn hơn 0.')
+    if options.get('interval_unit','frames') not in {'frames','seconds'}: raise ValueError('Đơn vị lấy mẫu không hợp lệ.')
+    if options.get('interval_unit','frames') == 'frames' and interval <= 1:
+        yield from _sample_capture(capture,info,options,statistics)
+        return
+    limit = max(0,int(options.get('max_frames',0)))
+    group = None
+    best = None
+    best_score = -1.0
+    emitted = 0
+    for index,timestamp,frame in _sample_capture(capture,info,every_frame,statistics):
+        key = index//max(1,int(interval)) if options.get('interval_unit','frames')=='frames' else int((timestamp-max(0,float(options.get('start_seconds',0))))/interval+1e-6)
+        if group is not None and key != group:
+            yield best
+            emitted += 1
+            if limit and emitted >= limit: return
+            best, best_score = None, -1.0
+        group = key
+        if options.get('crop_mode','letterbox') == 'center':
+            candidate,_ = _center_crop(frame,int(options.get('output_width',416)),int(options.get('output_height',416)))
+        else:
+            candidate = frame
+        score = _detail_score(candidate)
+        if score > best_score:
+            best, best_score = (index,timestamp,frame), score
+    if best is not None and (not limit or emitted < limit):
+        yield best
+
+
+def _encode_image(frame: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(".png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
     if not ok:
         raise OSError("Không mã hóa được ảnh đầu ra.")
     return encoded.tobytes()
@@ -522,17 +775,10 @@ def extract_frames(
     width = int(options.get("output_width", 416))
     height = int(options.get("output_height", 416))
     mode = options.get("crop_mode", "letterbox")
-    if mode not in {"center", "letterbox", "grid"}:
-        raise ValueError("Chế độ crop chưa khả dụng.")
-    minimum_size = 1 if mode == "center" else 16
-    if not minimum_size <= width <= FHD_WIDTH or not minimum_size <= height <= FHD_HEIGHT:
-        raise ValueError("Kích thước ảnh đầu ra tối đa là 1920 × 1080 px (FHD).")
-    image_format = options.get("image_format", "jpg")
-    if image_format not in {"jpg", "png"}:
-        raise ValueError("Định dạng đầu ra chỉ hỗ trợ JPG hoặc PNG.")
-    quality = int(options.get("jpeg_quality", 92))
-    if not 1 <= quality <= 100:
-        raise ValueError("JPEG quality phải nằm trong khoảng 1–100.")
+    _validate_crop_options(options)
+    # Legacy projects may still request JPEG; every new extraction is lossless PNG.
+    options = {**options, 'image_format': 'png'}
+    options.pop('jpeg_quality', None)
     file_behavior = options.get("existing_file_behavior", "skip")
     if file_behavior not in {"skip", "overwrite", "rename"}:
         raise ValueError("Chính sách xử lý tệp trùng không hợp lệ.")
@@ -549,6 +795,9 @@ def extract_frames(
         "failed_sources": 0,
         "no_object_crops": 0,
         "detected_images": 0,
+        "source_frames_total": 0,
+        "scanned_frames": 0,
+        "blurry_object_crops": 0,
     }
     exported: List[Dict[str, Any]] = []
     # Every written image is returned without thumbnails so the project registers all of them;
@@ -557,29 +806,26 @@ def extract_frames(
     errors: List[Dict[str, str]] = []
     duplicate_threshold = max(0, min(64, int(options.get("duplicate_threshold", 1))))
     recent_hashes = _RecentHashes(duplicate_threshold)
+    recent_crops = _RecentCrops(duplicate_threshold)
     started = time.monotonic()
     selected_paths, _ = _candidate_paths(source_paths)
     total_sources = len(selected_paths)
     max_frames = max(0, int(options.get("max_frames", 0)))
     extraction_settings = dict(options)
+    if options.get('filter_blurry') and options.get('strict_sharpness'):
+        extraction_settings['detail_threshold'] = STRICT_DETAIL_THRESHOLD
+        extraction_settings['object_detail_threshold'] = STRICT_OBJECT_DETAIL_THRESHOLD
     detection = options.get("detection")
-    detector = None
+    detector = _extraction_detector(options)
     keep_empty = False
     if detection is not None:
-        if not isinstance(detection, dict):
-            raise ValueError("Cài đặt lọc bằng model không hợp lệ.")
-        from frameforge.inference import CropDetector
-
-        # Loaded once, before any image is written, so a bad checkpoint stops extraction up front.
-        detector = CropDetector(
-            detection.get("checkpoint"), detection.get("confidence_threshold"), detection.get("class_names"),
-        )
         keep_empty = detection.get("keep_empty") is True
         extraction_settings["detection"] = {
             "checkpoint_sha256": detector.checkpoint_sha256,
             "source_model_id": detector.source_model_id,
             "confidence_threshold": detector.confidence,
             "keep_empty": keep_empty,
+            "device_actual": detector.device,
         }
 
     def emit(source_index: int, source: Path, frame_index: int) -> None:
@@ -591,6 +837,7 @@ def extract_frames(
                 "frame_index": frame_index,
                 "elapsed_seconds": round(time.monotonic() - started, 1),
                 **totals,
+                "sampling_skipped_frames": max(0,totals['scanned_frames']-totals['candidate_frames']),
             })
 
     def process_frame(
@@ -604,49 +851,77 @@ def extract_frames(
         totals["candidate_frames"] += 1
         accepted_frame = False
         kept = []
-        for crop, suffix, crop_rect, filter_crop in _crop_frames(frame, options):
+        if mode == 'object_centered':
+            source_detection = detector.detect([frame])[0]
+            crops = _object_crops(frame, options, source_detection['predictions'])
+            if not crops:
+                totals['no_object_crops'] += 1
+        else:
+            crops = _crop_frames(frame, options)
+        for crop, suffix, crop_rect, filter_crop in crops:
             totals["candidate_crops"] += 1
             sharpness = _blur_score(filter_crop)
             if options.get("filter_blurry") and sharpness < float(options.get("blur_threshold", 60)):
                 totals["blurry_crops"] += 1
                 continue
-            current_hash = _dhash(filter_crop)
-            if options.get("filter_duplicates") and recent_hashes.contains_near(current_hash):
-                totals["duplicate_crops"] += 1
+            if options.get('filter_blurry') and options.get('strict_sharpness') and _detail_score(filter_crop) < STRICT_DETAIL_THRESHOLD:
+                totals['blurry_crops'] += 1
                 continue
-            if options.get("filter_duplicates"):
-                recent_hashes.add(current_hash)
+            current_hash = _dhash(filter_crop)
 
             base = "{0}_frame_{1:06d}_{2}".format(source.stem, frame_index, suffix)
-            target = (output / base).with_suffix(".png" if image_format == "png" else ".jpg")
+            target = output / (base + '.png')
             if target.exists() and file_behavior == "skip":
                 totals["accepted_crops"] += 1
                 accepted_frame = True
                 totals["skipped_files"] += 1
                 continue
-            encoded = _encode_image(crop, image_format, quality)
-            kept.append((crop, suffix, crop_rect, sharpness, base, target, encoded))
+            kept.append((crop, suffix, crop_rect, sharpness, base, target, current_hash))
 
-        # The model sees the decoded output bytes, so its boxes describe exactly the file that is written.
-        detections = detector.detect([
-            cv2.imdecode(np.frombuffer(item[6], dtype=np.uint8), cv2.IMREAD_COLOR) for item in kept
-        ]) if detector is not None else [None] * len(kept)
-        for (crop, suffix, crop_rect, sharpness, base, target, encoded), detected in zip(kept, detections):
+        # PNG stores these pixels losslessly; inference needs no encode/decode round trip.
+        if mode == 'object_centered':
+            # PNG crops keep native pixels; translate the source boxes instead of running YOLO again.
+            detections = [_crop_detections(source_detection, item[2]) for item in kept]
+        else:
+            detections = detector.detect([item[0] for item in kept]) if detector is not None else [None] * len(kept)
+        for (crop, suffix, crop_rect, sharpness, base, target, current_hash), detected in zip(kept, detections):
             if detected is not None and not detected["predictions"] and not keep_empty:
                 # No whole object (boxes touching the crop edge do not count): the crop is not written.
                 totals["no_object_crops"] += 1
+                continue
+            predictions = detected['predictions'] if detected is not None else []
+            if options.get('filter_blurry') and options.get('strict_sharpness') and predictions:
+                object_scores = []
+                for item in predictions:
+                    x1,y1,x2,y2 = item['bbox_xyxy']
+                    roi = crop[max(0,int(y1)):min(crop.shape[0],int(math.ceil(y2))), max(0,int(x1)):min(crop.shape[1],int(math.ceil(x2)))]
+                    if min(roi.shape[:2]) >= 8: object_scores.append(_detail_score(roi))
+                if object_scores and min(object_scores) < STRICT_OBJECT_DETAIL_THRESHOLD:
+                    totals['blurry_crops'] += 1
+                    totals['blurry_object_crops'] += 1
+                    continue
+            signature = recent_crops.signature(crop,predictions) if options.get('filter_duplicates') and options.get('verify_duplicates', True) else None
+            if options.get('filter_duplicates') and (
+                recent_crops.contains_near(current_hash,signature) if signature is not None else recent_hashes.contains_near(current_hash)
+            ):
+                totals['duplicate_crops'] += 1
                 continue
             totals["accepted_crops"] += 1
             accepted_frame = True
             if target.exists() and file_behavior == "rename":
                 version = 1
                 while target.exists():
-                    target = output / "{0}_{1}{2}".format(base, version, ".png" if image_format == "png" else ".jpg")
+                    target = output / "{0}_{1}.png".format(base, version)
                     version += 1
             overwritten = target.exists()
+            encoded = _encode_image(crop)
             if not _write_bytes(target, encoded):
                 raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
             totals["exported_images"] += 1
+            # Only written, quality-checked crops can suppress a later crop as a duplicate.
+            if options.get('filter_duplicates'):
+                if signature is not None: recent_crops.add(current_hash,signature)
+                else: recent_hashes.add(current_hash)
             metadata = {
                 "path": str(target),
                 "source_path": str(source),
@@ -688,11 +963,13 @@ def extract_frames(
             break
         try:
             info = probe_media(str(source))
+            totals['source_frames_total'] += info.get('frame_count') or 0
             source_id = _source_identity(source)
             if info["kind"] == "image":
                 frame = _read_image(source, cv2.IMREAD_COLOR)
                 if frame is None:
                     raise ValueError("Không đọc được ảnh nguồn.")
+                totals['scanned_frames'] += 1
                 process_frame(source_index, source, source_id, 0, 0.0, frame)
             else:
                 capture = cv2.VideoCapture(str(source))
@@ -702,7 +979,8 @@ def extract_frames(
                     source_options = dict(options)
                     if max_frames:
                         source_options["max_frames"] = max_frames - totals["candidate_frames"]
-                    candidates = _sample_capture(capture, info, source_options)
+                    sampler = _sample_best_capture if options.get('pick_sharpest') else _sample_capture
+                    candidates = sampler(capture, info, source_options, totals)
                     for frame_index, timestamp, frame in candidates:
                         process_frame(source_index, source, source_id, frame_index, timestamp, frame)
                 finally:
@@ -715,6 +993,7 @@ def extract_frames(
 
     return {
         **totals,
+        "sampling_skipped_frames": max(0,totals['scanned_frames']-totals['candidate_frames']),
         "elapsed_seconds": round(time.monotonic() - started, 2),
         "files": exported,
         "file_list_truncated": totals["exported_images"] > len(exported),

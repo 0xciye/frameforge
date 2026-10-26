@@ -20,6 +20,7 @@ if (process.platform === "darwin") {
 } else if (process.platform === "win32") {
   run(pnpm, ["tauri", "build", "--no-bundle"]);
   run(process.execPath, ["scripts/python-runner.mjs", "scripts/stage_windows_portable.py"], false);
+  run(process.execPath, ["scripts/python-runner.mjs", "scripts/cleanup_builds.py"], false);
 } else {
   console.error("FrameForge portable app builds are supported only on macOS and Windows.");
   process.exit(1);

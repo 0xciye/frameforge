@@ -1,5 +1,41 @@
 # Nhật ký thay đổi
 
+- Cleanup build dọn thêm pytest/Python/Vite cache, giữ portable hiện dùng và các môi trường phát triển.
+
+## Chưa phát hành — Chia theo ảnh không rò rỉ frame gần trùng
+
+- Chia theo ảnh giữ frame gần trùng (dHash ≤4 bit, bắc cầu) cùng split như ảnh trùng byte; mọi ảnh đủ điều kiện vẫn được xuất và tỷ lệ vẫn theo số ảnh. Công cụ train không còn phải bỏ ảnh val/test bị rò rỉ.
+
+## Chưa phát hành — Box tự động trên ảnh và zoom mượt
+
+- Tự detect/vẽ box trên frame preview khi chọn model và bật hiển thị, gồm khi tua hoặc phát video; đồng bộ ảnh/box và giữ kết quả đúng ảnh trong lúc tải frame tiếp.
+- Dùng lại model preview, xác minh registry/checksum trước mỗi lần inference; nút Cập nhật box chỉ để chạy lại.
+- Bỏ chế độ pixelated khi zoom trong Gán nhãn, dùng nội suy mượt; giữ nguyên ảnh gốc và geometry nhãn.
+
+## Chưa phát hành — Crop theo vật thể, preview và phát video
+
+- Crop theo vật thể YOLO11n detect nguồn một lần rồi crop, chuyển tọa độ nhãn, không inference lại; bỏ object quá lớn, gộp vùng trùng tọa độ.
+- Thêm Xem detection, box/class/confidence, khung crop thật và độ nét frame đang xem.
+- Lọc trùng kiểm tra chi tiết cục bộ; chỉ mã hóa PNG sau bộ lọc.
+- Sửa Play tăng frame trước khi giải mã làm preview bị vô hiệu hóa; dùng lại decoder, seek khi tua và phát lại ở cuối.
+
+## Chưa phát hành — PNG và chất lượng frame cho training
+
+- Trích xuất chỉ ghi PNG native pixel, bỏ lựa chọn JPG/JPEG quality; dự án cũ vẫn mở và ảnh cũ giữ nguyên.
+- Chọn frame nét nhất mỗi khoảng; lọc mờ chặt đo thêm chi tiết viền và ROI mục tiêu. Không thêm sharpen/upscale để giả chi tiết nguồn.
+- Xác nhận ảnh trùng bằng màu/SSIM và hình ảnh/vị trí mục tiêu sau dHash. Crop bị loại/chưa ghi không chặn ảnh sau.
+- Hiển thị tổng frame, frame lấy mẫu, bỏ theo khoảng và ngoài giới hạn; các số crop không còn gây nhầm với tổng frame video.
+## Chưa phát hành — Quản lý model trích xuất và GPU RX 6600
+
+- Thêm xóa model ngay trong Cài đặt trích xuất; giữ checkpoint gốc và nhãn đã gán.
+- Bật/tắt lọc bằng model độc lập với lựa chọn model; thêm GPU/CPU và tên GPU thực tế, báo lỗi nếu yêu cầu GPU nhưng không khả dụng.
+- Runtime ROCm riêng cho RX 6600, đóng gói cả thư viện native; tắt MIOpen để tránh NaN. Đo inference batch 8 ảnh dataset thật sau warmup: CPU khoảng 1,51 giây, GPU 0,068 giây; kết quả box/class khớp trong dung sai kiểm tra. Không phải mức tăng tốc cho toàn pipeline trích xuất.
+
+## Chưa phát hành — Sửa tên frame và tăng tốc lấy mẫu
+
+- Sửa video/ảnh có dấu chấm trong tên (ví dụ `SnapYT.App.mp4`) khiến số frame/tile mất khỏi tên ảnh đầu ra, dẫn tới skip/ghi đè nhầm.
+- Chỉ chuyển frame được lấy mẫu sang BGR. Benchmark đoạn đầu video Radiant FHD 60 FPS, 120 crop JPG mỗi 30 frame: nhanh trung bình 3,44 lần; chưa bật lọc/model.
+
 ## Chưa phát hành — Lọc và gán nhãn bằng model khi trích xuất
 
 - Cài đặt trích xuất có mục **Lọc bằng model**: chọn model YOLO11n đã nhập (hoặc nhập `.pt` ngay tại đó). Crop không có vật thể bị bỏ, không ghi ra đĩa; box tìm được lưu thành gợi ý AI chờ duyệt, nên tab Gán nhãn chỉ còn duyệt/sửa.

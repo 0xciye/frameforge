@@ -25,6 +25,7 @@ import {
   Play,
   Plus,
   Save as SaveIcon,
+  ScanLine,
   Scissors,
   Settings2,
   Sparkles,
@@ -75,18 +76,22 @@ type ExtractionOptions = {
   filter_duplicates: boolean;
   duplicate_threshold: number;
   filter_blurry: boolean;
+  strict_sharpness?: boolean;
+  pick_sharpest?: boolean;
+  verify_duplicates?: boolean;
   blur_threshold: number;
-  crop_mode: "center" | "letterbox" | "grid";
+  crop_mode: "center" | "letterbox" | "grid" | "object_centered";
   output_width: number;
   output_height: number;
   overlap_x: number;
   overlap_y: number;
   padding_color: string;
-  image_format: "jpg" | "png";
-  jpeg_quality: number;
+  image_format: "png";
   existing_file_behavior: "skip" | "overwrite" | "rename";
   /** Registered model run that filters crops and pre-labels them while extracting; "" = off. */
   detect_model_id: string;
+  detect_enabled?: boolean;
+  detect_use_gpu?: boolean;
   detect_confidence: number;
   detect_keep_empty: boolean;
 };
@@ -131,12 +136,17 @@ type SessionSnapshot = {
 };
 
 type FramePreview = {
+  source_path?: string;
   data_url: string;
   width: number;
   height: number;
   source_width?: number;
   source_height?: number;
   frame_index: number;
+  sharpness_score?: number;
+  predictions?: { class_id: number; confidence: number; bbox_xyxy: number[] }[];
+  crop_rects?: CropRect[];
+  crop_sharpness?: number[];
 };
 
 type CropRect = { x: number; y: number; width: number; height: number };
@@ -158,6 +168,10 @@ type EngineProgress = {
   failed_sources: number;
   no_object_crops?: number;
   detected_images?: number;
+  source_frames_total?: number;
+  scanned_frames?: number;
+  sampling_skipped_frames?: number;
+  blurry_object_crops?: number;
 };
 
 type ExtractionFile = ProjectImage & {
@@ -206,8 +220,11 @@ const DEFAULT_OPTIONS: ExtractionOptions = {
   end_seconds: null,
   max_frames: 0,
   filter_duplicates: true,
-  duplicate_threshold: 1,
+  duplicate_threshold: 6,
   filter_blurry: true,
+  strict_sharpness: true,
+  pick_sharpest: true,
+  verify_duplicates: true,
   blur_threshold: 60,
   crop_mode: "center",
   output_width: 320,
@@ -215,8 +232,7 @@ const DEFAULT_OPTIONS: ExtractionOptions = {
   overlap_x: 0.2,
   overlap_y: 0.2,
   padding_color: "#000000",
-  image_format: "jpg",
-  jpeg_quality: 92,
+  image_format: "png",
   existing_file_behavior: "skip",
   detect_model_id: "",
   detect_confidence: 35,
@@ -298,6 +314,11 @@ function App() {
   const [preview, setPreview] = useState<FramePreview | null>(null);
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [detectionPreview, setDetectionPreview] = useState<FramePreview | null>(null);
+  const [previewDetecting, setPreviewDetecting] = useState(false);
+  const [detectionPreviewError, setDetectionPreviewError] = useState<string | null>(null);
+  const [showDetections, setShowDetections] = useState(true);
+  const [previewRefresh, setPreviewRefresh] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
   const [outputDirectory, setOutputDirectory] = useState("");
@@ -313,6 +334,7 @@ function App() {
   const [models, setModels] = useState<RegisteredModel[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
   const [inferenceAvailable, setInferenceAvailable] = useState<boolean | null>(null);
+  const [inferenceDevice, setInferenceDevice] = useState<{ preferred_device?: string; device_name?: string } | null>(null);
   const [pendingSuggestions, setPendingSuggestions] = useState<PendingExtractionSuggestions | null>(null);
   const [detectionSummary, setDetectionSummary] = useState<string | null>(null);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
@@ -320,6 +342,8 @@ function App() {
   const annotationSaveFailed = useRef(false);
   const sessionSaveErrorShown = useRef(false);
   const previewSequence = useRef(0);
+  const previewRequestStartedAt = useRef(0);
+  const previewDetectionContext = useRef("");
   const activeExtractionId = useRef<string | null>(null);
   const progressSubscription = useRef<Promise<void>>(Promise.resolve());
   const resizeDrag = useRef<ResizeDrag | null>(null);
@@ -346,7 +370,7 @@ function App() {
       ? frameIndex / selectedSource.fps
       : null;
   const duration = selectedSource?.duration_seconds ?? null;
-  const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
+  const minimumOutputSize = options.crop_mode === "center" || options.crop_mode === "object_centered" ? 1 : 16;
   const cropSizeValid = Number.isInteger(options.output_width) && Number.isInteger(options.output_height)
     && options.output_width >= minimumOutputSize && options.output_width <= FHD_WIDTH
     && options.output_height >= minimumOutputSize && options.output_height <= FHD_HEIGHT;
@@ -669,7 +693,7 @@ function App() {
           ...snapshot.project,
           settings_version: PROJECT_SETTINGS_VERSION,
           settings_migrated: false,
-          settings: { ...DEFAULT_OPTIONS, ...(snapshot.project.settings as Partial<ExtractionOptions>) },
+          settings: { ...DEFAULT_OPTIONS, ...(snapshot.project.settings as Partial<ExtractionOptions>), image_format: "png" as const },
         };
         const sourcePaths = new Set(restoredProject.sources.map((source) => source.path));
         const requestedSelectedPaths = snapshot.session.selected_paths;
@@ -821,41 +845,90 @@ function App() {
     return () => { active = false; unlisten?.(); };
   }, []);
 
+  const previewModel = availableModels(models).find((item) => item.run_id === options.detect_model_id);
+  const previewDetectionKey = JSON.stringify(showDetections && !extracting && !modelBusy && cropSizeValid
+    && previewModel?.checkpoint_path && modelMatchesClasses(previewModel, project.class_names) ? {
+      crop_mode: options.crop_mode === "object_centered" ? "object_centered" : "letterbox",
+      output_width: options.output_width, output_height: options.output_height,
+      detection: { checkpoint: previewModel.checkpoint_path, confidence_threshold: options.detect_confidence / 100,
+        class_names: project.class_names, device: options.detect_use_gpu === false ? "cpu" : "gpu", trust_source: true },
+    } : null);
+
   useEffect(() => {
+    const sequence = ++previewSequence.current;
+    const detectionContext = `${selectedSource?.path ?? ""}|${previewDetectionKey}`;
+    if (previewDetectionContext.current !== detectionContext) setDetectionPreview(null);
+    previewDetectionContext.current = detectionContext;
+    setDetectionPreviewError(null);
+    setPreviewDetecting(false);
     if (!selectedSource) {
       setPreview(null);
       setPreviewError(null);
       return;
     }
-    const sequence = ++previewSequence.current;
     const path = selectedSource.path;
     const index = selectedSource.kind === "image" ? 0 : frameIndex;
+    const detectionOptions = JSON.parse(previewDetectionKey);
+    setPreviewDetecting(Boolean(detectionOptions));
     setPreviewError(null);
     const timer = window.setTimeout(() => {
-      void callEngine<FramePreview>("preview_frame", { path, frame_index: index })
+      previewRequestStartedAt.current = performance.now();
+      setPreviewDetecting(Boolean(detectionOptions));
+      void callEngine<FramePreview>("preview_frame", { path, frame_index: index, ...(detectionOptions ? { options: detectionOptions } : {}) })
         .then((result) => {
-          if (sequence === previewSequence.current) setPreview(result);
-        })
-        .catch((reason) => {
           if (sequence === previewSequence.current) {
-            setPreview(null);
-            setPreviewError(String(reason));
+            setPreview({ ...result, source_path: path });
+            if (detectionOptions) setDetectionPreview(result);
           }
+        })
+        .catch(async (reason) => {
+          if (sequence === previewSequence.current) {
+            if (detectionOptions) {
+              setDetectionPreview(null);
+              setDetectionPreviewError(String(reason));
+              setPlaying(false);
+              try {
+                const result = await callEngine<FramePreview>("preview_frame", { path, frame_index: index });
+                if (sequence === previewSequence.current) setPreview({ ...result, source_path: path });
+              } catch (fallbackReason) {
+                if (sequence === previewSequence.current) {
+                  setPreview(null);
+                  setPreviewError(String(fallbackReason));
+                }
+              }
+            } else {
+              setPreview(null);
+              setPreviewError(String(reason));
+            }
+          }
+        }).finally(() => {
+          if (sequence === previewSequence.current) setPreviewDetecting(false);
         });
-    }, 90);
-    return () => window.clearTimeout(timer);
-  }, [selectedSource?.path, selectedSource?.kind, frameIndex]);
+    }, playing ? 0 : 90);
+    return () => {
+      window.clearTimeout(timer);
+      previewSequence.current += 1;
+    };
+  }, [selectedSource?.path, selectedSource?.kind, frameIndex, playing, previewDetectionKey, previewRefresh]);
 
   useEffect(() => {
     if (!playing || !selectedSource || selectedSource.kind !== "video") return;
+    if (previewDetecting) return;
+    if (previewError) {
+      setPlaying(false);
+      return;
+    }
+    // Wait for decoding: advancing on a separate clock can invalidate every preview response.
+    if (!preview || preview.frame_index !== frameIndex || preview.source_path !== selectedSource.path) return;
     if (sourceFrameCount && frameIndex >= sourceFrameCount - 1) {
       setPlaying(false);
       return;
     }
-    const interval = Math.max(120, 1000 / (selectedSource.fps || 24));
+    const frameDuration = 1000 / Math.min(60, selectedSource.fps || 24);
+    const interval = Math.max(0, frameDuration - (performance.now() - previewRequestStartedAt.current));
     const timer = window.setTimeout(() => setFrameIndex((index) => index + 1), interval);
     return () => window.clearTimeout(timer);
-  }, [playing, selectedSource?.path, selectedSource?.fps, selectedSource?.kind, sourceFrameCount, frameIndex]);
+  }, [playing, selectedSource?.path, selectedSource?.fps, selectedSource?.kind, sourceFrameCount, frameIndex, preview, previewError, previewDetecting]);
 
   function updateOptions(patch: Partial<ExtractionOptions>) {
     setOptions((current) => ({ ...current, ...patch }));
@@ -1112,7 +1185,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
   async function openProjectPath(path: string) {
     await relocateProjectImages(path);
     const loaded = await callEngine<ProjectState>("load_project", { path });
-    const nextOptions = { ...DEFAULT_OPTIONS, ...(loaded.settings as Partial<ExtractionOptions>) };
+    const nextOptions = { ...DEFAULT_OPTIONS, ...(loaded.settings as Partial<ExtractionOptions>), image_format: "png" as const };
     const settingsMigrated = loaded.settings_migrated === true;
     setProject({
       ...loaded,
@@ -1244,10 +1317,11 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
     try {
       const [registry, capabilities] = await Promise.all([
         callEngine<{ runs: RegisteredModel[] }>("list_models"),
-        callEngine<{ available?: boolean }>("inference_capabilities"),
+        callEngine<{ available?: boolean; preferred_device?: string; device_name?: string }>("inference_capabilities"),
       ]);
       setModels(registry.runs ?? []);
       setInferenceAvailable(capabilities.available === true);
+      setInferenceDevice(capabilities);
     } catch (reason) {
       setError(String(reason));
     }
@@ -1275,7 +1349,27 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
         }
         await applyModelClasses(imported.class_names);
       }
-      updateOptions({ detect_model_id: imported.run_id });
+      updateOptions({ detect_model_id: imported.run_id, detect_enabled: true });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function deleteDetectionModel() {
+    const model = models.find((item) => item.run_id === options.detect_model_id);
+    if (!model || extracting || modelBusy) return;
+    if (!(await confirm(
+      `Xóa model "${model.display_name ?? "YOLO11n"}" khỏi FrameForge?\n\nBox đã gán vẫn được giữ. File .pt gốc không bị xóa.`,
+      { title: "Xóa model", kind: "warning", okLabel: "Xóa model", cancelLabel: "Hủy" },
+    ))) return;
+    setModelBusy(true);
+    setError(null);
+    try {
+      await callEngine("delete_model", { run_id: model.run_id });
+      updateOptions({ detect_model_id: "", detect_enabled: false });
+      await refreshModels();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1320,6 +1414,11 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
   }
 
   async function startExtraction() {
+    setPlaying(false);
+    if (options.crop_mode === "object_centered" && !(options.detect_enabled ?? Boolean(options.detect_model_id))) {
+      setError("Crop theo vật thể cần bật lọc bằng model và chọn checkpoint YOLO11n.");
+      return;
+    }
     if (!selectedSources.length) {
       setError("Hãy chọn ít nhất một nguồn ở danh sách bên trái.");
       return;
@@ -1328,7 +1427,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
       setError("Khoảng lấy mẫu phải lớn hơn 0.");
       return;
     }
-    const minimumOutputSize = options.crop_mode === "center" ? 1 : 16;
+    const minimumOutputSize = options.crop_mode === "center" || options.crop_mode === "object_centered" ? 1 : 16;
     if (!Number.isInteger(options.output_width) || !Number.isInteger(options.output_height)
       || options.output_width < minimumOutputSize || options.output_width > FHD_WIDTH
       || options.output_height < minimumOutputSize || options.output_height > FHD_HEIGHT) {
@@ -1337,7 +1436,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
     }
     let detection: Record<string, unknown> | null = null;
     let extractionProjectPath = projectPath;
-    if (options.detect_model_id) {
+    if (options.detect_enabled ?? Boolean(options.detect_model_id)) {
       const model = availableModels(models).find((item) => item.run_id === options.detect_model_id);
       if (!model?.checkpoint_path) {
         setError("Model lọc ảnh không còn khả dụng. Chọn model khác hoặc tắt lọc bằng model.");
@@ -1361,6 +1460,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
         confidence_threshold: options.detect_confidence / 100,
         class_names: project.class_names,
         keep_empty: options.detect_keep_empty,
+        device: options.detect_use_gpu === false ? "cpu" : "gpu",
         trust_source: true,
       };
     }
@@ -1488,9 +1588,9 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
       .then((result) => result.thumbnails)
   ), []);
 
-  const extractionPercent = progress?.source_total
-    ? Math.min(100, Math.round((progress.source_index / progress.source_total) * 100))
-    : 0;
+  const extractionPercent = progress?.source_total === 1 && (progress.source_frames_total ?? 0) > 0
+    ? Math.min(100, Math.round(((progress.scanned_frames ?? 0) / progress.source_frames_total!) * 100))
+    : progress?.source_total ? Math.min(100, Math.round((progress.source_index / progress.source_total) * 100)) : 0;
 
   return (
     <main className="app-shell">
@@ -1638,6 +1738,9 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
               <strong>{selectedSource?.name ?? "Preview"}</strong>
             </div>
             <div className="preview-tools">
+              <button type="button" className="detect-import-button" disabled={!preview || previewDetecting || extracting || modelBusy || !options.detect_model_id || engineStatus !== "ready"} onClick={() => { setShowDetections(true); setPreviewRefresh((value) => value + 1); }} title="Box tự cập nhật theo frame; bấm để chạy lại frame hiện tại">
+                {previewDetecting ? <LoaderCircle size={13} className="spin" /> : <ScanLine size={13} />} {previewDetecting ? "Đang detect…" : "Cập nhật box"}
+              </button>
               <span className="preview-resolution">
                 {preview
                   ? preview.source_width && preview.source_height
@@ -1666,6 +1769,8 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                   }}
                   aria-hidden="true"
                 ><span>Vùng crop · {options.output_width} × {options.output_height} px</span></div>}
+                {options.crop_mode === "object_centered" && detectionPreview?.crop_rects?.map((rect, index) => <div key={`crop-${index}`} className="crop-overlay object-crop-overlay" style={{ left: `${rect.x / preview.width * 100}%`, top: `${rect.y / preview.height * 100}%`, width: `${rect.width / preview.width * 100}%`, height: `${rect.height / preview.height * 100}%` }} aria-hidden="true"><span>Crop {index + 1} · {rect.width} × {rect.height}</span></div>)}
+                {showDetections && detectionPreview?.predictions?.map((item, index) => <div key={`box-${index}`} className="detection-overlay" style={{ left: `${item.bbox_xyxy[0] / preview.width * 100}%`, top: `${item.bbox_xyxy[1] / preview.height * 100}%`, width: `${(item.bbox_xyxy[2] - item.bbox_xyxy[0]) / preview.width * 100}%`, height: `${(item.bbox_xyxy[3] - item.bbox_xyxy[1]) / preview.height * 100}%` }} aria-hidden="true"><span>{project.class_names[item.class_id]} {(item.confidence * 100).toFixed(0)}%</span></div>)}
               </div>
             ) : previewError ? (
               <div className="preview-empty preview-error"><AlertCircle size={26} /><p>Không tải được frame</p><small>{previewError}</small></div>
@@ -1678,11 +1783,19 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
               </div>
             )}
           </div>
+          <div className="preview-detection-status">
+            <label><input type="checkbox" checked={showDetections} onChange={(event) => setShowDetections(event.target.checked)} /> Hiện detection trên preview</label>
+            <span role="status">{previewDetecting ? "Đang detect và vẽ box lên ảnh…" : !showDetections ? "Đã tắt box preview." : detectionPreview ? `${detectionPreview.predictions?.length ?? 0} vật thể${options.crop_mode === "object_centered" ? ` · ${detectionPreview.crop_rects?.length ?? 0} vùng crop` : ""} · tự cập nhật theo frame` : !previewModel || !modelMatchesClasses(previewModel, project.class_names) ? "Chọn model có class khớp dự án trong mục Lọc bằng model để hiện box." : "Box sẽ tự hiện trên ảnh sau khi model xử lý frame."}</span>
+          </div>
+          {detectionPreviewError && <p className="preview-detection-error" role="alert">{detectionPreviewError}</p>}
           <div className="player-controls">
             <div className="transport-controls">
               <button type="button" className="icon-button" disabled={!selectedSource || selectedSource.kind === "image"} onClick={() => updateFrame(0)} aria-label="Frame đầu" title="Frame đầu"><ChevronsLeft size={16} /></button>
               <button type="button" className="icon-button" disabled={!selectedSource || selectedSource.kind === "image"} onClick={() => updateFrame(frameIndex - 1)} aria-label="Frame trước" title="Frame trước"><ChevronLeft size={16} /></button>
-              <button type="button" className="play-button" disabled={!selectedSource || selectedSource.kind === "image"} onClick={() => setPlaying((current) => !current)} aria-label={playing ? "Tạm dừng" : "Phát"} title={playing ? "Tạm dừng" : "Phát"}>
+              <button type="button" className="play-button" disabled={!selectedSource || selectedSource.kind === "image" || extracting} onClick={() => {
+                if (!playing && sourceFrameCount && frameIndex >= lastFrame) setFrameIndex(0);
+                setPlaying((current) => !current);
+              }} aria-label={playing ? "Tạm dừng" : "Phát"} title={playing ? "Tạm dừng" : "Phát"}>
                 {playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
               </button>
               <button type="button" className="icon-button" disabled={!selectedSource || selectedSource.kind === "image" || (sourceFrameCount != null && frameIndex >= sourceFrameCount - 1)} onClick={() => updateFrame(frameIndex + 1)} aria-label="Frame tiếp" title="Frame tiếp"><ChevronRight size={16} /></button>
@@ -1722,21 +1835,27 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                 <label className="field-label">Kết thúc (s)<input type="number" min="0" step="0.1" placeholder="Cuối video" value={options.end_seconds ?? ""} onChange={(event) => updateOptions({ end_seconds: event.target.value ? Number(event.target.value) : null })} /></label>
               </div>
               <label className="field-label max-frames-field">Giới hạn tổng frame <span>0 = không giới hạn</span><input type="number" min="0" step="1" value={options.max_frames} onChange={(event) => updateOptions({ max_frames: Number(event.target.value) })} /></label>
+              <SettingToggle label="Chọn frame nét nhất mỗi khoảng" checked={options.pick_sharpest !== false} disabled={extracting} onChange={(checked) => updateOptions({ pick_sharpest: checked })} />
+              <p className="setting-note">{options.pick_sharpest !== false ? "Đọc cả khoảng để chọn frame nét; tốn thêm thời gian giải mã." : "Lấy một frame cố định mỗi khoảng."} Mỗi 10 frame là lấy khoảng 1/10 video.</p>
               <SettingToggle label="Lọc frame gần giống" checked={options.filter_duplicates} onChange={(checked) => updateOptions({ filter_duplicates: checked })} />
               {options.filter_duplicates && <>
                 <ThresholdControl label="Ngưỡng dHash" value={options.duplicate_threshold} min={0} max={24} suffix="bit" onChange={(value) => updateOptions({ duplicate_threshold: value })} />
-                <p className="setting-note">dHash là dấu vân tay cảm nhận 64-bit. Mặc định 1 bit chỉ lọc crop gần như trùng; ngưỡng {options.duplicate_threshold} bit sẽ bỏ crop lệch ≤ {options.duplicate_threshold} bit so với một trong tối đa 4.096 crop đã giữ. Ngưỡng cao hơn lọc mạnh hơn.</p>
+                <SettingToggle label="Xác nhận trùng bằng nội dung" checked={options.verify_duplicates !== false} disabled={extracting} onChange={(checked) => updateOptions({ verify_duplicates: checked })} />
+                <p className="setting-note">So với tối đa 4.096 ảnh đã ghi, lệch ≤ {options.duplicate_threshold} bit dHash. {options.verify_duplicates !== false ? "Kiểm tra thêm màu, thay đổi cục bộ và box model để giữ lại mục tiêu thay đổi." : "Chỉ so dHash: có thể bỏ nhầm ảnh có vật thể nhỏ thay đổi."} Ngưỡng cao hơn lọc mạnh hơn.</p>
               </>}
               <SettingToggle label="Lọc ảnh mờ" checked={options.filter_blurry} onChange={(checked) => updateOptions({ filter_blurry: checked })} />
               {options.filter_blurry && <ThresholdControl label="Độ nét Laplacian" value={options.blur_threshold} min={0} max={250} suffix="" onChange={(value) => updateOptions({ blur_threshold: value })} />}
-              <p className="setting-note">Ngưỡng độ nét phụ thuộc độ phân giải và nội dung video.</p>
+              <p className="setting-note" role="status">Frame đang xem: {!selectedSource ? "chưa có nguồn" : preview?.source_path === selectedSource.path && preview.frame_index === frameIndex && preview.sharpness_score != null ? `độ nét ${preview.sharpness_score.toFixed(0)} (toàn frame nguồn)` : "đang đọc…"}</p>
+              {options.filter_blurry && <SettingToggle label="Lọc mờ chặt cho dữ liệu train" checked={options.strict_sharpness !== false} disabled={extracting} onChange={(checked) => updateOptions({ strict_sharpness: checked })} />}
+              <p className="setting-note">Lọc chặt kiểm tra chi tiết viền và độ nét vùng mục tiêu khi dùng model. Video mềm do nén/chuyển động có thể giữ ít ảnh; không làm nét giả.</p>
             </section>
 
             <section className="settings-section">
               <div className="section-title-row"><h3>Lọc bằng model</h3><span className="section-caption">YOLO11n</span></div>
+              <SettingToggle label="Sử dụng model để lọc" checked={options.detect_enabled ?? Boolean(options.detect_model_id)} disabled={extracting || modelBusy} onChange={(checked) => updateOptions({ detect_enabled: checked })} />
               <div className="detect-model-row">
-                <select aria-label="Model lọc và gán nhãn khi trích xuất" value={options.detect_model_id} disabled={extracting || modelBusy} onChange={(event) => updateOptions({ detect_model_id: event.target.value })}>
-                  <option value="">Không dùng model</option>
+                <select aria-label="Model lọc và gán nhãn khi trích xuất" value={options.detect_model_id} disabled={extracting || modelBusy} onChange={(event) => updateOptions({ detect_model_id: event.target.value, detect_enabled: Boolean(event.target.value) })}>
+                  <option value="">Chọn model</option>
                   {availableModels(models).map((model) => {
                     const matches = modelMatchesClasses(model, project.class_names);
                     return <option key={model.run_id} value={model.run_id} disabled={!matches}>{model.display_name ?? "YOLO11n"} · {model.class_names?.join(", ")}{matches ? "" : " (class khác dự án)"}</option>;
@@ -1746,8 +1865,11 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                   {modelBusy ? <LoaderCircle size={14} className="spin" /> : <Upload size={14} />} Nhập .pt
                 </button>
               </div>
+              <button type="button" className="detect-import-button detect-delete-button" disabled={extracting || modelBusy || !options.detect_model_id || engineStatus !== "ready"} onClick={() => void deleteDetectionModel()}>Xóa model đang chọn</button>
               {inferenceAvailable === false && <p className="crop-validation" role="alert">Engine chưa có PyTorch/Ultralytics nên chưa lọc được bằng model.</p>}
-              {options.detect_model_id && <>
+              {(options.detect_enabled ?? Boolean(options.detect_model_id)) && <>
+                <SettingToggle label="Sử dụng GPU" checked={options.detect_use_gpu !== false} disabled={extracting || modelBusy} onChange={(checked) => updateOptions({ detect_use_gpu: checked })} />
+                <p className="setting-note">{options.detect_use_gpu === false ? "Model xử lý bằng CPU." : inferenceDevice?.preferred_device && inferenceDevice.preferred_device !== "cpu" ? `GPU: ${inferenceDevice.device_name ?? inferenceDevice.preferred_device}` : "GPU chưa khả dụng trong engine. Tắt GPU để dùng CPU."}</p>
                 <label className="field-label detect-confidence-field">Ngưỡng confidence (%)<input type="number" min="1" max="99" step="1" value={options.detect_confidence} disabled={extracting} onChange={(event) => updateOptions({ detect_confidence: Number(event.target.value) })} /></label>
                 <SettingToggle label="Giữ cả crop không có vật thể" checked={options.detect_keep_empty} onChange={(checked) => updateOptions({ detect_keep_empty: checked })} />
                 <p className="setting-note">{options.detect_keep_empty
@@ -1774,8 +1896,12 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                 <label className="field-label">Chồng ngang<input type="number" min="0" max="0.9" step="0.05" value={options.overlap_x} onChange={(event) => updateOptions({ overlap_x: Number(event.target.value) })} /></label>
                 <label className="field-label">Chồng dọc<input type="number" min="0" max="0.9" step="0.05" value={options.overlap_y} onChange={(event) => updateOptions({ overlap_y: Number(event.target.value) })} /></label>
               </div>}
+              <label className={`radio-option ${options.crop_mode === "object_centered" ? "checked" : ""}`}>
+                <input type="radio" name="crop-mode" value="object_centered" checked={options.crop_mode === "object_centered"} disabled={extracting} onChange={() => updateOptions({ crop_mode: "object_centered", detect_enabled: true })} />
+                <span><strong>Crop theo vật thể (YOLO11n)</strong><small>Detect frame nguồn rồi crop, giữ nguyên pixel</small></span>
+              </label>
+              {options.crop_mode === "object_centered" && <p className="setting-note">Chỉ crop khi model thấy vật thể vừa khung W × H. Vật thể lớn hơn khung: bỏ qua. Không detect lại từng crop; box được chuyển tọa độ từ frame nguồn.</p>}
               <div className="unavailable-crops">
-                <span title="Cần bộ phát hiện object hoạt động">Object-centered <small>Cần inference</small></span>
                 <span title="Công cụ chọn crop chưa được triển khai">Thủ công <small>Sắp có</small></span>
               </div>
             </section>
@@ -1790,7 +1916,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                 <label className="field-label">Cao<input type="number" min={minimumOutputSize} max={FHD_HEIGHT} step="1" value={options.output_height} onChange={(event) => updateOptions({ output_height: Number(event.target.value) })} /></label>
               </div>
               <div className="form-grid two-col output-options">
-                <label className="field-label">Định dạng<select value={options.image_format} onChange={(event) => updateOptions({ image_format: event.target.value as ExtractionOptions["image_format"] })}><option value="jpg">JPG</option><option value="png">PNG</option></select></label>
+                <div className="field-label">Định dạng<strong className="output-format">PNG · không mất dữ liệu</strong></div>
                 {options.crop_mode !== "center" && <label className="field-label">Viền<input type="color" value={options.padding_color} onChange={(event) => updateOptions({ padding_color: event.target.value })} /></label>}
               </div>
               {options.crop_mode === "center" && !cropSizeValid
@@ -1798,7 +1924,6 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
                 : options.crop_mode === "center" && preview && !cropFitsPreview
                   ? <p className="crop-validation" role="alert">Crop {options.output_width} × {options.output_height} vượt khung nguồn {preview.width} × {preview.height}. Hãy giảm kích thước crop.</p>
                   : options.crop_mode === "center" && <p className="crop-helper">Chỉ nhận video tối đa FHD; tâm crop dùng floor((khung − kích thước) / 2) và không resize vùng crop.</p>}
-              {options.image_format === "jpg" && <label className="quality-row">JPEG quality <input type="range" min="50" max="100" value={options.jpeg_quality} onChange={(event) => updateOptions({ jpeg_quality: Number(event.target.value) })} /><strong>{options.jpeg_quality}</strong></label>}
             </section>
 
             <section className="settings-section output-section">
@@ -1815,7 +1940,7 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
             {extracting ? (
               <button type="button" className="extract-button cancel" onClick={() => void cancelExtraction()}><X size={16} /> Dừng trích xuất</button>
             ) : (
-              <button type="button" className="extract-button" onClick={() => void startExtraction()} disabled={engineStatus !== "ready" || !selectedSources.length}>
+              <button type="button" className="extract-button" onClick={() => void startExtraction()} disabled={engineStatus !== "ready" || !selectedSources.length || previewDetecting}>
                 <Scissors size={16} /> Trích xuất frame <span>{selectedSources.length || "—"}</span>
               </button>
             )}
@@ -1830,6 +1955,10 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
             <div><h2>Ảnh trong dự án</h2><span>{project.images.length} ảnh · cuộn ngang để xem toàn bộ</span></div>
             <div className="gallery-summary">
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
+              {progress && <span>{progress.candidate_frames} frame đã lấy mẫu / {progress.source_frames_total ?? "?"} frame nguồn</span>}
+              {progress && (progress.sampling_skipped_frames ?? 0) > 0 && <span>{progress.sampling_skipped_frames} frame không chọn theo khoảng/mốc thời gian</span>}
+              {progress && (progress.source_frames_total ?? 0) > (progress.scanned_frames ?? 0) && <span>{(progress.source_frames_total ?? 0) - (progress.scanned_frames ?? 0)} frame chưa xử lý/ngoài giới hạn</span>}
+              {progress && progress.skipped_files > 0 && <span>{progress.skipped_files} tệp cũ giữ nguyên</span>}
               {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop gần giống đã lọc</span>}
               {progress && progress.blurry_crops > 0 && <span>{progress.blurry_crops} crop mờ</span>}
               {progress && (progress.no_object_crops ?? 0) > 0 && <span>{progress.no_object_crops} crop không có vật thể đã bỏ</span>}
@@ -1864,10 +1993,10 @@ Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn
   );
 }
 
-function SettingToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+function SettingToggle({ label, checked, onChange, disabled = false }: { label: string; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
   return (
     <label className="setting-toggle">
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
       <span className="toggle-track"><span /></span>
       <span>{label}</span>
     </label>

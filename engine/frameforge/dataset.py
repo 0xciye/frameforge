@@ -22,6 +22,9 @@ from frameforge.project import load_project
 
 
 SPLITS = ("train", "val", "test")
+# Image split: frames whose 9x8 dHash differ by at most this many bits (transitively) stay in one split, so adjacent
+# near-identical video frames never sit on both sides of train/val/test. Same threshold as the yolo-train guard.
+NEAR_DUPLICATE_BITS = 4
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
@@ -34,8 +37,8 @@ def _config(
     segment_seconds: float,
     negative_ratio: float,
 ) -> Dict[str, Any]:
-    if split_mode not in {"source", "segment"}:
-        raise ValueError("Cách chia dataset phải là theo video nguồn hoặc theo đoạn video.")
+    if split_mode not in {"image", "source", "segment"}:
+        raise ValueError("Cách chia dataset phải là theo từng ảnh, video nguồn hoặc đoạn video.")
     ratios = {"train": train_ratio, "val": val_ratio, "test": test_ratio}
     for name, value in ratios.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -171,8 +174,32 @@ def _frame_time(image: Dict[str, Any], fps_by_path: Dict[str, float]) -> Optiona
     return frame_index / fps if fps else None
 
 
+def _near_duplicate_pairs(samples: List[Dict[str, Any]]) -> List[Tuple[int, int]]:
+    """Index pairs whose dHash differ by <= NEAR_DUPLICATE_BITS; bits+1 bands guarantee a shared band per pair."""
+    bands_count = NEAR_DUPLICATE_BITS + 1
+    bands: Dict[Tuple[int, int], List[int]] = {}
+    pairs: List[Tuple[int, int]] = []
+    for index, sample in enumerate(samples):
+        value = sample.get("dhash")
+        if value is None:
+            continue
+        keys = []
+        for band in range(bands_count):
+            low, high = 64 * band // bands_count, 64 * (band + 1) // bands_count
+            keys.append((band, (value >> low) & ((1 << (high - low)) - 1)))
+        candidates = set()
+        for key in keys:
+            candidates.update(bands.get(key, []))
+        for other in candidates:
+            if bin(value ^ samples[other]["dhash"]).count("1") <= NEAR_DUPLICATE_BITS:
+                pairs.append((other, index))
+        for key in keys:
+            bands.setdefault(key, []).append(index)
+    return pairs
+
+
 def _split_groups(samples: List[Dict[str, Any]], config: Dict[str, Any]) -> Tuple[Dict[str, str], List[str]]:
-    """Keep source/segment groups and byte-identical images in the same split."""
+    """Keep source/segment groups, byte-identical images and (image mode) near-duplicate frames in one split."""
     parents = list(range(len(samples)))
 
     def find(index: int) -> int:
@@ -199,6 +226,8 @@ def _split_groups(samples: List[Dict[str, Any]], config: Dict[str, Any]) -> Tupl
             union(index, digest_owner[digest])
         else:
             digest_owner[digest] = index
+    for left, right in _near_duplicate_pairs(samples):
+        union(left, right)
 
     combined: Dict[int, Dict[str, Any]] = {}
     for index, sample in enumerate(samples):
@@ -230,6 +259,10 @@ def _split_groups(samples: List[Dict[str, Any]], config: Dict[str, Any]) -> Tupl
                 split_counts[destination] += 1
     else:
         targets = {name: total * ratios[name] for name in SPLITS}
+        if config["split_mode"] == "image":
+            targets["val"] = round(total * ratios["val"])
+            targets["test"] = round(total * ratios["test"])
+            targets["train"] = total - targets["val"] - targets["test"]
         for position, group in enumerate(groups):
             size = len(group["sample_indexes"])
             if position < len(active_splits):
@@ -490,7 +523,7 @@ def _analyze(
         ):
             errors.append("Ảnh âm tính đã thay đổi hoặc thiếu provenance candidate: {0}".format(image_path))
             continue
-        source_key = _source_key(image)
+        source_key = "image:" + str(image_path) if config["split_mode"] == "image" else _source_key(image)
         if source_key is None:
             missing_source_metadata += 1
             source_key = "image:" + str(image_path)
@@ -565,13 +598,24 @@ def _analyze(
             "Phát hiện {0} ảnh trùng nội dung byte; các bản trùng được giữ cùng split để tránh rò rỉ.".format(exact_duplicate_count)
         )
 
+    if config["split_mode"] == "image":
+        samples, negative_warnings, negative_summary = _sample_negative_images(samples, config)
+        warnings.extend(negative_warnings)
+        for sample in samples:
+            frame = _read_image(Path(sample["path"]), cv2.IMREAD_COLOR)
+            if frame is None:
+                errors.append("Không đọc được ảnh để kiểm tra ảnh gần giống: {0}".format(sample["path"]))
+                continue
+            sample["dhash"] = _dhash(frame)
+
     split_assignments, split_warnings = _split_groups(samples, config)
     warnings.extend(split_warnings)
     for sample in samples:
         sample["split"] = split_assignments.get(sample["path"], "train")
 
-    samples, negative_warnings, negative_summary = _sample_negative_images(samples, config)
-    warnings.extend(negative_warnings)
+    if config["split_mode"] != "image":
+        samples, negative_warnings, negative_summary = _sample_negative_images(samples, config)
+        warnings.extend(negative_warnings)
 
     split_counts = {name: 0 for name in SPLITS}
     split_group_keys: Dict[str, set[str]] = {name: set() for name in SPLITS}
@@ -656,7 +700,7 @@ def _analyze(
 
 def validate_dataset(
     path_value: str,
-    split_mode: str = "source",
+    split_mode: str = "image",
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
@@ -665,7 +709,7 @@ def validate_dataset(
     negative_ratio: float = 0.1,
     required_class_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
-    """Validate a saved project and return a stable, source-grouped split preview."""
+    """Validate a saved project and return a stable split preview."""
     return _analyze(
         path_value, split_mode, train_ratio, val_ratio, test_ratio, seed, segment_seconds, negative_ratio,
         required_class_ids,
@@ -705,7 +749,7 @@ def _project_annotation_revision(project: Dict[str, Any]) -> str:
 def export_yolo_dataset(
     path_value: str,
     output_dir: str,
-    split_mode: str = "source",
+    split_mode: str = "image",
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
@@ -832,6 +876,7 @@ def export_yolo_dataset(
                 "segment_seconds": config["segment_seconds"],
                 "negative_ratio": config["negative_ratio"],
                 "required_class_ids": config["required_class_ids"],
+                "near_duplicate_bits": NEAR_DUPLICATE_BITS if config["split_mode"] == "image" else None,
                 "counts": summary["split_counts"],
                 "groups": summary["split_group_counts"],
             },

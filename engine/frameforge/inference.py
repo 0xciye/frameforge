@@ -245,7 +245,7 @@ def predict_crops(
     capabilities = inference_capabilities()
     if not capabilities.get("available"):
         raise ValueError("Inference cần PyTorch và Ultralytics trong Python engine.")
-    device = capabilities.get("preferred_device", "cpu")
+    device = _inference_device(capabilities)
     imgsz = _model_imgsz(run)
     emit = progress or (lambda _event: None)
     emit({
@@ -368,7 +368,7 @@ def auto_label_project(
     device_info = inference_capabilities()
     if not device_info.get("available"):
         raise ValueError("Inference cần PyTorch và Ultralytics trong Python engine.")
-    device = device_info.get("preferred_device", "cpu")
+    device = _inference_device(device_info)
     imgsz = _model_imgsz(run)
 
     image_rows = []
@@ -524,13 +524,28 @@ def auto_label_project(
     }
 
 
+def _inference_device(capabilities: Dict[str, Any], requested: str = "auto") -> str:
+    if requested not in {"auto", "gpu", "cpu"}:
+        raise ValueError("Thiết bị inference phải là auto, gpu hoặc cpu.")
+    device = "cpu" if requested == "cpu" else capabilities.get("preferred_device", "cpu")
+    if requested == "gpu" and device == "cpu":
+        raise ValueError("GPU chưa khả dụng trong engine. Tắt Sử dụng GPU để chạy bằng CPU.")
+    if device.startswith("cuda"):
+        import torch
+
+        if getattr(torch.version, "hip", None):
+            # RX 6600 community ROCm: MIOpen depthwise convolutions can produce NaNs.
+            torch.backends.cudnn.enabled = False
+    return device
+
+
 class CropDetector:
     """One verified checkpoint loaded once per extraction to keep only crops with objects (user request 2026-10-26).
 
     Crops are detected on the exact bytes that will be written, so the saved boxes match the image file.
     """
 
-    def __init__(self, checkpoint_value: Any, confidence_threshold: Any, class_names: Any) -> None:
+    def __init__(self, checkpoint_value: Any, confidence_threshold: Any, class_names: Any, device: str = "auto") -> None:
         if not isinstance(checkpoint_value, str) or not checkpoint_value:
             raise ValueError("Chọn checkpoint YOLO11n đã đăng ký để lọc ảnh khi trích xuất.")
         try:
@@ -555,6 +570,7 @@ class CropDetector:
         capabilities = inference_capabilities()
         if not capabilities.get("available"):
             raise ValueError("Lọc ảnh bằng model cần PyTorch và Ultralytics trong Python engine.")
+        selected_device = _inference_device(capabilities, device)
         try:
             from ultralytics import YOLO
 
@@ -566,7 +582,7 @@ class CropDetector:
         self.model = model
         self.names = expected_names
         self.confidence = confidence
-        self.device = capabilities.get("preferred_device", "cpu")
+        self.device = selected_device
         self.imgsz = _model_imgsz(run)
         self.source_model_id = str(run["run_id"])
         self.checkpoint_sha256 = str(run["checkpoint_sha256"])

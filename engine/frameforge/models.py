@@ -252,6 +252,11 @@ def inference_capabilities() -> Dict[str, Any]:
                 result["preferred_device"] = "mps"
             elif cuda_available:
                 result["preferred_device"] = "cuda:0"
+            if cuda_available:
+                result["device_name"] = torch.cuda.get_device_name(0)
+                result["gpu_backend"] = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+            elif mps_available:
+                result["device_name"] = "Apple Metal"
         except Exception as error:
             result["torch_error"] = str(error)
             result["available"] = False

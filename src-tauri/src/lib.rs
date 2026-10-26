@@ -508,6 +508,35 @@ fn validate_checkpoint_argument(value: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_detection_options(options: &Value) -> Result<(), String> {
+    if let Some(detection) = options.get("detection").filter(|value| !value.is_null()) {
+        let detection = detection
+            .as_object()
+            .ok_or("Cài đặt lọc bằng model không hợp lệ.")?;
+        validate_checkpoint_argument(detection.get("checkpoint"))?;
+        if detection
+            .get("confidence_threshold")
+            .and_then(Value::as_f64)
+            .is_none_or(|value| !(value > 0.0 && value < 1.0))
+        {
+            return Err("Confidence threshold phải nằm trong khoảng 0–1.".to_string());
+        }
+        if detection.get("trust_source").and_then(Value::as_bool) != Some(true) {
+            return Err(
+                "Hãy xác nhận bạn tin cậy nguồn checkpoint trước khi nạp tệp `.pt`.".to_string(),
+            );
+        }
+    }
+    if options.get("crop_mode").and_then(Value::as_str) == Some("object_centered")
+        && options.get("detection").is_none_or(Value::is_null)
+    {
+        return Err(
+            "Crop theo vật thể cần bật lọc bằng model và chọn checkpoint YOLO11n.".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
     let arguments = arguments
         .as_object()
@@ -697,6 +726,12 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             {
                 return Err("Tùy chọn preview không hợp lệ.".to_string());
             }
+            if let Some(options) = arguments.get("options").filter(|value| !value.is_null()) {
+                if !options.is_object() {
+                    return Err("Cài đặt preview không hợp lệ.".to_string());
+                }
+                validate_detection_options(options)?;
+            }
             Ok(())
         }
         "preview_center_crop" => {
@@ -795,10 +830,14 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .get("crop_mode")
                 .and_then(Value::as_str)
                 .unwrap_or("letterbox");
-            if !["center", "letterbox", "grid"].contains(&mode) {
+            if !["center", "letterbox", "grid", "object_centered"].contains(&mode) {
                 return Err("Chế độ crop chưa khả dụng.".to_string());
             }
-            let minimum_size = if mode == "center" { 1 } else { 16 };
+            let minimum_size = if ["center", "object_centered"].contains(&mode) {
+                1
+            } else {
+                16
+            };
             for key in ["output_width", "output_height"] {
                 let size = options
                     .get(key)
@@ -815,25 +854,7 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     ));
                 }
             }
-            if let Some(detection) = options.get("detection").filter(|value| !value.is_null()) {
-                let detection = detection
-                    .as_object()
-                    .ok_or("Cài đặt lọc bằng model không hợp lệ.")?;
-                validate_checkpoint_argument(detection.get("checkpoint"))?;
-                if detection
-                    .get("confidence_threshold")
-                    .and_then(Value::as_f64)
-                    .is_none_or(|value| !(value > 0.0 && value < 1.0))
-                {
-                    return Err("Confidence threshold phải nằm trong khoảng 0–1.".to_string());
-                }
-                if detection.get("trust_source").and_then(Value::as_bool) != Some(true) {
-                    return Err(
-                        "Hãy xác nhận bạn tin cậy nguồn checkpoint trước khi nạp tệp `.pt`."
-                            .to_string(),
-                    );
-                }
-            }
+            validate_detection_options(&Value::Object(options.clone()))?;
             Ok(())
         }
         "save_extraction_suggestions" => {
@@ -1141,8 +1162,8 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             let mode = arguments
                 .get("split_mode")
                 .and_then(Value::as_str)
-                .unwrap_or("source");
-            if !["source", "segment"].contains(&mode) {
+                .unwrap_or("image");
+            if !["image", "source", "segment"].contains(&mode) {
                 return Err("Cách chia dataset không hợp lệ.".to_string());
             }
             for key in ["train_ratio", "val_ratio", "test_ratio"] {
@@ -1385,6 +1406,31 @@ mod tests {
     use serde_json::{Value, json};
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn object_crop_and_preview_require_trusted_detection() {
+        let root = std::env::temp_dir().join(format!("ff-object-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("frame.png");
+        let checkpoint = root.join("best.pt");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&checkpoint, b"checkpoint").unwrap();
+        let mut args = json!({"path": image, "frame_index": 0, "options": {
+            "crop_mode": "object_centered", "output_width": 32, "output_height": 24
+        }});
+        assert!(validate_request("preview_frame", &args).is_err());
+        args["options"]["detection"] =
+            json!({"checkpoint": checkpoint, "confidence_threshold": 0.35, "trust_source": true});
+        assert!(validate_request("preview_frame", &args).is_ok());
+        args["options"]["detection"]["trust_source"] = json!(false);
+        assert!(validate_request("preview_frame", &args).is_err());
+        args["options"]["detection"]["trust_source"] = json!(true);
+        let extraction = json!({"paths": [image], "output_dir": root, "options": args["options"]});
+        assert!(validate_request("extract_frames", &extraction).is_ok());
+        std::fs::remove_file(image).unwrap();
+        std::fs::remove_file(checkpoint).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn packaged_engine_path_is_inside_app_resources() {

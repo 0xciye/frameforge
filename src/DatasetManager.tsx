@@ -5,7 +5,7 @@ import { AlertCircle, CheckCircle2, Database, Download, FolderOpen, LoaderCircle
 import "./DatasetManager.css";
 
 type DatasetConfig = {
-  splitMode: "source" | "segment";
+  splitMode: "image" | "source" | "segment";
   train: number;
   val: number;
   test: number;
@@ -38,7 +38,7 @@ type DatasetReport = {
   exact_duplicate_count: number;
   split_counts: Record<"train" | "val" | "test", number>;
   split_group_counts: Record<"train" | "val" | "test", number>;
-  split_mode: "source" | "segment";
+  split_mode: "image" | "source" | "segment";
   ratios: Record<"train" | "val" | "test", number>;
   seed: number;
   segment_seconds: number;
@@ -62,7 +62,7 @@ type Props = {
 };
 
 const DEFAULT_CONFIG: DatasetConfig = {
-  splitMode: "source",
+  splitMode: "image",
   train: 80,
   val: 10,
   test: 10,
@@ -204,7 +204,7 @@ export default function DatasetManager({ projectPath, imageCount, classNames }: 
           <div className="dataset-heading-icon"><Database size={18} /></div>
           <div>
             <h1>Dataset</h1>
-          <p>Kiểm tra nhãn đã review, chia train/val/test chống rò rỉ rồi lưu dataset YOLO kèm provenance.</p>
+          <p>Kiểm tra nhãn đã review, chia train/val/test theo tỷ lệ ảnh rồi lưu dataset YOLO kèm provenance.</p>
           </div>
         </header>
 
@@ -218,8 +218,11 @@ export default function DatasetManager({ projectPath, imageCount, classNames }: 
 
         <div className="dataset-grid">
           <section className="panel dataset-card dataset-config-card">
-            <div className="dataset-card-heading"><div><h2>Chia tập</h2><span>Seed giữ kết quả ổn định với cùng nhóm nguồn.</span></div></div>
+            <div className="dataset-card-heading"><div><h2>Chia tập</h2><span>Tỷ lệ tính theo số ảnh đủ điều kiện xuất; seed giữ kết quả ổn định.</span></div></div>
             <div className="dataset-split-mode" role="group" aria-label="Cách chia dữ liệu">
+              <button type="button" className={config.splitMode === "image" ? "selected" : ""} aria-pressed={config.splitMode === "image"} onClick={() => updateConfig({ splitMode: "image" })}>
+                <strong>Theo từng ảnh</strong><small>Chia theo số ảnh; ảnh trùng hoặc gần trùng luôn ở cùng split.</small>
+              </button>
               <button type="button" className={config.splitMode === "source" ? "selected" : ""} aria-pressed={config.splitMode === "source"} onClick={() => updateConfig({ splitMode: "source" })}>
                 <strong>Theo video nguồn</strong><small>Giữ mọi crop của cùng video trong một split.</small>
               </button>

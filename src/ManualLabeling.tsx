@@ -1211,7 +1211,7 @@ export default function ManualLabeling({ projectKey, deleteImage, reviewImages, 
           {!previewLoading && previewError && <div className="label-canvas-state label-canvas-error" role="alert"><FileImage size={22} /><strong>Không đọc được ảnh này</strong><span>{previewError}</span><button type="button" className="subtle-button" onClick={refreshPreview}>Thử tải lại</button></div>}
           {!previewLoading && !previewError && preview && fitSize && (
             <div className="label-image-transform" style={{ width: fitSize.width * zoom, height: fitSize.height * zoom, transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px)` } as CSSProperties}>
-              <img src={preview.data_url} style={{ imageRendering: fitSize.scale >= 1 ? "pixelated" : "auto" }} alt={`${imageName(image.path)}, ${preview.width} × ${preview.height} px`} draggable={false} />
+              <img src={preview.data_url} alt={`${imageName(image.path)}, ${preview.width} × ${preview.height} px`} draggable={false} />
               {!sizeMismatch && <svg
                 className="label-annotation-canvas"
                 viewBox={`0 0 ${preview.width} ${preview.height}`}

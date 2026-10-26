@@ -1,5 +1,12 @@
 # Thiết kế
 
+## Preview detection và chất lượng frame — 2026-10-26
+
+- Giữ bố cục hiện tại; bật Hiện detection và chọn model sẽ tự vẽ box khi xem/tua/phát video. Nút Cập nhật box chạy lại frame hiện tại; có trạng thái bận/lỗi/thiếu model và số vật thể/vùng crop.
+- Box xanh viền 2 px có class/confidence, crop cam nét đứt có số thứ tự; tọa độ theo nguồn và co cùng ảnh. Giữ box cùng ảnh đang hiển thị trong lúc xử lý frame kế tiếp, thay cả hai đồng thời; đổi model/nguồn xóa box cũ.
+- Zoom tab Gán nhãn dùng nội suy mượt (`image-rendering: auto`) ở mọi tỷ lệ; không thay ảnh nguồn, geometry SVG hoặc tọa độ nhãn.
+- Crop theo vật thể nằm cạnh Center/Letterbox/Grid; mô tả detect trước rồi crop, giữ pixel và bỏ object lớn hơn khung. Lấy frame có độ nét nguồn và công tắc xác nhận trùng bằng nội dung.
+
 ## Runtime desktop
 
 - Bản portable nạp frontend đã build trong `frontendDist` qua Tauri custom protocol; chỉ `tauri dev` mới trỏ tới Vite `devUrl`/localhost. Người dùng mở executable/app portable trực tiếp, không khởi chạy server web riêng.
@@ -15,11 +22,13 @@ Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiề
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
 - Cột phải: sampling, filter, **Lọc bằng model** (chọn model khớp class hoặc nút "Nhập .pt", ngưỡng confidence %, mặc định 35, công tắc "Giữ cả crop không có vật thể"), chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra. Gallery báo số crop không có vật thể đã bỏ và số box AI chờ duyệt.
+- Mục Lọc bằng model có công tắc "Sử dụng model để lọc" độc lập với model đang chọn, nút "Xóa model đang chọn" dùng xác nhận hiện có; tắt lọc không quên lựa chọn model. Khi bật lọc, công tắc "Sử dụng GPU" mặc định bật và hiển thị tên GPU thực tế hoặc trạng thái chưa khả dụng. Điều khiển model bị khóa trong khi trích xuất/nhập/xóa; thiết lập lọc chi tiết ẩn khi tắt lọc.
+- Lấy frame có "Chọn frame nét nhất mỗi khoảng" với ghi chú thời gian giải mã; lọc mờ có mức chặt cho dữ liệu train. Định dạng hiển thị PNG không mất dữ liệu cố định, bỏ chất lượng JPEG. Summary gallery xuống dòng, không che số đếm; hiển thị nguồn/lấy mẫu/không chọn/chưa xử lý bên cạnh các lý do loại crop.
 - Gallery ngang ở dưới: hiển thị mọi ảnh trong dự án (mới nhất trước), chỉ render vùng đang cuộn tới và tải thumbnail thật theo lô; ảnh đã review có ghi chú. Trạng thái tổng kết ở thanh cuối.
 
 ## Dataset
 
-- Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
+- Tab Dataset mặc định chia theo từng ảnh đủ điều kiện sau negative sampling; tỷ lệ tính theo số ảnh, giữ ảnh trùng byte và frame gần trùng cùng split. Có thể chọn theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
 - Điều khiển negative sampling có preset 0/5/10/25% và tỷ lệ tùy chỉnh; report nêu số ảnh negative được giữ/bỏ cùng tỷ lệ thực tế.
 - Ảnh trống chưa review không được export; candidate negative do inference tạo ra chỉ thành negative đã review sau khi người dùng xác nhận ảnh trống. Negative đã xác nhận có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
 - Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
