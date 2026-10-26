@@ -7,7 +7,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 from frameforge.project import create_project, load_project, save_project
-from frameforge.session import load_session, save_session
+from frameforge.session import _repair_mojibake, load_session, save_session
 
 
 def test_session_restores_project_state_and_detects_external_project_changes(tmp_path: Path, monkeypatch):
@@ -53,6 +53,15 @@ def test_load_session_without_snapshot_returns_unavailable(tmp_path: Path, monke
     assert load_session() == {"available": False}
 
 
+def test_repair_mojibake_project_name_without_changing_normal_text():
+    corrupted = "Dự án chưa lưu"
+    for _ in range(3):
+        corrupted = corrupted.encode("utf-8").decode("cp1252")
+
+    assert _repair_mojibake(corrupted) == "Dự án chưa lưu"
+    assert _repair_mojibake("Dự án đã lưu") == "Dự án đã lưu"
+
+
 def test_session_migrates_legacy_dhash_default_and_keeps_a_new_choice(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
     project_path = tmp_path / "project.ffproj"
@@ -74,3 +83,23 @@ def test_session_migrates_legacy_dhash_default_and_keeps_a_new_choice(tmp_path: 
 
     assert reopened["project"]["settings"]["duplicate_threshold"] == 5
     assert reopened["project"]["settings_migrated"] is False
+
+
+def test_light_session_keeps_no_images_and_trusts_the_saved_project(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path = tmp_path / "project.ffproj"
+    create_project(str(project_path), "Dự án")
+    project = load_project(str(project_path))
+    project["images"] = [{"path": str(tmp_path / "a.png"), "width": 4, "height": 4, "status": "ready"}]
+
+    save_session(project, {"project_path": str(project_path), "light": True})
+    restored = load_session()
+
+    assert restored["session"]["light"] is True
+    assert restored["session"]["source_project_sha256"] is None
+    assert restored["project"]["images"] == []
+    assert restored["original_project_exists"] is True and restored["original_project_unchanged"] is True
+
+    # Without a project path a session is never light, so unsaved work keeps its images.
+    save_session(project, {"project_path": None, "light": True})
+    assert len(load_session()["project"]["images"]) == 1

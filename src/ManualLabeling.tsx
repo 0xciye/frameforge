@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Ban,
   Check,
+  CheckCheck,
   CheckCircle2,
   FileImage,
   Hand,
@@ -46,6 +47,15 @@ type LabelImage = {
   status: string;
   annotations?: Annotation[];
   negative_candidates?: NegativeCandidate[];
+  inference_attempts?: InferenceAttempt[];
+};
+
+export type InferenceAttempt = {
+  source_model_id: string;
+  checkpoint_sha256: string;
+  image_fingerprint: string;
+  skipped_large_objects: number;
+  created_at?: string;
 };
 
 export type NegativeCandidate = {
@@ -89,17 +99,19 @@ type BatchInferenceResult = {
   annotation_count: number;
   skipped_changed: number;
   skipped_large_objects: number;
+  skipped_attempted?: number;
 };
 type SaveSuggestionsResult = { annotations: Annotation[]; negative_candidate?: NegativeCandidate | null };
-type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string) => Promise<SaveSuggestionsResult>;
+type SaveSuggestions = (path: string, predictions: Prediction[], checkpoint: string, fingerprint: string, skippedLargeObjects: number, replace: boolean) => Promise<SaveSuggestionsResult>;
 type ReviewNegativeCandidate = (candidateId: string, action: "confirmed_negative" | "rejected", fingerprint?: string) => Promise<void>;
-type RunBatchInference = (checkpoint: string, requestId: string) => Promise<BatchInferenceResult>;
+type RunBatchInference = (checkpoint: string, requestId: string, confidence: number, replace: boolean) => Promise<BatchInferenceResult>;
+type ApplyModelClasses = (classNames: string[]) => Promise<void>;
 type Point = { x: number; y: number };
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 type Tool = { kind: "draw"; classId: number } | { kind: "select" } | { kind: "pan" };
 type Gesture =
-  | { kind: "draw"; pointerId: number; start: Point; current: Point; classId: number }
-  | { kind: "move"; pointerId: number; start: Point; current: Point; box: Annotation }
+  | { kind: "draw"; pointerId: number; start: Point; current: Point; classId: number; clickBoxId?: string; startScreen?: Point }
+  | { kind: "move"; pointerId: number; start: Point; current: Point; box: Annotation; startScreen?: Point; cycleId?: string }
   | { kind: "resize"; pointerId: number; start: Point; current: Point; box: Annotation; handle: ResizeHandle }
   | { kind: "pan"; pointerId: number; start: Point; pan: Point };
 type Snapshot = { annotations: Annotation[]; status: "ready" | "reviewed" };
@@ -114,7 +126,15 @@ type Props = {
   saveSuggestions: SaveSuggestions;
   reviewNegativeCandidate: ReviewNegativeCandidate;
   runBatchInference: RunBatchInference;
+  applyModelClasses: ApplyModelClasses;
+  /** Saved project path; the last image opened is remembered per project. */
+  projectKey?: string | null;
+  /** Asks and deletes an image with its JSON; resolves false when the user cancels. */
+  deleteImage?: (path: string, boxCount: number) => Promise<boolean>;
+  reviewImages?: (paths: string[]) => Promise<string | null>;
 };
+
+const DEFAULT_CONFIDENCE = 0.35;
 
 function requestId() {
   return globalThis.crypto?.randomUUID?.() ?? `label-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -150,6 +170,14 @@ function pointFromPointer(event: PointerEvent<SVGSVGElement>, width: number, hei
   };
 }
 
+/** Boxes under a point, smallest first, so a head inside a body box or a box under another stays reachable. */
+function boxesAt(annotations: Annotation[], point: Point, tolerance: number): Annotation[] {
+  return annotations
+    .filter((item) => point.x >= item.x_min - tolerance && point.x <= item.x_max + tolerance
+      && point.y >= item.y_min - tolerance && point.y <= item.y_max + tolerance)
+    .sort((left, right) => (left.x_max - left.x_min) * (left.y_max - left.y_min) - (right.x_max - right.x_min) * (right.y_max - right.y_min));
+}
+
 function moveBox(box: Annotation, start: Point, current: Point, width: number, height: number): Annotation {
   const boxWidth = box.x_max - box.x_min;
   const boxHeight = box.y_max - box.y_min;
@@ -167,9 +195,70 @@ function resizeBox(box: Annotation, handle: ResizeHandle, point: Point, width: n
   return next;
 }
 
-export default function ManualLabeling({ images, classNames, loadPreview, saveImage, saveSuggestions, reviewNegativeCandidate, runBatchInference }: Props) {
+const NAVIGATION_KEYS = new Set(["a", "d", "n"]);
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 32;
+const ZOOM_STEP = 1.25;
+// Image list rows have a fixed height so only the rows in view are rendered (projects reach 100 000+ images).
+const IMAGE_ROW_HEIGHT = 49;
+const IMAGE_ROW_OVERSCAN = 12;
+
+type ImageFilter = "all" | "todo" | "reviewed" | "pending" | `class:${number}`;
+
+function liveAnnotations(image: LabelImage) {
+  return (image.annotations ?? []).filter((annotation) => annotation.review_status !== "rejected");
+}
+
+function hasPendingAi(image: LabelImage) {
+  return (image.annotations ?? []).some((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review")
+    || (image.negative_candidates ?? []).some((candidate) => candidate.review_status === "needs_review");
+}
+
+function matchesFilter(image: LabelImage, filter: ImageFilter) {
+  if (filter === "all") return true;
+  if (filter === "todo") return image.status !== "reviewed";
+  if (filter === "reviewed") return image.status === "reviewed";
+  if (filter === "pending") return hasPendingAi(image);
+  const classId = Number(filter.slice("class:".length));
+  return liveAnnotations(image).some((annotation) => annotation.class_id === classId);
+}
+
+/** Class keys: 1–9 in class ID order, plus a class name's first letter when no other class starts with it. */
+function classShortcuts(classNames: string[]) {
+  const keys = new Map<string, number>();
+  classNames.slice(0, 9).forEach((_, classId) => keys.set(String(classId + 1), classId));
+  const byLetter = new Map<string, number[]>();
+  classNames.forEach((name, classId) => {
+    const letter = name.trim().charAt(0).toLocaleLowerCase("vi-VN");
+    if (/^\p{L}$/u.test(letter)) byLetter.set(letter, [...(byLetter.get(letter) ?? []), classId]);
+  });
+  for (const [letter, ids] of byLetter) if (ids.length === 1 && !NAVIGATION_KEYS.has(letter)) keys.set(letter, ids[0]);
+  return keys;
+}
+
+function lastImageKey(projectKey?: string | null) {
+  return projectKey ? `frameforge.last-image.v1:${projectKey}` : null;
+}
+
+function readLastImage(projectKey?: string | null) {
+  const key = lastImageKey(projectKey);
+  try { return key ? localStorage.getItem(key) : null; } catch { return null; }
+}
+
+export default function ManualLabeling({ projectKey, deleteImage, reviewImages, images, classNames, loadPreview, saveImage, saveSuggestions, reviewNegativeCandidate, runBatchInference, applyModelClasses }: Props) {
   const classes = useMemo(() => classNames.length ? classNames : ["head", "body"], [classNames]);
-  const [activePath, setActivePath] = useState(images[0]?.path ?? "");
+  const shortcuts = useMemo(() => classShortcuts(classes), [classes]);
+  const shortcutLabel = (classId: number) => [...shortcuts].filter(([, id]) => id === classId).map(([key]) => key.toLocaleUpperCase("vi-VN")).join(" / ");
+  const [activePath, setActivePath] = useState(() => {
+    const saved = readLastImage(projectKey);
+    return saved && images.some((item) => item.path === saved) ? saved : images[0]?.path ?? "";
+  });
+  const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
+  const [resuggestLabeled, setResuggestLabeled] = useState(false);
+  const [bulkReviewing, setBulkReviewing] = useState(false);
+  const [bulkReviewMessage, setBulkReviewMessage] = useState<string | null>(null);
+  const imageListRef = useRef<HTMLDivElement | null>(null);
+  const [listScroll, setListScroll] = useState({ top: 0, height: 600 });
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>({ kind: "select" });
   const [preview, setPreview] = useState<LabelPreview | null>(null);
@@ -178,6 +267,9 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const view = useRef({ zoom: 1, pan: { x: 0, y: 0 } });
+  view.current = { zoom, pan };
   const [gesture, setGesture] = useState<Gesture | null>(null);
   const [saveStates, setSaveStates] = useState<Record<string, SaveState>>({});
   const [models, setModels] = useState<RegisteredModel[]>([]);
@@ -185,6 +277,8 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const [modelImportBusy, setModelImportBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState("");
+  const [confidencePercent, setConfidencePercent] = useState(Math.round(DEFAULT_CONFIDENCE * 100));
+  const [applyingClasses, setApplyingClasses] = useState(false);
   const [inferenceBusy, setInferenceBusy] = useState(false);
   const [inferenceCancelling, setInferenceCancelling] = useState(false);
   const [inferenceProgress, setInferenceProgress] = useState<InferenceProgress | null>(null);
@@ -197,14 +291,24 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   const activeInferenceId = useRef<string | null>(null);
   const histories = useRef(new Map<string, History>());
   const saveRevisions = useRef(new Map<string, number>());
-  const usableModels = useMemo(() => models.filter((model) => (
-    model.checkpoint_usable
-    && typeof model.checkpoint_path === "string"
-    && model.class_names?.length === classes.length
+  const availableModels = useMemo(() => models.filter((model) => (
+    model.checkpoint_usable && typeof model.checkpoint_path === "string" && (model.class_names?.length ?? 0) > 0
+  )), [models]);
+  const usableModels = useMemo(() => availableModels.filter((model) => (
+    model.class_names?.length === classes.length
     && model.class_names.every((name, index) => name === classes[index])
-  )), [models, classes]);
+  )), [availableModels, classes]);
+  const selectedEntry = availableModels.find((model) => model.run_id === selectedModelId) ?? null;
   const selectedModel = usableModels.find((model) => model.run_id === selectedModelId) ?? null;
+  const projectHasLabels = images.some((item) => (item.annotations?.length ?? 0) > 0 || (item.negative_candidates?.length ?? 0) > 0);
+  const confidenceValid = Number.isFinite(confidencePercent) && confidencePercent >= 1 && confidencePercent <= 99;
+  const confidence = confidenceValid ? confidencePercent / 100 : DEFAULT_CONFIDENCE;
   const image = images.find((item) => item.path === activePath) ?? images[0] ?? null;
+  const visibleImages = useMemo(() => images.filter((item) => matchesFilter(item, imageFilter)), [images, imageFilter]);
+  const reviewedCount = useMemo(() => images.filter((item) => item.status === "reviewed").length, [images]);
+  const imagePosition = useMemo(() => new Map(images.map((item, index) => [item.path, index])), [images]);
+  const firstRow = Math.max(0, Math.floor(listScroll.top / IMAGE_ROW_HEIGHT) - IMAGE_ROW_OVERSCAN);
+  const lastRow = Math.min(visibleImages.length, Math.ceil((listScroll.top + listScroll.height) / IMAGE_ROW_HEIGHT) + IMAGE_ROW_OVERSCAN);
   const annotations = image?.annotations ?? [];
   const activeAnnotations = useMemo(() => annotations.filter((item) => item.review_status !== "rejected"), [annotations]);
   const pendingSuggestions = annotations.filter((item) => item.source === "ai" && item.review_status === "needs_review");
@@ -214,19 +318,13 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     item.status !== "reviewed"
     && !(item.annotations ?? []).some((annotation) => annotation.source === "manual" || annotation.review_status !== "rejected")
     && !(item.negative_candidates ?? []).some((candidate) => candidate.review_status !== "rejected")
+    && !(selectedModel && (item.inference_attempts ?? []).some((attempt) => attempt.checkpoint_sha256 === selectedModel.checkpoint_sha256))
   ));
+  const batchCount = resuggestLabeled ? images.length : inferenceQueue.length;
+  const imageHasSuggestionState = Boolean(image && (activeAnnotations.length > 0
+    || negativeCandidates.some((item) => item.review_status !== "rejected") || (image.inference_attempts ?? []).length > 0));
   const imageIndex = image ? images.findIndex((item) => item.path === image.path) : -1;
   const selectedAnnotation = activeAnnotations.find((item) => item.id === selectedAnnotationId) ?? null;
-  const alreadySuggestedByModel = Boolean(image && selectedModel && annotations.some((item) => (
-    item.source === "ai"
-    && item.review_status !== "rejected"
-    && item.source_model_id === selectedModel.run_id
-    && item.checkpoint_sha256 === selectedModel.checkpoint_sha256
-  )) || Boolean(image && selectedModel && negativeCandidates.some((item) => (
-    item.review_status !== "rejected"
-    && item.source_model_id === selectedModel.run_id
-    && item.checkpoint_sha256 === selectedModel.checkpoint_sha256
-  ))));
   const saveState = image ? saveStates[image.path] ?? { status: "saved" as const } : { status: "saved" as const };
   const sizeMismatch = Boolean(preview && image && (preview.width !== image.width || preview.height !== image.height));
   const canEdit = Boolean(image && preview && preview.image_fingerprint && !sizeMismatch && !inferenceBusy);
@@ -235,14 +333,14 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     const scale = Math.min(stageSize.width / preview.width, stageSize.height / preview.height);
     return { width: preview.width * scale, height: preview.height * scale, scale: scale * zoom };
   }, [preview, stageSize, zoom]);
-  const handleSize = fitSize ? 10 / fitSize.scale : 12;
+  const handleSize = fitSize ? 12 / fitSize.scale : 12;
   const strokeWidth = fitSize ? 2 / fitSize.scale : 2;
 
   const refreshModels = useCallback(async () => {
     setModelsLoading(true);
     setModelError(null);
     try {
-      const result = await engineRequest<{ runs: RegisteredModel[] }>("list_training_runs");
+      const result = await engineRequest<{ runs: RegisteredModel[] }>("list_models");
       setModels(result.runs ?? []);
     } catch (reason) {
       setModelError(String(reason));
@@ -250,6 +348,24 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       setModelsLoading(false);
     }
   }, []);
+
+  async function deleteSelectedModel() {
+    const model = selectedEntry;
+    if (!model || modelBusy) return;
+    const approved = await confirm(
+      `Xóa model "${model.display_name ?? "YOLO11n"} · ${model.run_id.slice(0, 8)}" khỏi FrameForge?\n\nBox đã gán bằng model này vẫn giữ nguyên. File .pt gốc của bạn không bị xóa.`,
+      { title: "Xóa model", kind: "warning", okLabel: "Xóa model", cancelLabel: "Hủy" },
+    );
+    if (!approved) return;
+    setModelError(null);
+    try {
+      await engineRequest("delete_model", { run_id: model.run_id });
+      setSelectedModelId("");
+      await refreshModels();
+    } catch (reason) {
+      setModelError(String(reason));
+    }
+  }
 
   async function importModelCheckpoint() {
     setModelError(null);
@@ -276,12 +392,20 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         display_name: string;
       }>("import_yolo_checkpoint", { path: selected, trust_source: true });
       await refreshModels();
+      setSelectedModelId(imported.run_id);
       const matchesProject = imported.class_names.length === classes.length
         && imported.class_names.every((name, index) => name === classes[index]);
-      if (matchesProject) setSelectedModelId(imported.run_id);
-      setInferenceMessage(matchesProject
-        ? `Đã nhập ${imported.architecture} với class ${imported.class_names.join(", ")}. Model sẵn sàng để gợi ý box.`
-        : `Đã nhập ${imported.architecture} (${imported.class_names.join(", ")}), nhưng class chưa khớp project hiện tại nên chưa thể dùng inference.`);
+      if (matchesProject) {
+        setInferenceMessage(`Đã nhập ${imported.architecture} với class ${imported.class_names.join(", ")}. Model sẵn sàng để gợi ý box.`);
+      } else if (!projectHasLabels && await confirm(
+        `Model dùng class: ${imported.class_names.join(", ")}.\nDự án đang dùng: ${classes.join(", ")}.\n\nDự án chưa có nhãn nào. Đổi class của dự án theo model để dùng model này?`,
+        { title: "Dùng class của model", kind: "info", okLabel: "Dùng class của model", cancelLabel: "Giữ class hiện tại" },
+      )) {
+        await applyModelClasses(imported.class_names);
+        setInferenceMessage(`Đã nhập ${imported.architecture}; dự án dùng class ${imported.class_names.join(", ")}. Model sẵn sàng để gợi ý box.`);
+      } else {
+        setInferenceMessage(`Đã nhập ${imported.architecture} (${imported.class_names.join(", ")}), nhưng class chưa khớp dự án nên chưa thể dùng inference.`);
+      }
     } catch (reason) {
       setModelError(String(reason));
     } finally {
@@ -292,14 +416,38 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   useEffect(() => { void refreshModels(); }, [refreshModels]);
 
   useEffect(() => {
-    if (usableModels.some((model) => model.run_id === selectedModelId)) return;
-    setSelectedModelId(usableModels[0]?.run_id ?? "");
-  }, [usableModels, selectedModelId]);
+    if (availableModels.some((model) => model.run_id === selectedModelId)) return;
+    setSelectedModelId(usableModels[0]?.run_id ?? availableModels[0]?.run_id ?? "");
+  }, [availableModels, usableModels, selectedModelId]);
+
+  async function adoptModelClasses(model: RegisteredModel) {
+    const names = model.class_names ?? [];
+    if (!names.length || projectHasLabels || applyingClasses) return;
+    setApplyingClasses(true);
+    setModelError(null);
+    try {
+      await applyModelClasses(names);
+      setSelectedModelId(model.run_id);
+      setInferenceMessage(`Dự án dùng class của model: ${names.join(", ")}. Model sẵn sàng để gợi ý box.`);
+    } catch (reason) {
+      setModelError(String(reason));
+    } finally {
+      setApplyingClasses(false);
+    }
+  }
 
   useEffect(() => {
     if (images.some((item) => item.path === activePath)) return;
-    setActivePath(images[0]?.path ?? "");
-  }, [activePath, images]);
+    // Images arrived later or the project changed: go back to the last image worked on, else the first.
+    const saved = readLastImage(projectKey);
+    setActivePath(saved && images.some((item) => item.path === saved) ? saved : images[0]?.path ?? "");
+  }, [activePath, images, projectKey]);
+
+  useEffect(() => {
+    const key = lastImageKey(projectKey);
+    if (!key || !activePath) return;
+    try { localStorage.setItem(key, activePath); } catch { /* per-device convenience only */ }
+  }, [activePath, projectKey]);
 
   useEffect(() => {
     const node = stageRef.current;
@@ -368,6 +516,13 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
 
   async function startInference() {
     if (!image || !preview?.image_fingerprint || !selectedModel?.checkpoint_path || inferenceBusy) return;
+    // Suggesting again on an image that already has boxes or a candidate replaces them all.
+    const replace = activeAnnotations.length > 0 || negativeCandidates.some((item) => item.review_status !== "rejected")
+      || (image.inference_attempts ?? []).length > 0;
+    if (replace && activeAnnotations.length > 0 && !(await confirm(
+      `Gợi ý lại sẽ xóa ${activeAnnotations.length} box hiện có của ảnh này.`,
+      { title: "Gợi ý lại", kind: "warning", okLabel: "Gợi ý lại", cancelLabel: "Hủy" },
+    ))) return;
     setInferenceBusy(true);
     setInferenceCancelling(false);
     setInferenceProgress(null);
@@ -384,7 +539,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         request: {
           id,
           command: "predict_crops",
-          arguments: { checkpoint: selectedModel.checkpoint_path, images: [image.path], confidence_threshold: 0.25 },
+          arguments: { checkpoint: selectedModel.checkpoint_path, images: [image.path], confidence_threshold: confidence },
         },
       });
       if (activeInferenceId.current !== id) return;
@@ -394,17 +549,14 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       }
       const predictions = result.results[0]?.predictions ?? [];
       const skippedLargeObjects = result.results[0]?.skipped_large_objects ?? 0;
+      const saved = await saveSuggestions(image.path, predictions, selectedModel.checkpoint_path, preview.image_fingerprint, skippedLargeObjects, replace);
+      if (replace) histories.current.delete(image.path);
       if (skippedLargeObjects > 0 && predictions.length === 0) {
-        setInferenceMessage(`Đã bỏ qua ${skippedLargeObjects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung. Không tạo candidate âm tính; ảnh vẫn cần bạn review.`);
+        setInferenceMessage(`Bỏ qua ${skippedLargeObjects} box chạm biên crop.`);
         return;
       }
-      const saved = await saveSuggestions(image.path, predictions, selectedModel.checkpoint_path, preview.image_fingerprint);
-      const resultMessage = saved.negative_candidate
-        ? "Model không phát hiện box. Candidate âm tính đang chờ bạn xác nhận; ảnh chưa được đưa vào dataset."
-        : `Đã lưu ${saved.annotations.length} gợi ý. Duyệt từng box trước khi dùng trong dataset.`;
-      setInferenceMessage(skippedLargeObjects > 0
-        ? `${resultMessage} Đã bỏ qua thêm ${skippedLargeObjects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung.`
-        : resultMessage);
+      const resultMessage = saved.negative_candidate ? "Không phát hiện box." : `${saved.annotations.length} gợi ý.`;
+      setInferenceMessage(skippedLargeObjects > 0 ? `${resultMessage} Bỏ qua ${skippedLargeObjects} box chạm biên crop.` : resultMessage);
     } catch (reason) {
       setInferenceError(String(reason));
     } finally {
@@ -416,7 +568,12 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   }
 
   async function startBatchInference() {
-    if (!selectedModel?.checkpoint_path || inferenceBusy || inferenceQueue.length === 0) return;
+    if (!selectedModel?.checkpoint_path || inferenceBusy || batchCount === 0) return;
+    if (resuggestLabeled && !(await confirm(
+      `Gợi ý lại ${images.length} ảnh sẽ xóa mọi box hiện có (kể cả box đã duyệt hoặc tự vẽ) của các ảnh đó.`,
+      { title: "Gợi ý lại tất cả", kind: "warning", okLabel: "Gợi ý lại", cancelLabel: "Hủy" },
+    ))) return;
+    if (resuggestLabeled) histories.current.clear();
     setInferenceBusy(true);
     setInferenceCancelling(false);
     setInferenceProgress(null);
@@ -429,9 +586,9 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       dispose = await listen<{ id: string; progress: InferenceProgress }>("engine-progress", (event) => {
         if (event.payload.id === id) setInferenceProgress(event.payload.progress);
       });
-      const result = await runBatchInference(selectedModel.checkpoint_path, id);
+      const result = await runBatchInference(selectedModel.checkpoint_path, id, confidence, resuggestLabeled);
       if (activeInferenceId.current !== id) return;
-      setInferenceMessage(`${result.status === "cancelled" ? "Đã dừng" : "Hoàn tất"}: ${result.processed_images} ảnh đã xử lý, ${result.images_with_detections} ảnh có box, ${result.candidate_negative_count} candidate âm tính cần review${result.skipped_large_objects ? `, bỏ qua ${result.skipped_large_objects} box chạm biên crop vì object có thể bị cắt hoặc lớn hơn khung` : ""}${result.skipped_changed ? `, ${result.skipped_changed} ảnh đã đổi hoặc không còn đọc được` : ""}.`);
+      setInferenceMessage(`${result.status === "cancelled" ? "Đã dừng" : "Xong"}: ${result.processed_images} ảnh · ${result.images_with_detections} có box · ${result.candidate_negative_count} không phát hiện${result.skipped_changed ? ` · ${result.skipped_changed} ảnh lỗi` : ""}.`);
     } catch (reason) {
       setInferenceError(String(reason));
     } finally {
@@ -479,7 +636,12 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     }
   }
 
-  function commit(nextAnnotations: Annotation[], status: "ready" | "reviewed" = "ready") {
+  /**
+   * Saves the image's boxes. Boxes a person draws or edits need no review (user rule): they are stored
+   * as reviewed. Only AI suggestions wait for review, so without an explicit ``requestedStatus`` an image
+   * is reviewed once it has boxes and no AI suggestion or empty-image candidate is pending.
+   */
+  function commit(nextAnnotations: Annotation[], requestedStatus?: "ready" | "reviewed") {
     if (!image || !canEdit || !preview) return;
     const history = histories.current.get(image.path) ?? { past: [], future: [] };
     history.past.push({ annotations: copyAnnotations(annotations), status: image.status === "reviewed" ? "reviewed" : "ready" });
@@ -494,7 +656,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
           ...annotation,
           source: "manual" as const,
           confidence: null,
-          review_status: status === "reviewed" ? "reviewed" as const : "unreviewed" as const,
+          review_status: "reviewed" as const,
           source_model_id: null,
           checkpoint_sha256: null,
         };
@@ -503,10 +665,8 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         || previous.x_min !== annotation.x_min || previous.y_min !== annotation.y_min
         || previous.x_max !== annotation.x_max || previous.y_max !== annotation.y_max;
       let reviewStatus = annotation.review_status;
-      if (status === "reviewed" && previous.source === "manual") reviewStatus = "reviewed";
-      else if (changed && previous.source === "ai" && previous.review_status === "needs_review") reviewStatus = "reviewed";
-      else if (changed && previous.source === "manual") reviewStatus = "unreviewed";
-      else if (reviewStatus === previous.review_status) reviewStatus = previous.review_status;
+      if (previous.source === "manual") reviewStatus = "reviewed";
+      else if (changed && previous.review_status === "needs_review") reviewStatus = "reviewed";
       return {
         ...annotation,
         source: previous.source,
@@ -516,6 +676,10 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
         review_status: reviewStatus,
       };
     });
+    const pendingAi = next.some((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review")
+      || pendingNegativeCandidates.length > 0;
+    const hasBoxes = next.some((annotation) => annotation.review_status !== "rejected");
+    const status = pendingAi ? "ready" : requestedStatus ?? (hasBoxes ? "reviewed" : "ready");
     persist(image.path, next, status, preview.image_fingerprint);
   }
 
@@ -547,12 +711,79 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     setSelectedAnnotationId(null);
   }
 
+  useEffect(() => {
+    const list = imageListRef.current;
+    if (!list) return;
+    const update = () => setListScroll({ top: list.scrollTop, height: list.clientHeight });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(list);
+    list.addEventListener("scroll", update, { passive: true });
+    return () => {
+      observer.disconnect();
+      list.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Keep the current image's row in view (it may not be rendered yet).
+    const list = imageListRef.current;
+    const index = visibleImages.findIndex((item) => item.path === activePath);
+    if (!list || index < 0) return;
+    const top = index * IMAGE_ROW_HEIGHT;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (top + IMAGE_ROW_HEIGHT > list.scrollTop + list.clientHeight) list.scrollTop = top + IMAGE_ROW_HEIGHT - list.clientHeight;
+  }, [activePath, imageFilter, visibleImages]);
+
+  /** Moves through the filtered list; ``onlyTodo`` skips images already reviewed. */
+  function stepImage(direction: 1 | -1, onlyTodo = false) {
+    const list = visibleImages;
+    if (!list.length) return;
+    const start = list.findIndex((item) => item.path === image?.path);
+    for (let offset = 1; offset <= list.length; offset += 1) {
+      const index = start < 0
+        ? (direction > 0 ? offset - 1 : list.length - offset)
+        : (start + direction * offset + list.length) % list.length;
+      const candidate = list[index];
+      if (!onlyTodo || candidate.status !== "reviewed") {
+        if (candidate.path !== image?.path) selectImage(candidate.path);
+        return;
+      }
+    }
+  }
+
+  async function reviewVisibleImages() {
+    if (!reviewImages || bulkReviewing || inferenceBusy || visibleImages.length === 0) return;
+    setBulkReviewing(true);
+    setBulkReviewMessage(null);
+    try {
+      const summary = await reviewImages(visibleImages.map((item) => item.path));
+      if (summary) setBulkReviewMessage(summary);
+    } catch (reason) {
+      setBulkReviewMessage(String(reason));
+    } finally {
+      setBulkReviewing(false);
+    }
+  }
+
+  async function deleteCurrentImage() {
+    if (!image || !deleteImage || inferenceBusy) return;
+    // Continue with the next image in the current list (or the previous one at the end).
+    const list = visibleImages.length ? visibleImages : images;
+    const index = list.findIndex((item) => item.path === image.path);
+    const next = list[index + 1] ?? list[index - 1] ?? null;
+    try {
+      if (await deleteImage(image.path, activeAnnotations.length) && next) selectImage(next.path);
+    } catch (reason) {
+      setPreviewError(String(reason));
+    }
+  }
+
   function selectImage(path: string) {
     if (inferenceBusy) return;
     setActivePath(path);
     setSelectedAnnotationId(null);
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
+    fitView();
     setPreviewError(null);
   }
 
@@ -575,33 +806,113 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
       });
   }
 
+  function zoomAt(nextZoom: number, clientX?: number, clientY?: number) {
+    const target = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, nextZoom));
+    const { zoom: current, pan: currentPan } = view.current;
+    if (target === current) return;
+    const bounds = stageRef.current?.getBoundingClientRect();
+    const mx = bounds && clientX !== undefined ? clientX - (bounds.left + bounds.width / 2) : 0;
+    const my = bounds && clientY !== undefined ? clientY - (bounds.top + bounds.height / 2) : 0;
+    const ratio = target / current;
+    const next = { x: mx - (mx - currentPan.x) * ratio, y: my - (my - currentPan.y) * ratio };
+    view.current = { zoom: target, pan: next };
+    setZoom(target);
+    setPan(next);
+  }
+
+  function fitView() {
+    view.current = { zoom: 1, pan: { x: 0, y: 0 } };
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const steps = Math.max(-4, Math.min(4, -event.deltaY / (event.deltaMode === 1 ? 3 : 100)));
+      zoomAt(view.current.zoom * Math.pow(ZOOM_STEP, steps), event.clientX, event.clientY);
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", onWheel);
+  });
+
+  useEffect(() => {
+    // Hold Space to drag the image with the left button.
+    const typing = (event: globalThis.KeyboardEvent) => (event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable='true']");
+    const down = (event: globalThis.KeyboardEvent) => {
+      if (event.code === "Space" && !typing(event)) {
+        event.preventDefault();
+        setSpaceHeld(true);
+      }
+    };
+    const up = (event: globalThis.KeyboardEvent) => { if (event.code === "Space") setSpaceHeld(false); };
+    const blur = () => setSpaceHeld(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
   function retrySave() {
     if (!image || !preview) return;
     persist(image.path, annotations, image.status === "reviewed" ? "reviewed" : "ready", preview.image_fingerprint);
   }
 
   function onPointerDown(event: PointerEvent<SVGSVGElement>) {
-    if (!image || !preview || !canEdit || event.button !== 0) return;
+    if (!image || !preview) return;
+    if (event.button === 2 || event.button === 1 || (event.button === 0 && spaceHeld)) {
+      // Right or middle button, or Space + left drag, pans at any zoom without touching boxes.
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setCurrentGesture({ kind: "pan", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, pan });
+      return;
+    }
+    if (!canEdit || event.button !== 0) return;
     const point = pointFromPointer(event, preview.width, preview.height);
     const target = event.target as Element;
     const handleElement = target.closest("[data-handle]") as SVGElement | null;
-    const boxElement = target.closest("[data-annotation-id]") as SVGElement | null;
-    const boxId = boxElement?.dataset.annotationId;
-    const box = annotations.find((annotation) => annotation.id === boxId);
+    const handleBoxId = (target.closest("[data-annotation-id]") as SVGElement | null)?.dataset.annotationId;
+    const handleBox = handleElement ? annotations.find((annotation) => annotation.id === handleBoxId) : undefined;
+    // Hit-test geometrically instead of taking the SVG element on top: overlapping boxes are all candidates,
+    // the smallest wins, and clicking again on the selected one cycles to the next box under the pointer.
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const tolerance = 2 * preview.width / Math.max(1, bounds.width);
+    const candidates = boxesAt(activeAnnotations, point, tolerance);
+    const selectedHit = candidates.find((annotation) => annotation.id === selectedAnnotationId);
+    const box = selectedHit ?? candidates[0];
+    const cycleId = selectedHit && candidates.length > 1
+      ? candidates[(candidates.indexOf(selectedHit) + 1) % candidates.length].id
+      : undefined;
+    const startScreen = { x: event.clientX, y: event.clientY };
     event.currentTarget.focus();
     event.currentTarget.setPointerCapture(event.pointerId);
 
-    if (tool.kind === "draw") {
+    if (handleBox && handleElement?.dataset.handle) {
+      setSelectedAnnotationId(handleBox.id);
+      setCurrentGesture({ kind: "resize", pointerId: event.pointerId, start: point, current: point, box: handleBox, handle: handleElement.dataset.handle as ResizeHandle });
+    } else if (selectedHit) {
+      // Dragging inside the selected box moves the whole box, in any tool; a plain click selects the next
+      // box under the pointer.
+      setCurrentGesture({ kind: "move", pointerId: event.pointerId, start: point, current: point, box: selectedHit, startScreen, cycleId });
+    } else if (tool.kind === "draw") {
+      // A drag draws a new box, even inside another box (a head inside a body box); a plain click on a
+      // box selects it so its handles can resize it right away.
       setSelectedAnnotationId(null);
-      setCurrentGesture({ kind: "draw", pointerId: event.pointerId, start: point, current: point, classId: tool.classId });
+      setCurrentGesture({
+        kind: "draw", pointerId: event.pointerId, start: point, current: point, classId: tool.classId,
+        clickBoxId: box?.id, startScreen,
+      });
     } else if (tool.kind === "pan") {
       setCurrentGesture({ kind: "pan", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, pan });
-    } else if (box && handleElement?.dataset.handle) {
-      setSelectedAnnotationId(box.id);
-      setCurrentGesture({ kind: "resize", pointerId: event.pointerId, start: point, current: point, box, handle: handleElement.dataset.handle as ResizeHandle });
     } else if (box) {
       setSelectedAnnotationId(box.id);
-      setCurrentGesture({ kind: "move", pointerId: event.pointerId, start: point, current: point, box });
+      setCurrentGesture({ kind: "move", pointerId: event.pointerId, start: point, current: point, box, startScreen });
     } else {
       setSelectedAnnotationId(null);
       setCurrentGesture(null);
@@ -612,10 +923,12 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     const current = gestureRef.current;
     if (!current || current.pointerId !== event.pointerId) return;
     if (current.kind === "pan") {
-      setPan({
+      const next = {
         x: current.pan.x + event.clientX - current.start.x,
         y: current.pan.y + event.clientY - current.start.y,
-      });
+      };
+      view.current = { zoom: view.current.zoom, pan: next };
+      setPan(next);
       return;
     }
     const point = pointFromPointer(event, preview?.width ?? 0, preview?.height ?? 0);
@@ -625,7 +938,13 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
   function onPointerUp(event: PointerEvent<SVGSVGElement>) {
     const current = gestureRef.current;
     if (!current || current.pointerId !== event.pointerId || !image || !preview) return;
-    if (current.kind === "draw") {
+    const clicked = (current.kind === "draw" || current.kind === "move") && current.startScreen
+      && Math.hypot(event.clientX - current.startScreen.x, event.clientY - current.startScreen.y) < 4;
+    if (current.kind === "move" && clicked) {
+      if (current.cycleId) setSelectedAnnotationId(current.cycleId);
+    } else if (current.kind === "draw" && clicked && current.clickBoxId) {
+      setSelectedAnnotationId(current.clickBoxId);
+    } else if (current.kind === "draw" && !clicked) {
       const point = pointFromPointer(event, preview.width, preview.height);
       const box: Annotation = {
         id: globalThis.crypto?.randomUUID?.() ?? `box-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -655,24 +974,91 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     setCurrentGesture(null);
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLElement>) {
-    const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable='true']")) return;
+  const keyHandler = useRef<(event: globalThis.KeyboardEvent) => void>(() => undefined);
+  useEffect(() => {
+    const listener = (event: globalThis.KeyboardEvent) => keyHandler.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
+  function onKeyDown(event: globalThis.KeyboardEvent) {
+    if (event.defaultPrevented) return;  // Arrow keys already moved the selected box on the canvas.
+    const target = (event.target instanceof Element ? event.target : document.body) as HTMLElement;
+    if (target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
     const command = event.metaKey || event.ctrlKey;
+    const key = event.key.toLocaleLowerCase("vi-VN");
+    if (!command && !event.altKey && !gesture && (key === "d" || event.key === "PageDown")) {
+      event.preventDefault();
+      stepImage(1);
+      return;
+    }
+    if (!command && !event.altKey && !gesture && (key === "a" || event.key === "PageUp")) {
+      event.preventDefault();
+      stepImage(-1);
+      return;
+    }
+    if (!command && !event.altKey && (event.key === "+" || event.key === "=")) {
+      event.preventDefault();
+      zoomAt(view.current.zoom * ZOOM_STEP);
+      return;
+    }
+    if (!command && !event.altKey && (event.key === "-" || event.key === "_")) {
+      event.preventDefault();
+      zoomAt(view.current.zoom / ZOOM_STEP);
+      return;
+    }
+    if (!command && !event.altKey && event.key === "0") {
+      event.preventDefault();
+      fitView();
+      return;
+    }
+    if (!command && !event.altKey && !gesture && key === "n") {
+      event.preventDefault();
+      stepImage(1, true);
+      return;
+    }
+    if (!command && !event.altKey && !gesture && event.key === "Enter") {
+      // Accept this image (and its pending AI suggestions) and move on to the next one that still needs work.
+      event.preventDefault();
+      if (image && image.status !== "reviewed") {
+        if (!canEdit || pendingNegativeCandidates.length > 0) return;
+        commit(annotations.map((item) => (
+          item.source === "ai" && item.review_status === "needs_review" ? { ...item, review_status: "reviewed" as const } : item
+        )), "reviewed");
+      }
+      stepImage(1, true);
+      return;
+    }
     if (command && event.key.toLowerCase() === "z") {
       event.preventDefault();
       if (event.shiftKey) redo(); else undo();
     } else if (command && event.key.toLowerCase() === "y") {
       event.preventDefault();
       redo();
+    } else if (event.key === "Delete" && event.shiftKey) {
+      event.preventDefault();
+      void deleteCurrentImage();
     } else if (event.key === "Delete") {
       event.preventDefault();
       deleteSelected();
     } else if (event.key === "Escape") {
       setCurrentGesture(null);
       setTool({ kind: "select" });
+    } else if (!command && !event.altKey && shortcuts.has(event.key.toLocaleLowerCase("vi-VN"))) {
+      // Class key: re-class the selected box, otherwise draw the next box with that class.
+      const classId = shortcuts.get(event.key.toLocaleLowerCase("vi-VN"))!;
+      if (!canEdit || event.repeat) return;
+      event.preventDefault();
+      if (selectedAnnotation) {
+        if (selectedAnnotation.class_id !== classId) changeClass(selectedAnnotation, classId);
+      } else {
+        setCurrentGesture(null);
+        setTool({ kind: "draw", classId });
+      }
     }
   }
+
+  keyHandler.current = onKeyDown;
 
   function onCanvasKeyDown(event: KeyboardEvent<SVGSVGElement>) {
     if (!selectedAnnotation || !preview || !canEdit || !event.key.startsWith("Arrow")) return;
@@ -705,6 +1091,13 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     commit(annotations.map((item) => item.id === annotation.id ? { ...item, review_status } : item));
   }
 
+  function reviewAllSuggestions(review_status: "reviewed" | "rejected") {
+    if (!pendingSuggestions.length) return;
+    commit(annotations.map((item) => (
+      item.source === "ai" && item.review_status === "needs_review" ? { ...item, review_status } : item
+    )));
+  }
+
   const history = image ? histories.current.get(image.path) : undefined;
   const visibleAnnotations = useMemo(() => {
     if (!gesture || gesture.kind === "draw" || gesture.kind === "pan") return activeAnnotations;
@@ -721,32 +1114,95 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
     class_id: gesture.classId,
   } : null;
 
+  const modelBusy = modelsLoading || inferenceBusy || modelImportBusy || applyingClasses;
+  const selectedMismatch = selectedEntry && !selectedModel ? selectedEntry : null;
+  const modelControls = (
+    <>
+      <button type="button" className="subtle-button label-ai-run-button" disabled={modelBusy} onClick={() => void importModelCheckpoint()}>
+        <Upload size={13} /> Nhập model .pt
+      </button>
+      <label className="label-ai-model">
+        <span>Checkpoint YOLO11n</span>
+        <div className="label-ai-model-row">
+          <select aria-label="Checkpoint inference" value={selectedModelId} disabled={modelBusy || availableModels.length === 0} onChange={(event) => setSelectedModelId(event.target.value)}>
+            <option value="">{modelsLoading ? "Đang tải checkpoint…" : "Chọn checkpoint"}</option>
+            {availableModels.map((model) => <option key={model.run_id} value={model.run_id}>
+              {model.display_name ?? "YOLO11n"} · {model.effective_imgsz ?? model.requested_imgsz ?? "—"} px · {model.run_id.slice(0, 8)}{usableModels.includes(model) ? "" : " · class khác dự án"}
+            </option>)}
+          </select>
+          <button type="button" className="label-icon-button" aria-label="Xóa model đang chọn" title="Xóa model đang chọn" disabled={modelBusy || !selectedEntry} onClick={() => void deleteSelectedModel()}><Trash2 size={12} /></button>
+        </div>
+      </label>
+      <label className="label-ai-model">
+        <span>Ngưỡng confidence (%)</span>
+        <input type="number" min="1" max="99" step="1" value={confidencePercent} disabled={inferenceBusy} aria-invalid={!confidenceValid} onChange={(event) => setConfidencePercent(Number(event.target.value))} />
+      </label>
+      {!confidenceValid && <small className="label-ai-error" role="alert">Nhập ngưỡng từ 1 đến 99%.</small>}
+      {selectedMismatch && <div className="label-ai-class-mismatch">
+        <small>Model: {(selectedMismatch.class_names ?? []).join(", ")}<br />Dự án: {classes.join(", ")}</small>
+        {projectHasLabels
+          ? <small className="label-ai-note">Dự án đã có nhãn nên không thể đổi class. Tạo dự án mới để dùng model này.</small>
+          : <button type="button" className="subtle-button label-ai-run-button" disabled={modelBusy} onClick={() => void adoptModelClasses(selectedMismatch)}>Dùng class của model cho dự án</button>}
+      </div>}
+      {modelImportBusy && <small className="label-ai-note">Đang xác minh checkpoint…</small>}
+      {modelError && <small className="label-ai-error" role="alert">Không thể xử lý checkpoint: {modelError}</small>}
+    </>
+  );
+
   if (!image) {
     return (
       <section className="label-workspace" aria-label="Không gian gán nhãn">
-        <div className="panel label-empty-workspace">
+        <div className="panel label-empty-workspace with-model-panel">
           <FileImage size={28} aria-hidden="true" />
           <h1>Chưa có ảnh để gán nhãn</h1>
-          <p>Trích xuất frame trước. Ảnh sẽ xuất hiện tại đây để bạn vẽ box thủ công.</p>
         </div>
+        <aside className="panel label-inspector-panel">
+          <div className="settings-header"><h2>Model</h2><span>{availableModels.length} checkpoint</span></div>
+          <div className="label-inspector-scroll">
+            <section className="label-tool-section label-ai-section" aria-label="Nhập và chọn model">
+              {modelControls}
+              {inferenceMessage && <small className="label-ai-note" aria-live="polite">{inferenceMessage}</small>}
+            </section>
+          </div>
+        </aside>
       </section>
     );
   }
 
   return (
-    <section className="label-workspace" aria-label="Không gian gán nhãn" onKeyDown={onKeyDown}>
+    <section className="label-workspace" aria-label="Không gian gán nhãn">
       <aside className="panel label-images-panel">
         <div className="panel-heading">
-          <div><h1>Ảnh trong dự án</h1><span>{images.length} ảnh · {images.filter((item) => item.status === "reviewed").length} đã review</span></div>
+          <div><h1>Ảnh trong dự án</h1><span>{images.length} ảnh · {reviewedCount} đã review · {images.length - reviewedCount} chưa xong</span></div>
         </div>
-        <div className="label-image-list" role="list" aria-label="Danh sách ảnh cần gán nhãn">
-          {images.map((item, index) => {
+        <div className="label-image-filter">
+          <select aria-label="Lọc danh sách ảnh" value={imageFilter} onChange={(event) => setImageFilter(event.target.value as ImageFilter)}>
+            <option value="all">Tất cả ảnh</option>
+            <option value="todo">Chưa xong (chưa review)</option>
+            <option value="reviewed">Đã review</option>
+            <option value="pending">Có gợi ý AI chờ duyệt</option>
+            {classes.map((name, classId) => <option key={`${classId}-${name}`} value={`class:${classId}`}>Có box {name}</option>)}
+          </select>
+          <small>{visibleImages.length} ảnh</small>
+        </div>
+        {reviewImages && <div className="label-bulk-review">
+          <button type="button" disabled={bulkReviewing || visibleImages.length === 0} onClick={() => void reviewVisibleImages()} title="Duyệt mọi box AI chờ duyệt và đánh dấu đã review cho các ảnh có box trong danh sách đang lọc">
+            {bulkReviewing ? <LoaderCircle className="spin" size={12} /> : <CheckCheck size={12} />}
+            {bulkReviewing ? "Đang duyệt…" : `Duyệt toàn bộ ảnh (${visibleImages.length})`}
+          </button>
+          {bulkReviewMessage && <small role="status">{bulkReviewMessage}</small>}
+        </div>}
+        <div className="label-image-list" role="list" aria-label="Danh sách ảnh cần gán nhãn" ref={imageListRef}>
+          {visibleImages.length === 0 ? <p className="label-image-empty">Không có ảnh nào khớp bộ lọc.</p> : null}
+          <div style={{ height: firstRow * IMAGE_ROW_HEIGHT }} aria-hidden="true" />
+          {visibleImages.slice(firstRow, lastRow).map((item) => {
+            const index = imagePosition.get(item.path) ?? 0;
             const count = item.annotations?.filter((annotation) => annotation.review_status !== "rejected").length ?? 0;
             const pendingCount = (item.annotations?.filter((annotation) => annotation.source === "ai" && annotation.review_status === "needs_review").length ?? 0)
               + (item.negative_candidates?.filter((candidate) => candidate.review_status === "needs_review").length ?? 0);
             const current = item.path === image.path;
             return (
-              <div role="listitem" key={item.path}>
+              <div role="listitem" key={item.path} data-path={item.path}>
                 <button
                   className={`label-image-row${current ? " selected" : ""}`}
                   type="button"
@@ -761,6 +1217,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
               </div>
             );
           })}
+          <div style={{ height: Math.max(0, visibleImages.length - lastRow) * IMAGE_ROW_HEIGHT }} aria-hidden="true" />
         </div>
       </aside>
 
@@ -771,20 +1228,21 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
             <span>{imageIndex + 1} / {images.length}</span>
             <button type="button" className="label-icon-button" aria-label="Ảnh tiếp theo" title="Ảnh tiếp theo" disabled={inferenceBusy || imageIndex < 0 || imageIndex >= images.length - 1} onClick={() => selectImage(images[imageIndex + 1].path)}><ArrowRight size={14} /></button>
           </div>
+          {deleteImage && <button type="button" className="label-icon-button label-delete-image" aria-label="Xóa ảnh" title="Xóa ảnh này và file .json của nó (vào Thùng rác) · Shift+Delete" disabled={inferenceBusy} onClick={() => void deleteCurrentImage()}><Trash2 size={14} /></button>}
           <div className="label-canvas-zoom" role="group" aria-label="Tỷ lệ ảnh">
-            <button type="button" className="label-icon-button" aria-label="Thu nhỏ" title="Thu nhỏ" disabled={zoom <= 0.25} onClick={() => setZoom((current) => Math.max(0.25, Number((current - 0.25).toFixed(2))))}><ZoomOut size={14} /></button>
-            <span>{Math.round(zoom * 100)}%</span>
-            <button type="button" className="label-icon-button" aria-label="Phóng to" title="Phóng to" disabled={zoom >= 4} onClick={() => setZoom((current) => Math.min(4, Number((current + 0.25).toFixed(2))))}><ZoomIn size={14} /></button>
-            <button type="button" className="label-icon-button" aria-label="Vừa khung" title="Vừa khung" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}><Maximize2 size={14} /></button>
+            <button type="button" className="label-icon-button" aria-label="Thu nhỏ" title="Thu nhỏ (-, lăn chuột)" disabled={zoom <= MIN_ZOOM} onClick={() => zoomAt(zoom / ZOOM_STEP)}><ZoomOut size={14} /></button>
+            <span title="Lăn chuột để zoom quanh con trỏ · Chuột phải, chuột giữa hoặc Space + kéo để di chuyển ảnh">{Math.round(zoom * 100)}%</span>
+            <button type="button" className="label-icon-button" aria-label="Phóng to" title="Phóng to (+, lăn chuột)" disabled={zoom >= MAX_ZOOM} onClick={() => zoomAt(zoom * ZOOM_STEP)}><ZoomIn size={14} /></button>
+            <button type="button" className="label-icon-button" aria-label="Vừa khung" title="Vừa khung (0)" onClick={fitView}><Maximize2 size={14} /></button>
           </div>
         </div>
 
-        <div className={`label-canvas-stage${tool.kind === "draw" ? " drawing" : tool.kind === "pan" ? " panning" : ""}`} ref={stageRef}>
+        <div onContextMenu={(event) => event.preventDefault()} className={`label-canvas-stage${spaceHeld || tool.kind === "pan" || gesture?.kind === "pan" ? " panning" : tool.kind === "draw" ? " drawing" : ""}`} ref={stageRef}>
           {previewLoading && <div className="label-canvas-state"><LoaderCircle className="spin" size={20} /><span>Đang tải ảnh thật…</span></div>}
           {!previewLoading && previewError && <div className="label-canvas-state label-canvas-error" role="alert"><FileImage size={22} /><strong>Không đọc được ảnh này</strong><span>{previewError}</span><button type="button" className="subtle-button" onClick={refreshPreview}>Thử tải lại</button></div>}
           {!previewLoading && !previewError && preview && fitSize && (
-            <div className="label-image-transform" style={{ width: fitSize.width, height: fitSize.height, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` } as CSSProperties}>
-              <img src={preview.data_url} alt={`${imageName(image.path)}, ${preview.width} × ${preview.height} px`} draggable={false} />
+            <div className="label-image-transform" style={{ width: fitSize.width * zoom, height: fitSize.height * zoom, transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px)` } as CSSProperties}>
+              <img src={preview.data_url} style={{ imageRendering: fitSize.scale >= 1 ? "pixelated" : "auto" }} alt={`${imageName(image.path)}, ${preview.width} × ${preview.height} px`} draggable={false} />
               {!sizeMismatch && <svg
                 className="label-annotation-canvas"
                 viewBox={`0 0 ${preview.width} ${preview.height}`}
@@ -808,32 +1266,39 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                   const w = annotation.x_max - annotation.x_min;
                   const h = annotation.y_max - annotation.y_min;
                   const aiStroke = annotation.source === "ai" ? `${8 / (fitSize.scale || 1)} ${5 / (fitSize.scale || 1)}` : undefined;
-                  const handles: { name: ResizeHandle; x: number; y: number }[] = [
-                    { name: "nw", x, y }, { name: "n", x: x + w / 2, y }, { name: "ne", x: x + w, y },
-                    { name: "e", x: x + w, y: y + h / 2 }, { name: "se", x: x + w, y: y + h },
-                    { name: "s", x: x + w / 2, y: y + h }, { name: "sw", x, y: y + h }, { name: "w", x, y: y + h / 2 },
-                  ];
                   return (
                     <g key={annotation.id} className={`label-box-group${annotation.source === "ai" ? " ai-suggestion" : ""}`} data-class-id={annotation.class_id}>
                       <rect data-annotation-id={annotation.id} x={x} y={y} width={w} height={h} fill={color} fillOpacity={selected ? 0.16 : 0.05} stroke={color} strokeWidth={strokeWidth} strokeDasharray={aiStroke} />
                       <rect className="label-box-title-bg" x={x} y={Math.max(0, y - labelHeight)} width={labelWidth} height={labelHeight} fill={color} pointerEvents="none" />
                       <text className="label-box-title" x={x + 6 / (fitSize.scale || 1)} y={Math.max(labelHeight * 0.72, y - labelHeight * 0.28)} fontSize={11 / (fitSize.scale || 1)} pointerEvents="none">{classNameFor(classes, annotation.class_id)}</text>
-                      {selected && handles.map((handle) => <rect
-                        key={handle.name}
-                        data-handle={handle.name}
-                        data-annotation-id={annotation.id}
-                        x={handle.x - handleSize / 2}
-                        y={handle.y - handleSize / 2}
-                        width={handleSize}
-                        height={handleSize}
-                        rx={2 / (fitSize.scale || 1)}
-                        fill="#f7f9fc"
-                        stroke={color}
-                        strokeWidth={strokeWidth}
-                      />)}
                       <title>{`${index + 1}. ${classNameFor(classes, annotation.class_id)}${annotation.source === "ai" ? ` · Gợi ý AI · ${annotation.review_status === "needs_review" ? "cần duyệt" : annotation.review_status === "rejected" ? "đã loại" : "đã duyệt"} · ${annotation.confidence == null ? "confidence không rõ" : `${Math.round(annotation.confidence * 100)}%`}` : ""} · ${Math.round(w)} × ${Math.round(h)} px`}</title>
                     </g>
                   );
+                })}
+                {visibleAnnotations.filter((annotation) => annotation.id === selectedAnnotationId).map((annotation) => {
+                  const color = annotation.class_id === 0 ? "#68a9ff" : annotation.class_id === 1 ? "#54c9a8" : "#d8b46a";
+                  const x = annotation.x_min;
+                  const y = annotation.y_min;
+                  const w = annotation.x_max - annotation.x_min;
+                  const h = annotation.y_max - annotation.y_min;
+                  const handles: { name: ResizeHandle; x: number; y: number }[] = [
+                    { name: "nw", x, y }, { name: "n", x: x + w / 2, y }, { name: "ne", x: x + w, y },
+                    { name: "e", x: x + w, y: y + h / 2 }, { name: "se", x: x + w, y: y + h },
+                    { name: "s", x: x + w / 2, y: y + h }, { name: "sw", x, y: y + h }, { name: "w", x, y: y + h / 2 },
+                  ];
+                  return <g key={`handles-${annotation.id}`} className="label-box-handles">{handles.map((handle) => <rect
+                    key={handle.name}
+                    data-handle={handle.name}
+                    data-annotation-id={annotation.id}
+                    x={handle.x - handleSize / 2}
+                    y={handle.y - handleSize / 2}
+                    width={handleSize}
+                    height={handleSize}
+                    rx={2 / (fitSize.scale || 1)}
+                    fill="#f7f9fc"
+                    stroke={color}
+                    strokeWidth={strokeWidth}
+                  />)}</g>;
                 })}
                 {draft && <rect x={draft.x_min} y={draft.y_min} width={draft.x_max - draft.x_min} height={draft.y_max - draft.y_min} fill="#68a9ff" fillOpacity="0.12" stroke="#68a9ff" strokeWidth={strokeWidth} strokeDasharray={`${8 / (fitSize.scale || 1)} ${5 / (fitSize.scale || 1)}`} pointerEvents="none" />}
               </svg>}
@@ -863,46 +1328,32 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
             <div className="label-ai-heading">
               <h3><Sparkles size={13} /> Gợi ý AI</h3>
               <div className="label-ai-heading-actions">
-                <button type="button" className="label-icon-button" aria-label="Nhập checkpoint YOLO11n" title="Nhập checkpoint YOLO11n" disabled={modelsLoading || inferenceBusy || modelImportBusy} onClick={() => void importModelCheckpoint()}><Upload size={12} /></button>
                 <button type="button" className="label-icon-button" aria-label="Làm mới checkpoint" title="Làm mới checkpoint" disabled={modelsLoading || inferenceBusy || modelImportBusy} onClick={() => void refreshModels()}><RefreshCw size={12} /></button>
               </div>
             </div>
-            <label className="label-ai-model">
-              <span>Checkpoint YOLO11n</span>
-              <select aria-label="Checkpoint inference" value={selectedModelId} disabled={modelsLoading || inferenceBusy || modelImportBusy || usableModels.length === 0} onChange={(event) => setSelectedModelId(event.target.value)}>
-                <option value="">{modelsLoading ? "Đang tải checkpoint…" : "Chọn checkpoint"}</option>
-                {usableModels.map((model) => <option key={model.run_id} value={model.run_id}>
-                  {model.source === "frameforge_import" ? model.display_name ?? "Đã nhập YOLO11n" : "YOLO11n"} · {model.effective_imgsz ?? model.requested_imgsz ?? "—"} px · {model.run_id.slice(0, 8)}
-                </option>)}
-              </select>
-            </label>
-            {modelImportBusy && <small className="label-ai-note">Đang chọn hoặc xác minh checkpoint…</small>}
+            {modelControls}
             {inferenceBusy ? (
               <button type="button" className="subtle-button label-ai-run-button" disabled={inferenceCancelling} onClick={() => void cancelInference()}>
                 <X size={13} /> {inferenceCancelling ? "Đang dừng…" : "Dừng inference"}
               </button>
             ) : (
               <>
-                <button type="button" className="label-ai-run-button" disabled={!canEdit || !selectedModel || alreadySuggestedByModel} onClick={() => void startInference()}>
-                  <Sparkles size={13} /> Gợi ý ảnh này
+                <button type="button" className="label-ai-run-button" disabled={!canEdit || !selectedModel || !confidenceValid} onClick={() => void startInference()}>
+                  <Sparkles size={13} /> {imageHasSuggestionState ? "Gợi ý lại ảnh này" : "Gợi ý ảnh này"}
                 </button>
-                <button type="button" className="label-ai-run-button label-ai-batch-button" disabled={!selectedModel || inferenceQueue.length === 0} onClick={() => void startBatchInference()}>
-                  <Sparkles size={13} /> Gợi ý {inferenceQueue.length} ảnh chưa xử lý
+                <button type="button" className="label-ai-run-button label-ai-batch-button" disabled={!selectedModel || batchCount === 0 || !confidenceValid} onClick={() => void startBatchInference()}>
+                  <Sparkles size={13} /> {resuggestLabeled ? `Gợi ý lại ${batchCount} ảnh` : `Gợi ý ${batchCount} ảnh chưa xử lý`}
                 </button>
+                <label className="label-ai-replace"><input type="checkbox" checked={resuggestLabeled} onChange={(event) => setResuggestLabeled(event.target.checked)} /> Gợi ý lại cả ảnh đã có box (xóa box cũ)</label>
               </>
             )}
-            {modelsLoading && <small className="label-ai-note">Đang đọc registry checkpoint…</small>}
-            {!modelsLoading && usableModels.length === 0 && <small className="label-ai-note">Chưa có checkpoint YOLO11n khớp class của dự án. Dùng nút mũi tên lên để nhập tệp .pt từ nguồn bạn tin tưởng.</small>}
-            {alreadySuggestedByModel && <small className="label-ai-note">Ảnh đã có gợi ý từ checkpoint này. Duyệt hoặc loại chúng trước khi chạy lại.</small>}
             {inferenceBusy && <small className="label-ai-progress" aria-live="polite"><LoaderCircle className="spin" size={12} /> {inferenceCancelling
               ? "Đang dừng an toàn và lưu phần đã xử lý…"
               : inferenceProgress?.stage?.startsWith("project_")
                 ? `Đang xử lý project: ${inferenceProgress.completed_images ?? 0}/${inferenceProgress.total_images ?? inferenceProgress.eligible_images ?? 0} ảnh${inferenceProgress.saved_images ? ` · đã lưu ${inferenceProgress.saved_images}` : ""}`
                 : inferenceProgress?.stage === "inference_started" ? "Đang chạy YOLO trên ảnh hiện tại…" : "Đang khởi tạo inference…"}</small>}
             {inferenceMessage && <small className="label-ai-note" aria-live="polite">{inferenceMessage}</small>}
-            {modelError && <small className="label-ai-error" role="alert">Không thể xử lý checkpoint: {modelError}</small>}
             {inferenceError && <small className="label-ai-error" role="alert">Inference chưa hoàn tất: {inferenceError}</small>}
-            <small className="label-ai-note">Box AI chỉ vào dataset sau khi được duyệt. Object có box chạm biên crop sẽ bị bỏ qua; ảnh không có detection thực sự thành candidate âm tính và phải được xác nhận riêng.</small>
           </section>
 
           <section className="label-tool-section" aria-label="Chọn class để vẽ box">
@@ -917,7 +1368,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
                 onClick={() => { setSelectedAnnotationId(null); setTool({ kind: "draw", classId }); }}
               >
                 <span className={`label-class-swatch class-${classId}`} />
-                <span><strong>{classNameFor(classes, classId)}</strong><small>Nhấn rồi kéo để vẽ</small></span>
+                <span><strong>{classNameFor(classes, classId)}</strong>{shortcutLabel(classId) && <small>Phím {shortcutLabel(classId)}</small>}</span>
               </button>)}
             </div>
           </section>
@@ -937,6 +1388,10 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
 
           <section className="label-tool-section">
             <div className="label-review-heading"><h3>Danh sách box</h3><button type="button" className={`label-review-button${image.status === "reviewed" ? " reviewed" : ""}`} disabled={!canEdit || (image.status !== "reviewed" && (pendingSuggestions.length > 0 || pendingNegativeCandidates.length > 0))} title={(pendingSuggestions.length || pendingNegativeCandidates.length) && image.status !== "reviewed" ? "Duyệt hoặc loại toàn bộ gợi ý và candidate AI trước khi đánh dấu ảnh đã review." : undefined} aria-pressed={image.status === "reviewed"} onClick={markReviewed}>{image.status === "reviewed" ? <><CheckCircle2 size={13} /> Đã review</> : <><Check size={13} /> Đánh dấu đã review</>}</button></div>
+            {pendingSuggestions.length > 0 && <div className="label-ai-review-actions label-ai-bulk-actions">
+              <button type="button" className="label-ai-accept" disabled={!canEdit} onClick={() => reviewAllSuggestions("reviewed")}><Check size={11} /> Duyệt tất cả ({pendingSuggestions.length})</button>
+              <button type="button" className="label-ai-reject" disabled={!canEdit} onClick={() => reviewAllSuggestions("rejected")}><Ban size={11} /> Loại tất cả</button>
+            </div>}
             <div className="label-box-list" role="list" aria-label="Box trên ảnh">
               {activeAnnotations.map((annotation, index) => (
                 <div className={`label-box-row${annotation.id === selectedAnnotationId ? " selected" : ""}`} role="listitem" key={annotation.id}>
@@ -990,9 +1445,7 @@ export default function ManualLabeling({ images, classNames, loadPreview, saveIm
             })}
           </section>}
 
-          <p className="label-key-help">⌘/Ctrl+Z hoàn tác · ⌘/Ctrl+Shift+Z làm lại · Delete xóa · Esc kết thúc thao tác</p>
           {selectedAnnotation && <p className="label-coordinate-help">Box #{annotations.findIndex((item) => item.id === selectedAnnotation.id) + 1}: x {Math.round(selectedAnnotation.x_min)}, y {Math.round(selectedAnnotation.y_min)} → {Math.round(selectedAnnotation.x_max)}, {Math.round(selectedAnnotation.y_max)} px</p>}
-          <p className="label-coordinate-help">Mũi tên di chuyển box · Shift+mũi tên đi 10 px · Alt+mũi tên đổi kích thước.</p>
         </div>
       </aside>
     </section>

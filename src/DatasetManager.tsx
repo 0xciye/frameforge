@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, CheckCircle2, Database, Download, FolderOpen, LoaderCircle, RefreshCw, ShieldAlert } from "lucide-react";
-import ProjectDiscovery from "./ProjectDiscovery";
 import "./DatasetManager.css";
 
 type DatasetConfig = {
@@ -14,7 +13,7 @@ type DatasetConfig = {
   segmentSeconds: number;
   negativeRatio: number;
   negativeRatioCustom: boolean;
-  freezeEvaluationSet: boolean;
+  requiredClassIds: number[];
 };
 
 type DatasetReport = {
@@ -31,6 +30,8 @@ type DatasetReport = {
   negative_samples_excluded_count: number;
   unreviewed_annotation_excluded_count: number;
   candidate_negative_excluded_count: number;
+  missing_required_excluded_count: number;
+  pending_ai_image_excluded_count: number;
   annotation_count: number;
   class_distribution: { class_id: number; name: string; box_count: number }[];
   duplicate_basename_groups: number;
@@ -41,26 +42,15 @@ type DatasetReport = {
   ratios: Record<"train" | "val" | "test", number>;
   seed: number;
   segment_seconds: number;
-  new_image_count: number;
-  replayed_image_count: number;
-  fixed_validation_count: number;
-  frozen_test_count: number;
   errors: string[];
   warnings: string[];
 };
 
 type ExportResult = {
   dataset_id: string;
-  version: number;
-  parent_dataset_id: string | null;
-  replay_strategy: string;
   path: string;
   data_yaml: string;
   image_count: number;
-  new_image_count: number;
-  replayed_image_count: number;
-  fixed_validation_count: number;
-  frozen_test_count: number;
   split_counts: Record<"train" | "val" | "test", number>;
   warnings: string[];
 };
@@ -68,7 +58,7 @@ type ExportResult = {
 type Props = {
   projectPath: string | null;
   imageCount: number;
-  onUseDiscoveredDataset(path: string): void;
+  classNames: string[];
 };
 
 const DEFAULT_CONFIG: DatasetConfig = {
@@ -80,7 +70,7 @@ const DEFAULT_CONFIG: DatasetConfig = {
   segmentSeconds: 30,
   negativeRatio: 10,
   negativeRatioCustom: false,
-  freezeEvaluationSet: false,
+  requiredClassIds: [],
 };
 
 function requestId() {
@@ -91,22 +81,29 @@ function errorText(error: unknown) {
   return typeof error === "string" ? error : String(error);
 }
 
-export default function DatasetManager({ projectPath, imageCount, onUseDiscoveredDataset }: Props) {
+export default function DatasetManager({ projectPath, imageCount, classNames }: Props) {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [outputDirectory, setOutputDirectory] = useState("");
-  const [parentManifestPath, setParentManifestPath] = useState("");
-  const [replayStrategy, setReplayStrategy] = useState<"all" | "balanced" | "new">("all");
   const [report, setReport] = useState<DatasetReport | null>(null);
   const [validatedKey, setValidatedKey] = useState("");
   const [exported, setExported] = useState<ExportResult | null>(null);
   const [busy, setBusy] = useState<"validate" | "export" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const configKey = useMemo(() => JSON.stringify({ projectPath, config, parentManifestPath, replayStrategy }), [projectPath, config, parentManifestPath, replayStrategy]);
+  const configKey = useMemo(() => JSON.stringify({ projectPath, config }), [projectPath, config]);
   const validationIsCurrent = Boolean(report && validatedKey === configKey);
   const ratioTotal = config.train + config.val + config.test;
   const negativeRatioValid = Number.isFinite(config.negativeRatio) && config.negativeRatio >= 0 && config.negativeRatio <= 100;
   const ratioValid = ratioTotal === 100 && config.train > 0 && negativeRatioValid;
+  // Drop ids of classes that no longer exist (class list edited after picking them).
+  const requiredClassIds = config.requiredClassIds.filter((id) => id < classNames.length);
+
+  function toggleRequiredClass(classId: number) {
+    const next = requiredClassIds.includes(classId)
+      ? requiredClassIds.filter((id) => id !== classId)
+      : [...requiredClassIds, classId].sort((left, right) => left - right);
+    updateConfig({ requiredClassIds: next });
+  }
 
   function updateConfig(patch: Partial<DatasetConfig>) {
     setConfig((current) => ({ ...current, ...patch }));
@@ -126,9 +123,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
       seed: config.seed,
       segment_seconds: config.segmentSeconds,
       negative_ratio: config.negativeRatio / 100,
-      parent_manifest_path: parentManifestPath || null,
-      replay_strategy: replayStrategy,
-      freeze_evaluation_set: config.freezeEvaluationSet,
+      required_class_ids: requiredClassIds,
     };
   }
 
@@ -166,45 +161,6 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
     } catch (reason) {
       setError(errorText(reason));
     }
-  }
-
-  async function chooseParentManifest() {
-    try {
-      const selected = await open({
-        title: "Chọn manifest.json của dataset có test set cố định",
-        multiple: false,
-        filters: [{ name: "FrameForge manifest", extensions: ["json"] }],
-      });
-      if (typeof selected !== "string") return;
-      setParentManifestPath(selected);
-      setConfig((current) => {
-        const basis = Math.max(1, current.train + current.val);
-        const train = Math.max(1, Math.min(99, Math.round(100 * current.train / basis)));
-        return { ...current, train, val: 100 - train, test: 0, freezeEvaluationSet: false };
-      });
-      setReport(null);
-      setValidatedKey("");
-      setExported(null);
-      setError(null);
-    } catch (reason) {
-      setError(errorText(reason));
-    }
-  }
-
-  function clearParentManifest() {
-    setParentManifestPath("");
-    setConfig((current) => ({ ...current, train: 80, val: 10, test: 10, freezeEvaluationSet: false }));
-    setReport(null);
-    setValidatedKey("");
-    setExported(null);
-    setError(null);
-  }
-
-  function updateReplayStrategy(value: "all" | "balanced" | "new") {
-    setReplayStrategy(value);
-    setReport(null);
-    setValidatedKey("");
-    setExported(null);
   }
 
   async function exportDataset() {
@@ -248,11 +204,9 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
           <div className="dataset-heading-icon"><Database size={18} /></div>
           <div>
             <h1>Dataset</h1>
-          <p>Kiểm tra nhãn, giữ nguyên test set qua các phiên bản, rồi tạo snapshot YOLO có lineage.</p>
+          <p>Kiểm tra nhãn đã review, chia train/val/test chống rò rỉ rồi lưu dataset YOLO kèm provenance.</p>
           </div>
         </header>
-
-        <ProjectDiscovery onUseDataset={onUseDiscoveredDataset} />
 
         {!projectPath && <div className="dataset-notice" role="status">
           <ShieldAlert size={15} /><span>Lưu dự án trước khi kiểm tra hoặc xuất dataset.</span>
@@ -276,7 +230,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
             <div className="dataset-ratios">
               <label>Train (%)<input type="number" min="1" max="100" step="1" value={config.train} onChange={(event) => updateConfig({ train: Number(event.target.value) })} /></label>
               <label>Val (%)<input type="number" min="0" max="100" step="1" value={config.val} onChange={(event) => updateConfig({ val: Number(event.target.value) })} /></label>
-              <label>Test (%)<input type="number" min="0" max="100" step="1" value={config.test} disabled={Boolean(parentManifestPath)} onChange={(event) => updateConfig({ test: Number(event.target.value) })} /></label>
+              <label>Test (%)<input type="number" min="0" max="100" step="1" value={config.test} onChange={(event) => updateConfig({ test: Number(event.target.value) })} /></label>
             </div>
             <div className="dataset-ratios-caption" aria-live="polite">Tổng: {ratioTotal}%{!ratioValid && " · cần bằng 100%"}</div>
             <div className="dataset-extra-controls">
@@ -303,18 +257,17 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
               <small>Tính trên dataset cuối; mặc định giữ tối đa 10%, lấy mẫu tái lập theo seed và bỏ ảnh gần như trùng (dHash ≤1). Chọn 100% để giữ mọi ảnh negative đủ điều kiện.</small>
               {!negativeRatioValid && <small className="dataset-negative-error" role="alert">Nhập tỷ lệ từ 0 đến 100%.</small>}
             </div>
-            {!parentManifestPath && <label className="dataset-freeze-control">
-              <input type="checkbox" checked={config.freezeEvaluationSet} onChange={(event) => updateConfig({ freezeEvaluationSet: event.target.checked })} />
-              <span><strong>Đóng băng val/test</strong><small>Chỉ bật khi mọi ảnh trong hai split đã được review; các phiên bản sau sẽ dùng lại nguyên các ảnh và nhãn này.</small></span>
-            </label>}
-            {parentManifestPath && <div className="dataset-lineage-controls">
-              <div className="dataset-parent-row"><span title={parentManifestPath}>{parentManifestPath}</span><button type="button" onClick={clearParentManifest}>Bỏ parent</button></div>
-              <label>Replay ảnh train cũ<select value={replayStrategy} onChange={(event) => updateReplayStrategy(event.target.value as "all" | "balanced" | "new")}>
-                <option value="all">Toàn bộ nhóm train cũ</option>
-                <option value="balanced">Tập cũ cân bằng theo class</option>
-                <option value="new">Chỉ ảnh mới</option>
-              </select></label>
-              <small>Validation cố định và test set được giữ nguyên từ parent; Test (%) được khóa ở 0 cho ảnh mới.</small>
+            {classNames.length > 0 && <div className="dataset-required-control">
+              <span id="dataset-required-label">Chỉ xuất ảnh có đủ class</span>
+              <div role="group" aria-labelledby="dataset-required-label">
+                {classNames.map((name, classId) => <label key={classId} className={requiredClassIds.includes(classId) ? "selected" : ""}>
+                  <input type="checkbox" checked={requiredClassIds.includes(classId)} onChange={() => toggleRequiredClass(classId)} />
+                  {classId}. {name}
+                </label>)}
+              </div>
+              <small>{requiredClassIds.length
+                ? `Chỉ ảnh có ít nhất 1 box của mỗi class đã chọn; ảnh thiếu class nào (kể cả ảnh negative) bị loại.`
+                : "Không chọn class nào: xuất mọi ảnh đủ điều kiện."}</small>
             </div>}
             <p className="dataset-footnote">Ảnh trống chưa review sẽ bị loại khỏi dataset; ảnh Reviewed Negative được xuất kèm nhãn `.txt` rỗng.</p>
             <button type="button" className="dataset-secondary-button" disabled={!projectPath || imageCount === 0 || busy !== null || !ratioValid} onClick={() => void validate()}>
@@ -325,10 +278,6 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
 
           <section className="panel dataset-card dataset-export-card">
             <div className="dataset-card-heading"><div><h2>Xuất YOLO</h2><span>Mỗi lần xuất tạo một thư mục phiên bản mới; ảnh gốc không bị resize.</span></div></div>
-            {!parentManifestPath && <button type="button" className="dataset-output-button" onClick={() => void chooseParentManifest()}>
-              <FolderOpen size={14} /><span>Chọn parent dataset có val/test cố định</span>
-            </button>}
-            {parentManifestPath && <div className="dataset-lineage-summary">Phiên bản kế thừa parent đã chọn: val {report?.fixed_validation_count ?? "—"} · test {report?.frozen_test_count ?? "—"}</div>}
             <button type="button" className="dataset-output-button" onClick={() => void chooseOutputDirectory()}>
               <FolderOpen size={14} /><span>{outputDirectory || "Chọn thư mục xuất"}</span>
             </button>
@@ -348,7 +297,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
 
         {validationIsCurrent && report && <section className="panel dataset-report">
           <div className="dataset-report-heading">
-            <div><h2>{report.valid ? "Kết quả kiểm tra" : "Cần sửa trước khi xuất"}</h2><span>{report.project_name} · {report.included_image_count} ảnh cuối · {report.new_image_count} ảnh mới · {report.replayed_image_count} ảnh replay</span></div>
+            <div><h2>{report.valid ? "Kết quả kiểm tra" : "Cần sửa trước khi xuất"}</h2><span>{report.project_name} · {report.included_image_count} ảnh sẽ xuất</span></div>
             <span className={`dataset-validity${report.valid ? " valid" : " invalid"}`}>{report.valid ? <><CheckCircle2 size={14} /> Hợp lệ</> : <><AlertCircle size={14} /> Có lỗi</>}</span>
           </div>
           <div className="dataset-stat-grid">
@@ -368,6 +317,8 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
               {report.class_distribution.map((item) => <div className="dataset-class-row" key={item.class_id}><span>{item.class_id}. {item.name}</span><strong>{item.box_count} box</strong></div>)}
             </div>
           </div>
+          {report.pending_ai_image_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.pending_ai_image_excluded_count} ảnh còn gợi ý AI chờ duyệt. Duyệt hoặc loại hết gợi ý của ảnh để đưa ảnh vào dataset.</p>}
+          {report.missing_required_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.missing_required_excluded_count} ảnh thiếu class bắt buộc.</p>}
           {report.candidate_negative_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.candidate_negative_excluded_count} ảnh trống chưa review.</p>}
           {report.unreviewed_annotation_excluded_count > 0 && <p className="dataset-candidate-note">Đã loại {report.unreviewed_annotation_excluded_count} ảnh có box thủ công chưa review. Đánh dấu ảnh đã review để đưa nhãn vào dataset.</p>}
           {report.errors.length > 0 && <div className="dataset-findings errors"><h3>Lỗi cần sửa</h3><ul>{report.errors.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></div>}
@@ -375,7 +326,7 @@ export default function DatasetManager({ projectPath, imageCount, onUseDiscovere
         </section>}
 
         {exported && <div className="dataset-message success" role="status">
-          <CheckCircle2 size={15} /><span>Đã tạo v{exported.version} · {exported.image_count} ảnh · mới {exported.new_image_count} · replay {exported.replayed_image_count} · train {exported.split_counts.train} · val {exported.split_counts.val} · test {exported.split_counts.test}<small>{exported.path}</small><small>{exported.data_yaml}</small></span>
+          <CheckCircle2 size={15} /><span>Đã lưu dataset · {exported.image_count} ảnh · train {exported.split_counts.train} · val {exported.split_counts.val} · test {exported.split_counts.test}<small>{exported.path}</small><small>{exported.data_yaml}</small></span>
         </div>}
       </div>
     </section>

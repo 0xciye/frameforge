@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from frameforge.training import IMAGE_EXTENSIONS, training_capabilities, verified_checkpoint_record
+from frameforge.models import IMAGE_EXTENSIONS, inference_capabilities, verified_checkpoint_record
 from frameforge.project import _save_ai_suggestions_batch, project_images_for_inference
 
 
@@ -20,6 +20,12 @@ MAX_DETECTIONS_PER_IMAGE = 300
 CLIPPED_BOX_EDGE_MARGIN_PX = 1.0
 PROJECT_PERSIST_BATCH_SIZE = 64
 MAX_PROJECT_INFERENCE_IMAGES = 100_000
+MAX_MODEL_IMGSZ = 2048
+# Same-class boxes overlapping this much describe one object (a short and a tall body box on one person,
+# which NMS at IoU 0.7 keeps): only the most confident stays. Measured on the user's 129 val/test images with
+# the first head/body model at conf 0.35: extra boxes 34 -> 16 for one lost true box.
+DUPLICATE_IOU = 0.5
+DUPLICATE_CONTAINMENT = 0.8
 
 
 def _names_in_order(value: Any) -> List[str]:
@@ -55,7 +61,7 @@ def _cancel_path(value: Any) -> Optional[Path]:
         return None
     if not isinstance(value, str) or not value:
         raise ValueError("Cancel marker của inference không hợp lệ.")
-    from frameforge.training import _default_app_data_dir
+    from frameforge.models import _default_app_data_dir
 
     allowed_parent = (_default_app_data_dir() / "inference" / "cancel").resolve()
     allowed_parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +69,38 @@ def _cancel_path(value: Any) -> Optional[Path]:
     if candidate.parent != allowed_parent:
         raise ValueError("Cancel marker nằm ngoài thư mục điều khiển inference của FrameForge.")
     return candidate
+
+
+def _model_imgsz(run: Dict[str, Any]) -> int:
+    """Use the image size recorded for the registered checkpoint so predict matches training resolution."""
+    for key in ("effective_imgsz", "requested_imgsz"):
+        value = run.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 32 <= value <= MAX_MODEL_IMGSZ:
+            return value
+    return 640
+
+
+def _drop_duplicate_boxes(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep the most confident of same-class boxes with IoU >= DUPLICATE_IOU or one mostly inside the other."""
+    kept: List[Dict[str, Any]] = []
+    for item in sorted(items, key=lambda value: -value["confidence"]):
+        x1, y1, x2, y2 = item["bbox_xyxy"]
+        area = (x2 - x1) * (y2 - y1)
+        duplicate = False
+        for other in kept:
+            if other["class_id"] != item["class_id"]:
+                continue
+            ox1, oy1, ox2, oy2 = other["bbox_xyxy"]
+            inter = max(0.0, min(x2, ox2) - max(x1, ox1)) * max(0.0, min(y2, oy2) - max(y1, oy1))
+            other_area = (ox2 - ox1) * (oy2 - oy1)
+            union = area + other_area - inter
+            smaller = min(area, other_area)
+            if (union > 0 and inter / union >= DUPLICATE_IOU) or (smaller > 0 and inter / smaller >= DUPLICATE_CONTAINMENT):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(item)
+    return kept
 
 
 def _decode_batch(
@@ -125,7 +163,7 @@ def _decode_batch(
                 })
         results.append({
             "image_path": str(path), "width": width, "height": height,
-            "predictions": items, "skipped_large_objects": skipped_large_objects,
+            "predictions": _drop_duplicate_boxes(items), "skipped_large_objects": skipped_large_objects,
         })
     return results
 
@@ -204,16 +242,18 @@ def predict_crops(
         selected_classes = class_ids or None
 
     cancel_path = _cancel_path(cancel_file)
-    capabilities = training_capabilities()
+    capabilities = inference_capabilities()
     if not capabilities.get("available"):
         raise ValueError("Inference cần PyTorch và Ultralytics trong Python engine.")
     device = capabilities.get("preferred_device", "cpu")
+    imgsz = _model_imgsz(run)
     emit = progress or (lambda _event: None)
     emit({
         "stage": "inference_started",
         "total_images": len(paths),
         "checkpoint_run_id": run["run_id"],
         "device_selected": device,
+        "imgsz": imgsz,
     })
 
     try:
@@ -240,6 +280,7 @@ def predict_crops(
                 source=[str(path) for path in batch_paths],
                 conf=max(0.0, confidence - 1e-9),
                 iou=iou,
+                imgsz=imgsz,
                 classes=selected_classes,
                 device=device,
                 batch=len(batch_paths),
@@ -286,8 +327,12 @@ def auto_label_project(
     iou_threshold: Any = 0.7,
     cancel_file: Any = None,
     progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    replace: bool = False,
 ) -> Dict[str, Any]:
-    """Infer eligible project images once per model load and persist bounded chunks."""
+    """Infer eligible project images once per model load and persist bounded chunks.
+
+    ``replace`` suggests again on every image, deleting each image's existing boxes as its result is saved.
+    """
     if not isinstance(checkpoint_value, str) or not checkpoint_value:
         raise ValueError("Chọn checkpoint YOLO11n đã đăng ký.")
     try:
@@ -313,20 +358,22 @@ def auto_label_project(
     if not math.isfinite(iou) or not 0 <= iou <= 1:
         raise ValueError("NMS IoU phải nằm trong khoảng 0–1.")
 
-    project = project_images_for_inference(project_path)
+    project = project_images_for_inference(project_path, include_labeled=bool(replace))
     if project["class_names"] != expected_names:
         raise ValueError("Schema class của checkpoint không khớp với dự án.")
     if len(project["images"]) > MAX_PROJECT_INFERENCE_IMAGES:
         raise ValueError("Dự án vượt giới hạn 100.000 ảnh cho một lượt inference.")
     cancel_path = _cancel_path(cancel_file)
     emit = progress or (lambda _event: None)
-    device_info = training_capabilities()
+    device_info = inference_capabilities()
     if not device_info.get("available"):
         raise ValueError("Inference cần PyTorch và Ultralytics trong Python engine.")
     device = device_info.get("preferred_device", "cpu")
+    imgsz = _model_imgsz(run)
 
     image_rows = []
     skipped_changed = 0
+    skipped_attempted = 0
     for item in project["images"]:
         try:
             image_path = Path(item["path"]).expanduser().resolve(strict=True)
@@ -336,6 +383,9 @@ def auto_label_project(
             fingerprint = hashlib.sha256(image_path.read_bytes()).hexdigest()
         except OSError:
             skipped_changed += 1
+            continue
+        if not replace and [run["checkpoint_sha256"], fingerprint] in [list(pair) for pair in item.get("inference_attempts", [])]:
+            skipped_attempted += 1
             continue
         image_rows.append({
             "path": image_path,
@@ -358,7 +408,7 @@ def auto_label_project(
             "checkpoint_sha256": run["checkpoint_sha256"], "device_actual": device,
             "total_images": 0, "processed_images": 0, "images_with_detections": 0,
             "candidate_negative_count": 0, "annotation_count": 0, "skipped_large_objects": 0,
-            "skipped_changed": skipped_changed, "skipped_duplicate": 0,
+            "skipped_changed": skipped_changed, "skipped_duplicate": 0, "skipped_attempted": skipped_attempted,
         }
 
     try:
@@ -398,6 +448,7 @@ def auto_label_project(
             str(run["run_id"]),
             str(run["checkpoint_sha256"]),
             expected_names,
+            replace=bool(replace),
         )
         for key in totals:
             totals[key] += saved[key]
@@ -422,6 +473,7 @@ def auto_label_project(
                 source=[str(path) for path in paths],
                 conf=max(0.0, confidence - 1e-9),
                 iou=iou,
+                imgsz=imgsz,
                 device=device,
                 batch=len(paths),
                 max_det=MAX_DETECTIONS_PER_IMAGE,
@@ -468,4 +520,5 @@ def auto_label_project(
         "total_images": len(project["images"]),
         **totals,
         "skipped_changed": skipped_changed,
+        "skipped_attempted": skipped_attempted,
     }

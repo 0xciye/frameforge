@@ -2,9 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm, message } from "@tauri-apps/plugin-dialog";
 import {
-  Activity,
   AlertCircle,
   Check,
   ChevronDown,
@@ -16,6 +15,7 @@ import {
   Database,
   Download,
   FileImage,
+  FileJson,
   FileVideo2,
   FolderOpen,
   FolderPlus,
@@ -32,8 +32,8 @@ import {
 } from "lucide-react";
 import "./App.css";
 import DatasetManager from "./DatasetManager";
-import ManualLabeling, { type Annotation, type NegativeCandidate } from "./ManualLabeling";
-import TrainingWorkspace from "./TrainingWorkspace";
+import ProjectGallery, { type GalleryImage } from "./ProjectGallery";
+import ManualLabeling, { type Annotation, type InferenceAttempt, type NegativeCandidate } from "./ManualLabeling";
 
 type MediaSource = {
   path: string;
@@ -61,6 +61,7 @@ type ProjectImage = {
   status: string;
   annotations?: Annotation[];
   negative_candidates?: NegativeCandidate[];
+  inference_attempts?: InferenceAttempt[];
 };
 
 type ExtractionOptions = {
@@ -95,7 +96,26 @@ type ProjectState = {
   class_names: string[];
 };
 
-type WorkspaceTab = "extract" | "label" | "dataset" | "training";
+type WorkspaceTab = "extract" | "label" | "dataset";
+
+type ImageImportResult = {
+  found_images: number;
+  imported_images: number;
+  json_images: number;
+  labeled_images: number;
+  unlabeled_images: number;
+  reviewed_images: number;
+  box_count: number;
+  skipped_existing: number;
+  unsupported_shapes: number;
+  unknown_labels: number;
+  clipped_boxes: number;
+  degenerate_boxes: number;
+  errors: { path: string; message: string }[];
+  error_count: number;
+};
+
+type ImageImportPreview = { found_images: number; new_images: number; json_images: number; skipped_existing: number };
 type SessionSnapshot = {
   available: boolean;
   project?: ProjectState;
@@ -137,18 +157,16 @@ type ExtractionFile = ProjectImage & {
   thumbnail_data_url?: string;
 };
 
+type ExtractedImage = Omit<ProjectImage, "status" | "annotations" | "negative_candidates" | "inference_attempts" | "extraction_settings"> & {
+  overwritten: boolean;
+};
+
 type ExtractionResult = EngineProgress & {
   files: ExtractionFile[];
   file_list_truncated: boolean;
+  images: ExtractedImage[];
+  extraction_settings: ExtractionOptions;
   errors: { path: string; message: string }[];
-};
-
-type ModelInfo = {
-  name: string;
-  inputs: { name: string; shape: (number | string | null)[]; type: string }[];
-  outputs: { name: string; shape: (number | string | null)[]; type: string }[];
-  providers: string[];
-  class_names: string[];
 };
 
 type PanelLayout = { sourceWidth: number; settingsWidth: number; galleryHeight: number };
@@ -221,6 +239,16 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const LAST_PROJECT_KEY = "frameforge.last-project.v1";
+
+function rememberProject(path: string) {
+  try { localStorage.setItem(LAST_PROJECT_KEY, path); } catch { /* per-device convenience only */ }
+}
+
+function lastProject() {
+  try { return localStorage.getItem(LAST_PROJECT_KEY); } catch { return null; }
+}
+
 function projectNameFromPath(path: string) {
   return path.split(/[\\/]/).pop()?.replace(/\.ffproj$/i, "") || "Dự án FrameForge";
 }
@@ -248,18 +276,15 @@ function App() {
   const [playing, setPlaying] = useState(false);
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
   const [outputDirectory, setOutputDirectory] = useState("");
-  const [gallery, setGallery] = useState<ExtractionFile[]>([]);
+  const [galleryThumbnails, setGalleryThumbnails] = useState<Record<string, string>>({});
   const [progress, setProgress] = useState<EngineProgress | null>(null);
-  const [fileListTruncated, setFileListTruncated] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [engineStatus, setEngineStatus] = useState<"checking" | "ready" | "error">("checking");
   const [sessionReady, setSessionReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
-  const [inspectingModel, setInspectingModel] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("extract");
-  const [trainingDatasetSeed, setTrainingDatasetSeed] = useState<string | null>(null);
+  const [importingLabels, setImportingLabels] = useState(false);
   const [panelLayout, setPanelLayout] = useState(readPanelLayout);
   const projectWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const annotationSaveFailed = useRef(false);
@@ -272,11 +297,6 @@ function App() {
   const settingsPanelRef = useRef<HTMLElement | null>(null);
   const galleryPanelRef = useRef<HTMLElement | null>(null);
   const previewStageRef = useRef<HTMLDivElement | null>(null);
-  const useDiscoveredDataset = useCallback((path: string) => {
-    setTrainingDatasetSeed(path);
-    setActiveTab("training");
-  }, []);
-  const clearTrainingDatasetSeed = useCallback(() => setTrainingDatasetSeed(null), []);
 
   const selectedSource = useMemo(
     () => project.sources.find((source) => source.path === selectedPath) ?? null,
@@ -330,7 +350,7 @@ function App() {
   const loadLabelPreview = useCallback((path: string) => (
     callEngine<{ data_url: string; width: number; height: number; image_fingerprint?: string }>(
       "preview_frame",
-      { path, frame_index: 0 },
+      { path, frame_index: 0, lossless: true },
     )
   ), []);
 
@@ -349,7 +369,7 @@ function App() {
         : image),
     }));
     try {
-      const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[] }>("save_annotations", {
+      const saved = await serializeProjectWrite(() => callEngine<{ annotations: Annotation[]; json_errors?: { path: string; message: string }[] }>("save_annotations", {
         path,
         image_path: imagePath,
         annotations,
@@ -363,6 +383,9 @@ function App() {
           : image),
       }));
       annotationSaveFailed.current = false;
+      if (saved.json_errors?.length) {
+        setError(`Nhãn đã lưu trong dự án nhưng chưa ghi được file JSON: ${saved.json_errors[0].message} (${saved.json_errors[0].path})`);
+      }
       return saved.annotations;
     } catch (reason) {
       annotationSaveFailed.current = true;
@@ -376,6 +399,8 @@ function App() {
     predictions: { class_id: number; confidence: number; bbox_xyxy: number[] }[],
     checkpoint: string,
     fingerprint: string,
+    skippedLargeObjects: number,
+    replace: boolean,
   ): Promise<{ annotations: Annotation[]; negative_candidate?: NegativeCandidate | null }> => {
     const path = projectPath;
     if (!path) throw new Error("Hãy lưu dự án trước khi tạo gợi ý AI.");
@@ -383,27 +408,52 @@ function App() {
       annotations: Annotation[];
       negative_candidate?: NegativeCandidate | null;
       status?: string;
+      source_model_id?: string;
+      checkpoint_sha256?: string;
     }>("save_ai_suggestions", {
       path,
       image_path: imagePath,
       predictions,
       checkpoint,
       image_fingerprint: fingerprint,
+      skipped_large_objects: skippedLargeObjects,
+      replace,
     }));
+    const attempt: InferenceAttempt | null = !saved.annotations.length && !saved.negative_candidate && saved.source_model_id && saved.checkpoint_sha256
+      ? { source_model_id: saved.source_model_id, checkpoint_sha256: saved.checkpoint_sha256, image_fingerprint: fingerprint, skipped_large_objects: skippedLargeObjects }
+      : null;
     setProject((current) => ({
       ...current,
       images: current.images.map((image) => image.path === imagePath
         ? {
             ...image,
-            annotations: [...(image.annotations ?? []), ...saved.annotations],
+            inference_attempts: attempt
+              ? [...(replace ? [] : (image.inference_attempts ?? []).filter((item) => item.checkpoint_sha256 !== attempt.checkpoint_sha256)), attempt]
+              : replace ? [] : image.inference_attempts,
+            annotations: [...(replace ? [] : image.annotations ?? []), ...saved.annotations],
             negative_candidates: saved.negative_candidate
-              ? [...(image.negative_candidates ?? []), saved.negative_candidate]
-              : image.negative_candidates,
+              ? [...(replace ? [] : image.negative_candidates ?? []), saved.negative_candidate]
+              : replace ? [] : image.negative_candidates,
             status: saved.status ?? image.status,
           }
         : image),
     }));
     return saved;
+  }, [projectPath]);
+
+  /** Asks, then removes the image from the project and moves the image file and its JSON to the trash. */
+  const deleteLabelImage = useCallback(async (imagePath: string, boxCount: number): Promise<boolean> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi xóa ảnh.");
+    const name = imagePath.split(/[\\/]/).pop() ?? imagePath;
+    const approved = await confirm(
+      `Xóa ảnh "${name}"${boxCount ? ` và ${boxCount} box` : ""}?\n\nẢnh và file .json của nó được chuyển vào Thùng rác (khôi phục được từ đó) và gỡ khỏi dự án.`,
+      { title: "Xóa ảnh", kind: "warning", okLabel: "Xóa ảnh", cancelLabel: "Hủy" },
+    );
+    if (!approved) return false;
+    await serializeProjectWrite(() => callEngine("delete_images", { path, image_paths: [imagePath] }));
+    setProject((current) => ({ ...current, images: current.images.filter((image) => image.path !== imagePath) }));
+    return true;
   }, [projectPath]);
 
   const reviewLabelNegativeCandidate = useCallback(async (
@@ -437,7 +487,60 @@ function App() {
     }));
   }, [projectPath]);
 
-  const runProjectInference = useCallback(async (checkpoint: string, requestId: string) => {
+  const applyModelClasses = useCallback(async (classNames: string[]) => {
+    const labeled = project.images.some((image) => (
+      (image.annotations?.length ?? 0) > 0 || (image.negative_candidates?.length ?? 0) > 0
+    ));
+    if (labeled) throw new Error("Dự án đã có nhãn hoặc candidate AI; không thể đổi class mà không làm sai class ID.");
+    const path = projectPath;
+    let applied = classNames;
+    if (path) {
+      const saved = await serializeProjectWrite(() => callEngine<{ class_names: string[] }>("set_project_classes", {
+        path,
+        class_names: classNames,
+      }));
+      applied = saved.class_names;
+    } else {
+      setDirty(true);
+    }
+    setProject((current) => ({
+      ...current,
+      class_names: applied,
+      images: current.images.map((image) => ({
+        ...image,
+        status: image.status === "reviewed" ? "ready" : image.status,
+        inference_attempts: [],
+      })),
+    }));
+  }, [project.images, projectPath]);
+
+  /** Accepts the pending AI boxes of these images and marks every image that has boxes reviewed. */
+  const reviewLabelImages = useCallback(async (imagePaths: string[]): Promise<string | null> => {
+    const path = projectPath;
+    if (!path) throw new Error("Hãy lưu dự án trước khi duyệt ảnh.");
+    const approved = await confirm(
+      `Duyệt ${imagePaths.length} ảnh đang hiện trong danh sách?\n\nMọi box AI đang chờ duyệt của các ảnh này thành nhãn thật (ghi vào JSON) và ảnh có box được đánh dấu đã review. Ảnh không có box giữ nguyên, không thành ảnh negative.`,
+      { title: "Duyệt toàn bộ ảnh", kind: "warning", okLabel: "Duyệt", cancelLabel: "Hủy" },
+    );
+    if (!approved) return null;
+    try {
+      const result = await serializeProjectWrite(() => callEngine<{
+        accepted_suggestion_count: number;
+        reviewed_image_count: number;
+        skipped_empty_count: number;
+        skipped_pending_negative_count: number;
+      }>("review_images", { path, image_paths: imagePaths }));
+      const skipped = [
+        result.skipped_empty_count ? `${result.skipped_empty_count} ảnh không có box` : "",
+        result.skipped_pending_negative_count ? `${result.skipped_pending_negative_count} ảnh có candidate negative chờ xác nhận` : "",
+      ].filter(Boolean).join(", ");
+      return `Đã duyệt ${result.accepted_suggestion_count} box AI · ${result.reviewed_image_count} ảnh thành đã review${skipped ? ` · bỏ qua ${skipped}` : ""}.`;
+    } finally {
+      await reloadLabels(path);
+    }
+  }, [projectPath]);
+
+  const runProjectInference = useCallback(async (checkpoint: string, requestId: string, confidence: number, replace: boolean) => {
     const path = projectPath;
     if (!path) throw new Error("Hãy lưu dự án trước khi chạy inference hàng loạt.");
     try {
@@ -449,32 +552,38 @@ function App() {
         annotation_count: number;
         skipped_changed: number;
         skipped_large_objects: number;
+        skipped_attempted: number;
       }>("engine_request", {
         request: {
           id: requestId,
           command: "auto_label_project",
-          arguments: { path, checkpoint, confidence_threshold: 0.25 },
+          arguments: { path, checkpoint, confidence_threshold: confidence, replace },
         },
       }));
     } finally {
-      const loaded = await serializeProjectWrite(() => callEngine<ProjectState>("load_project", { path }));
-      if (projectPathRef.current === path) {
-        const savedImages = new Map(loaded.images.map((image) => [image.path, image]));
-        setProject((current) => ({
-          ...current,
-          images: current.images.map((image) => {
-            const saved = savedImages.get(image.path);
-            return saved ? {
-              ...image,
-              annotations: saved.annotations,
-              negative_candidates: saved.negative_candidates,
-              status: saved.status,
-            } : image;
-          }),
-        }));
-      }
+      await reloadLabels(path);
     }
   }, [projectPath]);
+
+  /** Reloads labels and review state written by a project-wide engine command. */
+  async function reloadLabels(path: string) {
+    const loaded = await serializeProjectWrite(() => callEngine<ProjectState>("load_project", { path }));
+    if (projectPathRef.current !== path) return;
+    const savedImages = new Map(loaded.images.map((image) => [image.path, image]));
+    setProject((current) => ({
+      ...current,
+      images: current.images.map((image) => {
+        const saved = savedImages.get(image.path);
+        return saved ? {
+          ...image,
+          annotations: saved.annotations,
+          negative_candidates: saved.negative_candidates,
+          inference_attempts: saved.inference_attempts,
+          status: saved.status,
+        } : image;
+      }),
+    }));
+  }
 
   useEffect(() => {
     let alive = true;
@@ -499,7 +608,31 @@ function App() {
         engineReady = true;
         setEngineStatus("ready");
         const snapshot = await callEngine<SessionSnapshot>("load_session", {});
-        if (!alive || interacted || !snapshot.available || !snapshot.project || !snapshot.session) return;
+        if (!alive || interacted) return;
+        const snapshotHasWork = Boolean(snapshot.available && snapshot.project && snapshot.session && (
+          typeof snapshot.session.project_path === "string"
+          || snapshot.project.images.length
+          || snapshot.project.sources.length
+        ));
+        if (!snapshotHasWork) {
+          const previous = lastProject();
+          if (previous) {
+            try {
+              await openProjectPath(previous);
+            } catch {
+              // The last project moved or was deleted: start empty.
+            }
+          }
+          return;
+        }
+        if (!snapshot.project || !snapshot.session) return;
+        if (snapshot.session.light === true && typeof snapshot.session.project_path === "string") {
+          if (snapshot.original_project_exists) {
+            await openProjectPath(snapshot.session.project_path);
+            if (typeof snapshot.session.output_directory === "string") setOutputDirectory(snapshot.session.output_directory);
+          }
+          return;
+        }
 
         const settingsMigrated = snapshot.project.settings_migrated === true;
         const restoredProject = {
@@ -522,10 +655,6 @@ function App() {
         const restoredFrame = typeof requestedFrame === "number" && Number.isFinite(requestedFrame)
           ? Math.max(0, Math.min(selectedSource?.frame_count ? selectedSource.frame_count - 1 : Number.MAX_SAFE_INTEGER, Math.floor(requestedFrame)))
           : 0;
-        const requestedTab = snapshot.session.active_tab;
-        const restoredTab: WorkspaceTab = requestedTab === "label" || requestedTab === "dataset" || requestedTab === "training"
-          ? requestedTab
-          : "extract";
         const requestedProjectPath = snapshot.session.project_path;
         const originalIsSafeToResume = snapshot.original_project_exists === true
           && snapshot.original_project_unchanged === true
@@ -539,9 +668,9 @@ function App() {
         setSelectedPath(restoredSelectedPath);
         setFrameIndex(restoredFrame);
         setOutputDirectory(typeof snapshot.session.output_directory === "string" ? snapshot.session.output_directory : "");
-        setActiveTab(restoredTab);
-        setGallery([]);
-        setFileListTruncated(false);
+        setActiveTab("extract");
+        if (originalIsSafeToResume) rememberProject(requestedProjectPath);
+        setGalleryThumbnails({});
         annotationSaveFailed.current = false;
       } catch (reason) {
         if (alive && engineReady && !interacted) {
@@ -565,15 +694,17 @@ function App() {
       projectPath
       || project.sources.length
       || project.images.length
-      || activeTab !== "extract"
       || outputDirectory
       || JSON.stringify(options) !== JSON.stringify(DEFAULT_OPTIONS),
     );
     if (!hasSessionState) return;
     const timer = window.setTimeout(() => {
+      // A saved project without unsaved changes is its own state: send no images.
+      const light = Boolean(projectPath && !dirty);
       void serializeProjectWrite(() => callEngine("save_session", {
-        project: { ...project, settings: options },
+        project: light ? { ...project, images: [], sources: [], settings: options } : { ...project, settings: options },
         session: {
+          light,
           project_path: projectPath,
           selected_paths: selectedPaths,
           selected_path: selectedPath,
@@ -789,6 +920,12 @@ function App() {
     setError(null);
     try {
       if (!paths.length) return;
+      const projectFile = paths.find((path) => /\.ffproj$/i.test(path));
+      if (projectFile) {
+        // A project dropped or chosen here is opened, not treated as media.
+        if (await mayReplaceCurrentProject()) await openProjectPath(projectFile);
+        return;
+      }
       const result = await callEngine<{
         sources: MediaSource[];
         unsupported_count: number;
@@ -797,6 +934,19 @@ function App() {
       if (!result.sources.length) {
         setError(result.errors[0]?.message || "Không tìm thấy video hoặc ảnh được hỗ trợ trong lựa chọn.");
         return;
+      }
+      if (result.sources.every((source) => source.kind === "image")) {
+        const direct = await confirm(
+          `Đã chọn ${result.sources.length} ảnh. Thêm thẳng vào dự án để gán nhãn (ảnh dùng tại chỗ, nhãn lưu JSON cạnh ảnh)?
+
+`
+            + "Chọn \"Nguồn cắt frame\" nếu muốn cắt crop từ các ảnh này ở tab Trích xuất.",
+          { title: "Thêm ảnh", kind: "info", okLabel: "Thêm để gán nhãn", cancelLabel: "Nguồn cắt frame" },
+        );
+        if (direct) {
+          await importImages(paths);
+          return;
+        }
       }
       const existing = new Set(project.sources.map((source) => source.path));
       const added = result.sources.filter((source) => !existing.has(source.path));
@@ -871,11 +1021,11 @@ function App() {
       };
       setProject(empty);
       setProjectPath(path);
+      rememberProject(path);
       setOptions(DEFAULT_OPTIONS);
       setSelectedPaths([]);
       setSelectedPath(null);
-      setGallery([]);
-      setFileListTruncated(false);
+      setGalleryThumbnails({});
       setFrameIndex(0);
       setDirty(false);
       setError(null);
@@ -893,33 +1043,68 @@ function App() {
         filters: [{ name: "Dự án FrameForge", extensions: ["ffproj"] }],
       });
       if (typeof path !== "string") return;
-      const loaded = await callEngine<ProjectState>("load_project", { path });
-      const nextOptions = { ...DEFAULT_OPTIONS, ...(loaded.settings as Partial<ExtractionOptions>) };
-      const settingsMigrated = loaded.settings_migrated === true;
-      setProject({
-        ...loaded,
-        settings_version: PROJECT_SETTINGS_VERSION,
-        settings_migrated: false,
-        settings: nextOptions,
-      });
-      setOptions(nextOptions);
-      setProjectPath(path);
-      setSelectedPaths(loaded.sources.map((source) => source.path));
-      setSelectedPath(loaded.sources[0]?.path ?? null);
-      setFrameIndex(0);
-      setGallery([]);
-      setFileListTruncated(false);
-      setDirty(settingsMigrated);
-      setError(null);
+      await openProjectPath(path);
     } catch (reason) {
       setError(String(reason));
     }
   }
 
-  async function saveProject(): Promise<boolean> {
+  /** Finds images again when the project (with its images) came from another folder or computer. */
+  async function relocateProjectImages(path: string) {
+    type Relocation = { image_count: number; missing_count: number; relocated_count: number; still_missing_count: number; ambiguous_count: number };
+    let result = await callEngine<Relocation>("relocate_images", { path });
+    const relocated = result.relocated_count;
+    let total = relocated;
+    if (result.still_missing_count > 0) {
+      const pick = await confirm(
+        `${result.still_missing_count}/${result.image_count} ảnh của dự án không còn ở đường dẫn cũ (dự án chép từ máy hoặc thư mục khác?).${relocated ? `
+
+Đã tự tìm lại ${relocated} ảnh cạnh file dự án.` : ""}
+
+Chọn thư mục chứa ảnh để FrameForge tìm lại theo tên file? Nhãn đi theo file JSON cạnh ảnh.`,
+        { title: "Không tìm thấy ảnh", kind: "warning", okLabel: "Chọn thư mục ảnh", cancelLabel: "Mở luôn" },
+      );
+      if (pick) {
+        const root = await open({ title: "Chọn thư mục chứa ảnh của dự án", directory: true, multiple: false });
+        if (typeof root === "string") {
+          result = await callEngine<Relocation>("relocate_images", { path, root });
+          total += result.relocated_count;
+        }
+      }
+    }
+    if (result.still_missing_count > 0) {
+      setError(`${result.still_missing_count} ảnh vẫn không tìm thấy${result.ambiguous_count ? ` (${result.ambiguous_count} ảnh trùng tên ở nhiều nơi)` : ""}. Mở lại dự án để chọn thư mục ảnh khác.`);
+    } else if (total > 0) {
+      await message(`Đã tìm lại ${total} ảnh ở vị trí mới và cập nhật dự án.`, { title: "Dự án đã chuyển chỗ" });
+    }
+  }
+
+  async function openProjectPath(path: string) {
+    await relocateProjectImages(path);
+    const loaded = await callEngine<ProjectState>("load_project", { path });
+    const nextOptions = { ...DEFAULT_OPTIONS, ...(loaded.settings as Partial<ExtractionOptions>) };
+    const settingsMigrated = loaded.settings_migrated === true;
+    setProject({
+      ...loaded,
+      settings_version: PROJECT_SETTINGS_VERSION,
+      settings_migrated: false,
+      settings: nextOptions,
+    });
+    setOptions(nextOptions);
+    setProjectPath(path);
+    setSelectedPaths(loaded.sources.map((source) => source.path));
+    setSelectedPath(loaded.sources[0]?.path ?? null);
+    setFrameIndex(0);
+    setGalleryThumbnails({});
+    setDirty(settingsMigrated);
+    setError(null);
+    rememberProject(path);
+  }
+
+  async function saveProject(): Promise<string | null> {
     if (annotationSaveFailed.current) {
       setError("Một số nhãn chưa được tự lưu. Quay lại Gán nhãn, tải lại ảnh và thử lưu nhãn trước.");
-      return false;
+      return null;
     }
     try {
       let path = projectPath;
@@ -930,7 +1115,7 @@ function App() {
           filters: [{ name: "Dự án FrameForge", extensions: ["ffproj"] }],
         });
       }
-      if (!path) return false;
+      if (!path) return null;
       const saved = await serializeProjectWrite(() => callEngine<{ id: string; name: string; modified_at: string }>("save_project", {
         path,
         project: { ...project, settings: options },
@@ -944,12 +1129,68 @@ function App() {
         settings: options,
       }));
       setProjectPath(path);
+      rememberProject(path);
       setDirty(false);
       setError(null);
-      return true;
+      return path;
     } catch (reason) {
       setError(String(reason));
-      return false;
+      return null;
+    }
+  }
+
+  async function importImages(givenPaths?: string[]) {
+    setError(null);
+    try {
+      let path = projectPath;
+      if (!path || dirty) {
+        path = await saveProject();
+        if (!path) return;
+      }
+      let paths = givenPaths ?? [];
+      if (!givenPaths) {
+        const chosen = await open({ title: "Chọn thư mục ảnh (ảnh dùng tại chỗ, nhãn lưu JSON cạnh ảnh)", directory: true, multiple: true });
+        paths = Array.isArray(chosen) ? chosen : chosen ? [chosen] : [];
+      }
+      if (!paths.length) return;
+      const projectFile = path;
+      setImportingLabels(true);
+      const preview = await callEngine<ImageImportPreview>("import_images", { path: projectFile, paths, dry_run: true });
+      if (!preview.new_images) {
+        await message(`${preview.found_images} ảnh đều đã có trong dự án.`, { title: "Nhập ảnh", kind: "info" });
+        return;
+      }
+      // Only JSON from other tools (LabelMe/X-AnyLabeling) lacks FrameForge's review status.
+      const markReviewed = preview.json_images > 0 && await confirm(
+        `${preview.json_images} ảnh đã có file JSON nhãn. Đánh dấu các ảnh có box là đã review để xuất thẳng vào dataset?\n\n`
+          + "Chọn \"Chưa review\" nếu muốn duyệt lại từng ảnh. JSON do FrameForge ghi giữ nguyên trạng thái review của nó.",
+        { title: "Nhập ảnh", kind: "info", okLabel: "Đã review", cancelLabel: "Chưa review" },
+      );
+      const result = await serializeProjectWrite(() => callEngine<ImageImportResult>("import_images", {
+        path: projectFile,
+        paths,
+        mark_reviewed: markReviewed,
+      }));
+      const loaded = await serializeProjectWrite(() => callEngine<ProjectState>("load_project", { path: projectFile }));
+      if (projectPathRef.current === projectFile || projectPath === projectFile) {
+        setProject((current) => ({ ...current, images: loaded.images, class_names: loaded.class_names }));
+      }
+      const lines = [
+        `Đã thêm ${result.imported_images}/${result.found_images} ảnh: ${result.labeled_images} ảnh có ${result.box_count} box`
+          + `${result.reviewed_images ? ` (${result.reviewed_images} ảnh đã review)` : ""}, ${result.unlabeled_images} ảnh chưa gán.`,
+        "Nhãn được lưu vào file .json cạnh mỗi ảnh.",
+        result.skipped_existing ? `${result.skipped_existing} ảnh đã có trong dự án nên giữ nguyên.` : "",
+        result.unknown_labels ? `${result.unknown_labels} box có nhãn ngoài class dự án được giữ nguyên trong JSON nhưng không hiện trong FrameForge.` : "",
+        result.unsupported_shapes ? `${result.unsupported_shapes} shape không phải rectangle/polygon được giữ nguyên trong JSON.` : "",
+        result.clipped_boxes ? `${result.clipped_boxes} box vượt biên ảnh đã được cắt vào trong ảnh.` : "",
+        result.degenerate_boxes ? `${result.degenerate_boxes} box nhỏ hơn 1 px bị bỏ qua.` : "",
+        result.error_count ? `${result.error_count} tệp lỗi, ví dụ: ${result.errors[0]?.message ?? ""}` : "",
+      ].filter(Boolean);
+      await message(lines.join("\n"), { title: "Nhập ảnh", kind: result.error_count ? "warning" : "info" });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setImportingLabels(false);
     }
   }
 
@@ -967,25 +1208,6 @@ function App() {
       if (!(await saveProject())) return;
     }
     setActiveTab("dataset");
-  }
-
-  async function inspectModel() {
-    setError(null);
-    try {
-      const path = await open({
-        title: "Chọn model ONNX để kiểm tra",
-        multiple: false,
-        filters: [{ name: "Model ONNX", extensions: ["onnx"] }],
-      });
-      if (typeof path !== "string") return;
-      setInspectingModel(true);
-      const info = await callEngine<ModelInfo>("inspect_model", { path });
-      setModelInfo(info);
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setInspectingModel(false);
-    }
   }
 
   async function chooseOutputDirectory() {
@@ -1014,6 +1236,13 @@ function App() {
       return;
     }
     let destination = outputDirectory;
+    if (!destination && projectPath) {
+      // Default: a frames folder next to the project file, so extraction needs no folder dialog.
+      const separator = projectPath.includes("\\") ? "\\" : "/";
+      const parent = projectPath.slice(0, projectPath.lastIndexOf(separator));
+      destination = `${parent}${separator}${projectNameFromPath(projectPath)}_frames`;
+      setOutputDirectory(destination);
+    }
     if (!destination) {
       try {
         const chosen = await open({ title: "Chọn thư mục lưu frame", directory: true, multiple: false });
@@ -1039,7 +1268,6 @@ function App() {
     await progressSubscription.current;
     activeExtractionId.current = id;
     setProgress(null);
-    setFileListTruncated(false);
     setExtracting(true);
     setError(null);
     try {
@@ -1055,22 +1283,34 @@ function App() {
         },
       });
       setProgress(result);
-      setFileListTruncated(result.file_list_truncated);
-      setGallery((current) => [...result.files, ...current].slice(0, 500));
+      setGalleryThumbnails(Object.fromEntries(result.files
+        .filter((file) => file.thumbnail_data_url)
+        .map((file) => [file.path, file.thumbnail_data_url as string])));
       setProject((current) => {
         const imagesByPath = new Map<string, ProjectImage>(current.images.map((image) => [image.path, image]));
-        for (const file of result.files) {
-          const { thumbnail_data_url: _thumbnail, name: _name, ...image } = file;
-          const existing = imagesByPath.get(file.path);
-          imagesByPath.set(file.path, {
+        for (const written of result.images) {
+          const { overwritten, ...image } = written;
+          // An overwritten file has new pixels, so labels, AI candidates and attempts made on the old bytes no longer apply.
+          const existing = overwritten ? undefined : imagesByPath.get(image.path);
+          imagesByPath.set(image.path, {
             ...image,
+            extraction_settings: result.extraction_settings,
             status: existing?.status ?? "ready",
             annotations: existing?.annotations ?? [],
+            negative_candidates: existing?.negative_candidates ?? [],
+            inference_attempts: existing?.inference_attempts ?? [],
           });
         }
         return { ...current, images: [...imagesByPath.values()] };
       });
       setDirty(true);
+      const overwrittenLabeled = result.images.filter((image) => image.overwritten && project.images.some((existing) => (
+        existing.path === image.path
+        && ((existing.annotations?.length ?? 0) > 0 || (existing.negative_candidates?.length ?? 0) > 0 || existing.status === "reviewed")
+      ))).length;
+      if (overwrittenLabeled) {
+        setError(`${overwrittenLabeled} ảnh bị ghi đè đã được xóa nhãn và gợi ý AI cũ vì nội dung ảnh đã thay đổi.`);
+      }
       if (result.errors.length) {
         const firstFailure = result.errors[0];
         setError(`Đã trích ${result.exported_images} ảnh; lỗi ở ${firstFailure.path}: ${firstFailure.message}`);
@@ -1100,12 +1340,17 @@ function App() {
       : [...current, path]);
   }
 
-  function selectGalleryImage(file: ExtractionFile) {
-    if (file.source_path) {
-      setSelectedPath(file.source_path);
-      setFrameIndex(file.frame_index ?? 0);
+  function selectGalleryImage(image: GalleryImage) {
+    if (image.source_path && project.sources.some((source) => source.path === image.source_path)) {
+      setSelectedPath(image.source_path);
+      setFrameIndex(image.frame_index ?? 0);
     }
   }
+
+  const loadGalleryThumbnails = useCallback((paths: string[]) => (
+    callEngine<{ thumbnails: Record<string, string | null> }>("image_thumbnails", { paths })
+      .then((result) => result.thumbnails)
+  ), []);
 
   const extractionPercent = progress?.source_total
     ? Math.min(100, Math.round((progress.source_index / progress.source_total) * 100))
@@ -1134,9 +1379,8 @@ function App() {
             <SaveIcon size={15} /><span>Lưu</span>
           </button>
           <span className="toolbar-divider" />
-          <button className="tool-button" type="button" onClick={() => void inspectModel()} disabled={inspectingModel} title="Nạp và kiểm tra model ONNX trên CPU">
-            {inspectingModel ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
-            <span>{inspectingModel ? "Đang kiểm tra" : "Kiểm tra model"}</span>
+          <button className="tool-button" type="button" onClick={() => void importImages()} disabled={engineStatus !== "ready" || importingLabels} title="Thêm thư mục ảnh có sẵn vào dự án; nhãn lưu file JSON cạnh từng ảnh (đọc được JSON LabelMe/X-AnyLabeling)">
+            {importingLabels ? <LoaderCircle size={15} className="spin" /> : <FileJson size={15} />}<span>Nhập ảnh</span>
           </button>
           <button className="tool-button" type="button" onClick={() => void openLabelWorkspace()} title="Mở Gán nhãn để chọn checkpoint và chạy gợi ý AI">
             <Sparkles size={15} /><span>Auto label</span>
@@ -1151,17 +1395,6 @@ function App() {
         </div>
       </header>
 
-      {modelInfo ? (
-        <div className="model-strip">
-          <Check size={14} />
-          <span className="model-summary" title={`Input: ${modelInfo.inputs.map((tensor) => `${tensor.name} [${tensor.shape.join(" × ")}] · ${tensor.type}`).join("; ")} | Output: ${modelInfo.outputs.map((tensor) => `${tensor.name} [${tensor.shape.join(" × ")}] · ${tensor.type}`).join("; ")}`}>
-            <strong>{modelInfo.name}</strong> · ONNX · In {modelInfo.inputs.map((tensor) => `[${tensor.shape.join("×")}]`).join(", ") || "—"} · Out {modelInfo.outputs.map((tensor) => `[${tensor.shape.join("×")}]`).join(", ") || "—"} · {modelInfo.providers.join(", ")}
-          </span>
-          {modelInfo.class_names.length > 0 && <span className="model-classes">{modelInfo.class_names.length} lớp</span>}
-          <button type="button" className="icon-button strip-close" onClick={() => setModelInfo(null)} aria-label="Đóng thông tin model"><X size={14} /></button>
-        </div>
-      ) : null}
-
       <nav className="workflow-tabs" aria-label="Các giai đoạn">
         <button className={activeTab === "extract" ? "workflow-tab active" : "workflow-tab"} onClick={() => setActiveTab("extract")} type="button">
           <Scissors size={15} /><span>Trích xuất</span>
@@ -1171,9 +1404,6 @@ function App() {
         </button>
         <button className={activeTab === "dataset" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => void openDatasetWorkspace()}>
           <Database size={15} /><span>Dataset</span>
-        </button>
-        <button className={activeTab === "training" ? "workflow-tab active" : "workflow-tab"} type="button" onClick={() => setActiveTab("training")}>
-          <Activity size={15} /><span>Huấn luyện</span>
         </button>
         <div className="tab-spacer" />
         <span className="workflow-hint"><CircleHelp size={13} /> Dữ liệu xử lý trên máy này</span>
@@ -1188,6 +1418,9 @@ function App() {
 
       {activeTab === "label" ? (
         <ManualLabeling
+          projectKey={projectPath}
+          deleteImage={deleteLabelImage}
+          reviewImages={reviewLabelImages}
           images={project.images}
           classNames={project.class_names}
           loadPreview={loadLabelPreview}
@@ -1195,11 +1428,10 @@ function App() {
           saveSuggestions={saveLabelSuggestions}
           reviewNegativeCandidate={reviewLabelNegativeCandidate}
           runBatchInference={runProjectInference}
+          applyModelClasses={applyModelClasses}
         />
       ) : activeTab === "dataset" ? (
-        <DatasetManager projectPath={projectPath} imageCount={project.images.length} onUseDiscoveredDataset={useDiscoveredDataset} />
-      ) : activeTab === "training" ? (
-        <TrainingWorkspace initialDataYaml={trainingDatasetSeed} onInitialDataYamlConsumed={clearTrainingDatasetSeed} />
+        <DatasetManager projectPath={projectPath} imageCount={project.images.length} classNames={project.class_names} />
       ) : (
       <section
         className={`workspace-layout ${dropActive ? "drop-active" : ""}`}
@@ -1412,7 +1644,7 @@ function App() {
             <section className="settings-section output-section">
               <div className="section-title-row"><h3>Đầu ra</h3><span className="section-caption">Output</span></div>
               <button className="output-path-button" type="button" onClick={() => void chooseOutputDirectory()}>
-                <FolderOpen size={14} /><span title={outputDirectory || "Chọn thư mục lưu frame"}>{outputDirectory || "Chọn thư mục lưu frame"}</span><ChevronDown size={14} />
+                <FolderOpen size={14} /><span title={outputDirectory || "Chọn thư mục lưu frame"}>{outputDirectory || (projectPath ? `Mặc định: ${projectNameFromPath(projectPath)}_frames cạnh dự án` : "Chọn thư mục lưu frame")}</span><ChevronDown size={14} />
               </button>
               <label className="field-label collision-field">Tệp đã tồn tại<select value={options.existing_file_behavior} onChange={(event) => updateOptions({ existing_file_behavior: event.target.value as ExtractionOptions["existing_file_behavior"] })}>
                 <option value="skip">Bỏ qua, giữ tệp cũ</option><option value="rename">Đổi tên tệp mới</option><option value="overwrite">Ghi đè</option>
@@ -1435,7 +1667,7 @@ function App() {
 
         <section className="gallery-panel panel" aria-label="Frame vừa trích" ref={galleryPanelRef}>
           <div className="gallery-heading">
-            <div><h2>Frame vừa trích</h2><span>{project.images.length} trong dự án{fileListTruncated ? " · đang hiển thị tối đa 500 ảnh gần nhất" : ""}</span></div>
+            <div><h2>Ảnh trong dự án</h2><span>{project.images.length} ảnh · cuộn ngang để xem toàn bộ</span></div>
             <div className="gallery-summary">
               {progress && <span><Check size={13} /> {progress.exported_images} ảnh xuất</span>}
               {progress && progress.duplicate_crops > 0 && <span>{progress.duplicate_crops} crop gần giống đã lọc</span>}
@@ -1443,21 +1675,12 @@ function App() {
               {progress && <span>{progress.elapsed_seconds}s</span>}
             </div>
           </div>
-          <div className="gallery-strip">
-            {gallery.map((file, index) => (
-              <button type="button" className="gallery-item" key={`${file.path}-${index}`} onClick={() => selectGalleryImage(file)} title={`${file.name} · ${file.width} × ${file.height}`}>
-                {file.thumbnail_data_url ? <img src={file.thumbnail_data_url} alt="" loading="lazy" /> : <div className="gallery-placeholder"><FileImage size={20} /></div>}
-                <span className="gallery-file-name">{file.name}</span>
-                <small>{file.width} × {file.height}</small>
-              </button>
-            ))}
-            {gallery.length === 0 && project.images.length === 0 && (
-              <div className="gallery-empty"><ImagePlus size={18} /><span>Frame xuất hiện tại đây sau lần trích đầu tiên.</span></div>
-            )}
-            {gallery.length === 0 && project.images.length > 0 && (
-              <div className="gallery-empty"><FileImage size={18} /><span>{project.images.length} ảnh đã lưu trong dự án. Trích thêm để tạo preview thumbnail.</span></div>
-            )}
-          </div>
+          <ProjectGallery
+            images={project.images}
+            seedThumbnails={galleryThumbnails}
+            loadThumbnails={loadGalleryThumbnails}
+            onSelect={selectGalleryImage}
+          />
         </section>
       </section>
       )}
@@ -1470,9 +1693,9 @@ function App() {
           {dirty && <><span className="status-separator">/</span><span>Chưa lưu</span></>}
         </div>
         <div className="status-right">
-          <span>{outputDirectory || "Đầu ra chưa chọn"}</span>
+          <span>{outputDirectory || (projectPath ? `${projectNameFromPath(projectPath)}_frames cạnh dự án` : "Đầu ra chưa chọn")}</span>
           <span className="status-separator">/</span>
-          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : activeTab === "training" ? "Huấn luyện" : "Trích xuất"}</span>
+          <span>FrameForge · {activeTab === "label" ? "Gán nhãn" : activeTab === "dataset" ? "Dataset" : "Trích xuất"}</span>
         </div>
       </footer>
     </main>

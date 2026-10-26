@@ -1,5 +1,87 @@
 # Nhật ký thay đổi
 
+## Chưa phát hành — Hiệu năng dự án lớn và zoom ảnh
+
+- Mở/lưu dự án và chuyển ảnh nhanh hơn nhiều với hàng chục–trăm nghìn ảnh (engine chạy nền, index, đồng bộ JSON chỉ chạm file đổi, danh sách ảnh ảo hóa, phiên nhẹ).
+- Zoom ảnh bằng con lăn quanh con trỏ tới 3200%, kéo ảnh bằng Space/chuột giữa, phím `+`/`-`/`0`.
+- Gợi ý AI không còn hai box cùng class trên một vật (box cùng class trùng IoU ≥ 0,5 hoặc nằm trong nhau ≥ 80% chỉ giữ box confidence cao nhất); confidence mặc định 35%.
+- Gợi ý lại: ảnh đã có box có thể gợi ý lại (xóa box cũ, có hỏi trước); tùy chọn gợi ý lại hàng loạt cả ảnh đã có box. Nút xóa model đã nhập. Bỏ các đoạn hướng dẫn dài trong tab Gán nhãn.
+- Mở dự án chép từ máy/thư mục khác: ảnh không còn ở đường dẫn cũ được tìm lại cạnh file dự án (theo tên file và thư mục cha), hoặc trong thư mục bạn chọn; nhãn đi theo JSON cạnh ảnh.
+- Xuất dataset loại cả ảnh còn gợi ý AI chờ duyệt (trước đây ảnh có box đã duyệt và box AI còn chờ vẫn được xuất với nhãn thiếu).
+- Chọn box bị đè: click chọn box nhỏ nhất dưới con trỏ; click lại chỗ chồng nhau chọn lần lượt các box bên dưới; kéo vẫn di chuyển box đang chọn.
+- Tab Gán nhãn: nút **Duyệt toàn bộ ảnh** cho các ảnh đang hiện theo bộ lọc: duyệt mọi box AI chờ duyệt (ghi vào JSON) và đánh dấu đã review ảnh có box; ảnh không có box giữ nguyên.
+- Tab Dataset: tùy chọn **Chỉ xuất ảnh có đủ class** (ví dụ head + body); ảnh chỉ có một trong các class đã chọn, hoặc không có box, không được xuất.
+
+## Chưa phát hành — Nhập nhãn LabelMe/X-AnyLabeling và phím tắt class
+
+- Gán nhãn nhanh hơn: lọc danh sách ảnh, `A`/`D` chuyển ảnh, `N` ảnh chưa xong kế tiếp, `Enter` duyệt và sang ảnh tiếp.
+- Trích xuất video ghi mặc định vào `<tên dự án>_frames` cạnh dự án, không cần chọn thư mục.
+
+- Nhãn lưu trong file JSON LabelMe/X-AnyLabeling cạnh từng ảnh thay vì chỉ trong dự án; LabelMe, X-AnyLabeling và yolo-train đọc trực tiếp được, file sửa bên ngoài được đọc lại khi mở dự án.
+- Nút **Nhập ảnh**: thêm thư mục ảnh có sẵn (kể cả thư mục con) vào dự án, ảnh dùng tại chỗ, đọc nhãn từ JSON cạnh ảnh.
+- Phím `1`/`H` = head, `2`/`B` = body (tổng quát: `1`–`9` và chữ cái đầu tên class) để đổi class box đang chọn hoặc chọn class để vẽ.
+
+## Chưa phát hành — Tách công cụ train khỏi repo
+
+- Chuyển `train_yolo.py`, `optimize_model.py`, `build_model.py`, `labelme_to_yolo.py`, `config.yml`, `train_rocm.cmd`/`.ps1` sang công cụ riêng `C:\Users\CiyE\Desktop\yolo-train` (README riêng, kết quả trong `runs/` của thư mục đó). Gỡ các file này và hướng dẫn train khỏi repo FrameForge.
+- FrameForge chỉ gán box (thủ công hoặc bằng model đã nhập). `.venv-train/` vẫn ở repo (đã ignore) vì công cụ train dùng nó; bỏ `runs/` khỏi `.gitignore` của repo.
+
+## Chưa phát hành — Gộp train, tối ưu và xuất model; class ID trong config.yml
+
+- Thêm `scripts/build_model.py`: tune (tùy chọn) → train → tối ưu (NMS IoU, confidence F1 tốt nhất, latency) → xuất `.pt` mới kèm `.json` thông số, `config.yml` và `build_summary.json`. Launcher `train_rocm.cmd` có mode `build`/`build-finetune`, `-MaxLatencyMs`, `-TuneIterations`, `-Config`.
+- Thêm `scripts/config.yml` (`0: head`, `1: body`); `labelme_to_yolo.py`, `train_yolo.py`, `optimize_model.py` đọc class ID từ đó và chặn `data.yaml` lệch ID.
+- Các script là công cụ riêng, không gắn với app: bỏ giả định NMS IoU 0,7 và đo latency trên CPU; FrameForge chỉ dùng để gán box (thủ công hoặc bằng model đã nhập).
+- Sửa đo latency khi số ảnh ít hơn số lần warmup (trước đây lỗi do danh sách thời gian rỗng) và chép file ONNX/OpenVINO đã export sang thư mục model.
+
+## Chưa phát hành — Script tối ưu latency và độ chính xác
+
+- Thêm `scripts/optimize_model.py`: `evaluate`, `benchmark`, `all`, `tune`; báo cáo `report.md`/`report.json`, khuyến nghị imgsz, NMS IoU, ngưỡng confidence cho app và format nhanh nhất giữ được độ chính xác.
+- `train_yolo.py` thêm `--hyp` để train với hyperparameter đã tune; tách hàm `resolve_data_path` dùng chung.
+- Kiểm tra bằng Ultralytics/torch giả; chưa đo trên model và GPU thật.
+
+## Chưa phát hành — Script train cho imgsz 640 và 256
+
+- Thêm `scripts/labelme_to_yolo.py` và cho `train_yolo.py`/`train_rocm.cmd` nhận thẳng thư mục ảnh + JSON LabelMe/X-AnyLabeling (head = 0, body = 1); ảnh chưa có JSON được bỏ qua như chưa gán nhãn, split theo thời gian chụp, cảnh báo box quá nhỏ ở imgsz 256. Launcher tách đúng danh sách `-Imgsz`/`-Weights`/`-Extra` khi chạy qua `.cmd` và có `-PreparedDir`, `-ValRatio`.
+
+- Thêm `scripts/train_rocm.cmd`/`train_rocm.ps1`: chạy train/fine-tune bằng PyTorch ROCm trong `.venv-train`, kiểm tra bản ROCm và GPU trước (mode `check`), báo lỗi rõ khi thiếu torch, torch không phải ROCm, không thấy GPU, thiếu `-Data` hoặc `-Weights`. Thêm `runs/` vào `.gitignore`.
+
+- `scripts/train_yolo.py` nhận `--imgsz 640 256` (mặc định cả hai), chạy mỗi kích thước thành run riêng `<tên>-<imgsz>` với batch mặc định 16 (640) và 64 (256) trên GPU 8 GB.
+- Fine-tune nhận `--weights SIZE=PATH` cho từng kích thước hoặc một checkpoint dùng chung; mọi checkpoint được kiểm tra trước khi train và có cảnh báo khi imgsz của checkpoint khác kích thước đích.
+- Train mới dùng `yolo11n.pt` (nhận cả `yolov11n.pt`). Thêm thanh tiến độ theo epoch cho từng run và tổng, thời gian epoch/đã chạy/ETA, mAP, tổng thời gian cuối cùng và log `frameforge_progress.log` trong thư mục run.
+- Đã kiểm tra parse tham số, chọn batch, báo lỗi và callback tiến độ (trainer giả, có dừng sớm) bằng Python không có torch; chưa train thật.
+
+## Chưa phát hành — Gallery toàn bộ ảnh và script train
+
+- Gallery hiển thị mọi ảnh trong dự án thay vì 500 thumbnail của lượt trích gần nhất; danh sách được ảo hóa và thumbnail tải dần qua lệnh `image_thumbnails`.
+- Thêm `scripts/train_yolo.py` để train/fine-tune YOLO11n ở imgsz 640 bằng GPU (CUDA/ROCm) ngoài app, mặc định theo RX 6600 8 GB / i3-12100F / 16 GB RAM. Chưa chạy train thật vì máy chưa có PyTorch GPU cho RX 6600.
+- Engine pytest 70 passed; frontend build, Rust fmt/check/test pass.
+
+## Chưa phát hành — Sửa các lỗi audit pipeline
+
+- Model có class khác `head`/`body` dùng được: khi dự án chưa có nhãn, có thể đổi class dự án theo model (`set_project_classes`), kể cả ngay lúc nhập. Panel Model hiện cả khi dự án chưa có ảnh.
+- Extraction trả metadata của mọi ảnh đã ghi; trước đây chỉ 500 ảnh đầu được thêm vào dự án. Gallery vẫn chỉ giữ 500 thumbnail.
+- Ảnh bị ghi đè khi trích lại mất nhãn, candidate và lượt inference cũ thay vì giữ nhãn của nội dung cũ.
+- Thêm ngưỡng confidence 1–99% và “Duyệt tất cả”/“Loại tất cả” gợi ý cho ảnh hiện tại.
+- Ảnh có mọi box chạm biên crop được ghi lượt inference theo checkpoint + fingerprint; batch không chạy lại vô ích.
+- Bỏ “Đã review” đưa box thủ công về chưa review, nên ảnh không còn được xuất ngầm.
+- Inference truyền `imgsz` đã đăng ký của checkpoint vào Ultralytics.
+- Engine pytest 69 passed; frontend build, Rust fmt/check/test pass. Chưa click-through với checkpoint thật.
+
+## Chưa phát hành — Thu gọn về pipeline gán nhãn
+
+- Sản phẩm chỉ còn pipeline: nhập model → nhập ảnh/video → model gắn nhãn → người dùng duyệt/gán lại → lưu dataset.
+- Gỡ tab Huấn luyện cùng train/fine-tune YOLO11n, đánh giá model trên fixed set, Champion/Challenger, Smart Folder Discovery/nhập workspace chuyển máy và kiểm tra metadata ONNX khỏi UI, Tauri allowlist và engine.
+- Gỡ lineage/parent manifest, replay và đóng băng val/test khỏi tab Dataset và exporter; manifest không còn `version`, `parent_*`, `fixed_validation_set`, `frozen_test_set`.
+- Registry và trust flow nhập checkpoint YOLO11n chuyển sang `engine/frameforge/models.py`; giữ đường dẫn registry cũ để model đã nhập vẫn dùng được. Tab Gán nhãn có nút “Nhập model .pt”.
+- Extra Python `train` đổi thành `inference` (PyTorch + Ultralytics); bỏ `onnxruntime`, `psutil`, `lap`. Engine pytest 64 passed, frontend build và Rust fmt/check/test pass; chưa build lại portable app.
+
+## Chưa phát hành — Sửa app Windows phụ thuộc localhost
+
+- Bật Tauri `custom-protocol` mặc định để release executable nạp frontend đã đóng gói thay vì cố kết nối Vite ở `localhost:1420`.
+- Build lại portable app bằng `pnpm build:portable`; engine bundle qua health/training self-check, frontend production build thành công và cửa sổ `FrameForge` mở được trên máy Windows này.
+- App được mở trực tiếp từ `src-tauri/target/release/FrameForge/frameforge.exe`; không có tiến trình server lắng nghe cổng 1420. Chưa kiểm chứng máy sạch, DirectML hoặc RX 6600.
+- Khôi phục tên project mojibake trong snapshot legacy (có thể bị mã hóa sai nhiều lượt) trước khi hiển thị; không sửa dự án nguồn. Regression test bao phủ phục hồi và giữ nguyên chuỗi tiếng Việt hợp lệ; sau khi mở bản portable mới, snapshot hiện có đã lưu lại tên đúng.
+
 ## Chưa phát hành — Khôi phục lối vào Auto label
 
 - Nút Auto label trên toolbar trước đây bị disable với tooltip “Suy luận chưa được triển khai”, gây hiểu nhầm dù inference thật đã có trong tab Gán nhãn.

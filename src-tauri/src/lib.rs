@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,6 +39,190 @@ fn read_engine_diagnostics<R: Read>(mut reader: R) -> String {
 #[derive(Clone, Default)]
 struct EngineJobs(Arc<Mutex<HashMap<String, JobHandle>>>);
 
+/// Engines kept running between short requests: starting the packaged Python engine costs about
+/// 0.7 s, which every image switch, autosave and thumbnail batch otherwise paid. Cancellable jobs
+/// (extraction, inference) still get their own process so cancelling can stop it.
+#[derive(Clone, Default)]
+struct EnginePool(Arc<Mutex<Vec<PooledEngine>>>);
+
+const MAX_IDLE_ENGINES: usize = 3;
+
+struct PooledEngine {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    diagnostics: Arc<Mutex<String>>,
+}
+
+impl PooledEngine {
+    fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_pooled_engine(app: &AppHandle, app_data_dir: &Path) -> Result<PooledEngine, String> {
+    let (engine_program, engine_script) = engine_invocation(app)?;
+    let mut command = Command::new(engine_program);
+    if let Some(script) = engine_script {
+        command.arg(script);
+    }
+    command
+        .env("FRAMEFORGE_APP_DATA", app_data_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_engine_command(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        format!("Không chạy được engine tích hợp. Hãy đóng rồi mở lại ứng dụng. ({error})")
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or("Không mở được kênh gửi lệnh tới engine.")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Không mở được kênh nhận dữ liệu từ engine.")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Không mở được kênh chẩn đoán của engine.")?;
+    // Drain stderr for the engine's whole life, keeping only the latest part for error messages.
+    let diagnostics = Arc::new(Mutex::new(String::new()));
+    let sink = diagnostics.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Ok(mut text) = sink.lock() {
+                if text.len() > MAX_ENGINE_DIAGNOSTIC_BYTES {
+                    let cut = text.len() - MAX_ENGINE_DIAGNOSTIC_BYTES / 2;
+                    let cut = (cut..text.len())
+                        .find(|index| text.is_char_boundary(*index))
+                        .unwrap_or(text.len());
+                    text.drain(..cut);
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+    });
+    Ok(PooledEngine {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        diagnostics,
+    })
+}
+
+/// Sends one request to a pooled engine and reads its progress events and final response.
+fn exchange(
+    engine: &mut PooledEngine,
+    app: &AppHandle,
+    request_id: &str,
+    request_bytes: &[u8],
+) -> Result<Value, String> {
+    engine
+        .stdin
+        .write_all(request_bytes)
+        .and_then(|_| engine.stdin.write_all(b"\n"))
+        .and_then(|_| engine.stdin.flush())
+        .map_err(|error| format!("Không gửi được yêu cầu tới engine: {error}"))?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = engine
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("Không đọc được phản hồi từ engine: {error}"))?;
+        if read == 0 {
+            return Err("engine-exited".to_string());
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("Phản hồi JSON-lines không hợp lệ: {error}"))?;
+        if response.get("id").and_then(Value::as_str) != Some(request_id) {
+            return Err("Mã phản hồi không khớp với yêu cầu.".to_string());
+        }
+        if let Some(event) = response.get("event") {
+            let _ = app.emit(
+                "engine-progress",
+                json!({"id": request_id, "progress": event}),
+            );
+            continue;
+        }
+        return Ok(response);
+    }
+}
+
+fn run_pooled_request(
+    app: &AppHandle,
+    pool: &EnginePool,
+    app_data_dir: &Path,
+    request_id: &str,
+    request_bytes: &[u8],
+) -> Result<Value, String> {
+    let mut attempts = 0;
+    let response = loop {
+        attempts += 1;
+        let idle = pool.0.lock().ok().and_then(|mut idle| idle.pop());
+        let reused = idle.is_some();
+        let mut engine = match idle {
+            Some(engine) => engine,
+            None => spawn_pooled_engine(app, app_data_dir)?,
+        };
+        match exchange(&mut engine, app, request_id, request_bytes) {
+            Ok(response) => {
+                let mut idle = pool
+                    .0
+                    .lock()
+                    .map_err(|_| "Không truy cập được engine.".to_string())?;
+                if idle.len() < MAX_IDLE_ENGINES {
+                    idle.push(engine);
+                } else {
+                    drop(idle);
+                    engine.kill();
+                }
+                break response;
+            }
+            // An idle engine that died meanwhile: retry once on a fresh one.
+            Err(error) if error == "engine-exited" && reused && attempts == 1 => {
+                engine.kill();
+                continue;
+            }
+            Err(error) => {
+                let detail = engine
+                    .diagnostics
+                    .lock()
+                    .map(|text| text.trim().to_string())
+                    .unwrap_or_default();
+                engine.kill();
+                return Err(if error == "engine-exited" {
+                    if detail.is_empty() {
+                        "Python engine dừng trước khi trả dữ liệu.".to_string()
+                    } else {
+                        format!("Python engine gặp lỗi: {detail}")
+                    }
+                } else {
+                    error
+                });
+            }
+        }
+    };
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(response
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("Python engine từ chối yêu cầu.")
+            .to_string());
+    }
+    response
+        .get("data")
+        .cloned()
+        .ok_or_else(|| "Phản hồi thành công thiếu trường data.".to_string())
+}
+
 #[derive(Clone)]
 struct JobHandle {
     child: Arc<Mutex<Child>>,
@@ -50,10 +234,12 @@ struct JobHandle {
 async fn engine_request(
     app: AppHandle,
     jobs: tauri::State<'_, EngineJobs>,
+    pool: tauri::State<'_, EnginePool>,
     request: Value,
 ) -> Result<Value, String> {
     let jobs = jobs.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || run_engine_request(app, jobs, request))
+    let pool = pool.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || run_engine_request(app, jobs, pool, request))
         .await
         .map_err(|error| format!("Tác vụ engine bị gián đoạn: {error}"))?
 }
@@ -94,7 +280,12 @@ fn cancel_engine_request(
     }
 }
 
-fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Result<Value, String> {
+fn run_engine_request(
+    app: AppHandle,
+    jobs: EngineJobs,
+    pool: EnginePool,
+    request: Value,
+) -> Result<Value, String> {
     let mut request = request;
     let request_id = request
         .get("id")
@@ -115,21 +306,8 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
         .app_data_dir()
         .map_err(|error| format!("Không xác định được thư mục dữ liệu FrameForge: {error}"))?;
     let mut cancellation_marker = None;
-    if matches!(
-        command.as_str(),
-        "train_yolo_queue"
-            | "evaluate_yolo_checkpoint"
-            | "scan_project_folder"
-            | "predict_crops"
-            | "auto_label_project"
-    ) {
-        let marker_dir = app_data_dir
-            .join(match command.as_str() {
-                "train_yolo_queue" | "evaluate_yolo_checkpoint" => "training",
-                "scan_project_folder" => "discovery",
-                _ => "inference",
-            })
-            .join("cancel");
+    if matches!(command.as_str(), "predict_crops" | "auto_label_project") {
+        let marker_dir = app_data_dir.join("inference").join("cancel");
         std::fs::create_dir_all(&marker_dir)
             .map_err(|error| format!("Không tạo được thư mục điều khiển tác vụ: {error}"))?;
         let safe_id: String = request_id
@@ -151,19 +329,16 @@ fn run_engine_request(app: AppHandle, jobs: EngineJobs, request: Value) -> Resul
     }
     let cancellable = matches!(
         command.as_str(),
-        "extract_frames"
-            | "train_yolo_queue"
-            | "evaluate_yolo_checkpoint"
-            | "scan_project_folder"
-            | "predict_crops"
-            | "auto_label_project"
+        "extract_frames" | "predict_crops" | "auto_label_project"
     );
-    if cancellable
-        && jobs
-            .0
-            .lock()
-            .map_err(|_| "Không truy cập được danh sách tác vụ engine.".to_string())?
-            .contains_key(&request_id)
+    if !cancellable {
+        return run_pooled_request(&app, &pool, &app_data_dir, &request_id, &request_bytes);
+    }
+    if jobs
+        .0
+        .lock()
+        .map_err(|_| "Không truy cập được danh sách tác vụ engine.".to_string())?
+        .contains_key(&request_id)
     {
         return Err("Mã tác vụ đang được sử dụng.".to_string());
     }
@@ -322,36 +497,7 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
         .ok_or_else(|| "Arguments phải là một JSON object.".to_string())?;
     match command {
         "health" => Ok(()),
-        "training_capabilities"
-        | "list_training_runs"
-        | "get_evaluation_targets"
-        | "get_model_promotion_state"
-        | "rollback_model_promotion"
-        | "load_session" => Ok(()),
-        "compare_model_challenger" | "promote_model_challenger" => {
-            let tolerance = match arguments.get("max_regression") {
-                None => 0.0,
-                Some(value) => value
-                    .as_f64()
-                    .filter(|value| value.is_finite())
-                    .ok_or("Tolerance regression phải là số hữu hạn từ 0 đến 1.")?,
-            };
-            if !(0.0..=1.0).contains(&tolerance) {
-                return Err("Tolerance regression phải nằm trong khoảng 0–1.".to_string());
-            }
-            Ok(())
-        }
-        "list_model_evaluations" => {
-            if let Some(run_id) = arguments.get("run_id").filter(|value| !value.is_null()) {
-                if run_id
-                    .as_str()
-                    .is_none_or(|value| value.is_empty() || value.len() > 128)
-                {
-                    return Err("Mã training run không hợp lệ.".to_string());
-                }
-            }
-            Ok(())
-        }
+        "inference_capabilities" | "list_models" | "load_session" => Ok(()),
         "save_session" => {
             if arguments
                 .get("project")
@@ -363,332 +509,6 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     .is_none()
             {
                 return Err("Thiếu project hoặc metadata phiên làm việc.".to_string());
-            }
-            Ok(())
-        }
-        "register_discovered_run" => {
-            let root = canonical_existing_path(
-                arguments
-                    .get("discovery_root")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu thư mục quét đã xác nhận.")?,
-            )?;
-            if !root.is_dir() {
-                return Err("Thư mục quét không còn tồn tại.".to_string());
-            }
-            let run = arguments
-                .get("run")
-                .and_then(Value::as_object)
-                .ok_or("Thiếu metadata training run.")?;
-            let source = canonical_existing_path(
-                run.get("source_dir")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu thư mục training run.")?,
-            )?;
-            if !source.is_dir() || !source.starts_with(&root) {
-                return Err("Training run nằm ngoài thư mục đã quét.".to_string());
-            }
-            Ok(())
-        }
-        "scan_project_folder" => {
-            let path = canonical_existing_path(
-                arguments
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu thư mục cần quét.")?,
-            )?;
-            if !path.is_dir() {
-                return Err("Hãy chọn thư mục dự án để quét.".to_string());
-            }
-            let max_depth = arguments
-                .get("max_depth")
-                .map(Value::as_u64)
-                .flatten()
-                .unwrap_or(8);
-            if arguments.get("max_depth").is_some()
-                && arguments.get("max_depth").and_then(Value::as_u64).is_none()
-            {
-                return Err("Độ sâu quét phải là số nguyên từ 1–16.".to_string());
-            }
-            if !(1..=16).contains(&max_depth) {
-                return Err("Độ sâu quét phải nằm trong khoảng 1–16.".to_string());
-            }
-            let max_files = arguments
-                .get("max_files")
-                .map(Value::as_u64)
-                .flatten()
-                .unwrap_or(50_000);
-            if arguments.get("max_files").is_some()
-                && arguments.get("max_files").and_then(Value::as_u64).is_none()
-            {
-                return Err("Giới hạn file phải là số nguyên từ 1–200000.".to_string());
-            }
-            if !(1..=200_000).contains(&max_files) {
-                return Err("Giới hạn file phải nằm trong khoảng 1–200000.".to_string());
-            }
-            if let Some(ignored_dirs) = arguments.get("ignored_dirs") {
-                let ignored_dirs = ignored_dirs
-                    .as_array()
-                    .filter(|items| items.len() <= 64)
-                    .ok_or("Danh sách thư mục bỏ qua không hợp lệ.")?;
-                for name in ignored_dirs {
-                    let name = name
-                        .as_str()
-                        .filter(|name| {
-                            !name.is_empty()
-                                && name.len() <= 128
-                                && !name.contains('/')
-                                && !name.contains('\\')
-                        })
-                        .ok_or("Tên thư mục bỏ qua không hợp lệ.")?;
-                    if name == "." || name == ".." {
-                        return Err("Tên thư mục bỏ qua không hợp lệ.".to_string());
-                    }
-                }
-            }
-            Ok(())
-        }
-        "prepare_discovered_dataset" => {
-            let root = canonical_existing_path(
-                arguments
-                    .get("discovery_root")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu thư mục làm việc đã quét.")?,
-            )?;
-            if !root.is_dir() {
-                return Err("Thư mục làm việc không còn tồn tại.".to_string());
-            }
-            let data_yaml = canonical_existing_path(
-                arguments
-                    .get("data_yaml")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu data.yaml đã phát hiện.")?,
-            )?;
-            if !data_yaml.is_file()
-                || !data_yaml.starts_with(&root)
-                || !data_yaml
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|extension| {
-                        matches!(extension.to_ascii_lowercase().as_str(), "yaml" | "yml")
-                    })
-            {
-                return Err(
-                    "data.yaml phải là tệp YAML bên trong thư mục làm việc đã quét.".to_string(),
-                );
-            }
-            Ok(())
-        }
-        "inspect_training_dataset" => validate_yaml_file(
-            arguments
-                .get("data_yaml")
-                .and_then(Value::as_str)
-                .ok_or("Thiếu đường dẫn data.yaml.")?,
-        ),
-        "evaluate_yolo_checkpoint" => {
-            let checkpoint = canonical_existing_path(
-                arguments
-                    .get("checkpoint")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu checkpoint cần đánh giá.")?,
-            )?;
-            if !checkpoint.is_file()
-                || !checkpoint
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
-            {
-                return Err("Chọn checkpoint `.pt` đã đăng ký trong FrameForge.".to_string());
-            }
-            validate_yaml_file(
-                arguments
-                    .get("data_yaml")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu data.yaml của fixed set.")?,
-            )?;
-            let split = arguments
-                .get("split")
-                .and_then(Value::as_str)
-                .unwrap_or("val");
-            if !["val", "test"].contains(&split) {
-                return Err("Chỉ đánh giá split validation hoặc test.".to_string());
-            }
-            let image_size = arguments
-                .get("imgsz")
-                .and_then(Value::as_u64)
-                .ok_or("imgsz đánh giá phải là số nguyên từ 1 đến 2048 px.")?;
-            if !(1..=2048).contains(&image_size) {
-                return Err("imgsz đánh giá phải nằm trong khoảng 1–2048 px.".to_string());
-            }
-            let batch = match arguments.get("batch") {
-                None => 8,
-                Some(value) => value
-                    .as_u64()
-                    .ok_or("Batch đánh giá phải là số nguyên từ 1 đến 512.")?,
-            };
-            if !(1..=512).contains(&batch) {
-                return Err("Batch đánh giá phải nằm trong khoảng 1–512.".to_string());
-            }
-            for (key, default) in [("confidence_threshold", 0.001), ("iou_threshold", 0.7)] {
-                let value = match arguments.get(key) {
-                    None => default,
-                    Some(value) => value
-                        .as_f64()
-                        .filter(|value| value.is_finite())
-                        .ok_or("Confidence và NMS IoU phải là số hữu hạn.")?,
-                };
-                if !(0.0..=1.0).contains(&value) {
-                    return Err("Confidence và NMS IoU phải nằm trong khoảng 0–1.".to_string());
-                }
-            }
-            let device = arguments
-                .get("device")
-                .and_then(Value::as_str)
-                .unwrap_or("auto");
-            if !["auto", "cpu", "mps", "cuda", "cuda:0"].contains(&device) {
-                return Err("Thiết bị đánh giá không hợp lệ.".to_string());
-            }
-            Ok(())
-        }
-        "save_evaluation_targets" => {
-            validate_yaml_file(
-                arguments
-                    .get("data_yaml")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu data.yaml để kiểm tra class mục tiêu.")?,
-            )?;
-            let allowed = [
-                "precision",
-                "recall",
-                "f1",
-                "map50",
-                "map50_95",
-                "avg_latency_ms",
-                "p50_latency_ms",
-                "p95_latency_ms",
-                "p99_latency_ms",
-                "fps",
-                "throughput",
-                "max_model_size_mb",
-                "max_memory_mb",
-            ];
-            for key in ["targets", "per_class"] {
-                let values = arguments
-                    .get(key)
-                    .and_then(Value::as_object)
-                    .filter(|values| values.len() <= 64)
-                    .ok_or("Cấu hình chỉ số mục tiêu không hợp lệ.")?;
-                if key == "targets" {
-                    for (metric, target) in values {
-                        if !allowed.contains(&metric.as_str()) {
-                            return Err("Tên chỉ số mục tiêu không được hỗ trợ.".to_string());
-                        }
-                        if let Some(number) = target.as_f64() {
-                            if !number.is_finite()
-                                || (allowed[..5].contains(&metric.as_str())
-                                    && !(0.0..=1.0).contains(&number))
-                                || (allowed[..5].contains(&metric.as_str()) == false
-                                    && number <= 0.0)
-                            {
-                                return Err(
-                                    "Giá trị mục tiêu phải hữu hạn và nằm trong phạm vi hợp lệ."
-                                        .to_string(),
-                                );
-                            }
-                        } else if !target.is_null() {
-                            return Err("Mỗi chỉ số mục tiêu phải là số hoặc để trống.".to_string());
-                        }
-                    }
-                } else {
-                    for (class_name, class_values) in values {
-                        if class_name.is_empty() || class_name.len() > 128 {
-                            return Err("Tên class mục tiêu không hợp lệ.".to_string());
-                        }
-                        let class_values = class_values
-                            .as_object()
-                            .filter(|items| items.len() <= 5)
-                            .ok_or("Mục tiêu theo class không hợp lệ.")?;
-                        for (metric, target) in class_values {
-                            if !allowed[..5].contains(&metric.as_str()) {
-                                return Err(
-                                    "Mục tiêu theo class chỉ nhận metric chất lượng.".to_string()
-                                );
-                            }
-                            if let Some(number) = target.as_f64() {
-                                if !number.is_finite() || !(0.0..=1.0).contains(&number) {
-                                    return Err("Mục tiêu chất lượng phải nằm trong khoảng 0–1."
-                                        .to_string());
-                                }
-                            } else if !target.is_null() {
-                                return Err(
-                                    "Mỗi mục tiêu class phải là số hoặc để trống.".to_string()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        "train_yolo_queue" => {
-            validate_yaml_file(
-                arguments
-                    .get("data_yaml")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu đường dẫn data.yaml.")?,
-            )?;
-            let output = canonical_existing_path(
-                arguments
-                    .get("output_dir")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu thư mục đầu ra training.")?,
-            )?;
-            if !output.is_dir() {
-                return Err("Thư mục đầu ra training không hợp lệ.".to_string());
-            }
-            let sizes = arguments
-                .get("sizes")
-                .and_then(Value::as_array)
-                .filter(|sizes| !sizes.is_empty() && sizes.len() <= 12)
-                .ok_or("Chọn từ 1 đến 12 kích thước train.")?;
-            let mut unique_sizes = std::collections::HashSet::new();
-            for size in sizes {
-                let size = size
-                    .as_u64()
-                    .filter(|size| (1..=2048).contains(size))
-                    .ok_or("imgsz phải là số nguyên từ 1 đến 2048 px.")?;
-                if !unique_sizes.insert(size) {
-                    return Err("Danh sách imgsz không được trùng kích thước.".to_string());
-                }
-            }
-            let device = arguments
-                .get("device")
-                .and_then(Value::as_str)
-                .unwrap_or("auto");
-            if !["auto", "cpu", "mps", "cuda", "cuda:0"].contains(&device) {
-                return Err("Thiết bị training không hợp lệ.".to_string());
-            }
-            let on_error = arguments
-                .get("on_error")
-                .and_then(Value::as_str)
-                .unwrap_or("stop");
-            if !["stop", "continue"].contains(&on_error) {
-                return Err("Chính sách khi job lỗi phải là stop hoặc continue.".to_string());
-            }
-            let base_model = arguments
-                .get("base_model")
-                .and_then(Value::as_str)
-                .unwrap_or("yolo11n.pt");
-            if base_model != "yolo11n.pt" {
-                let checkpoint = canonical_existing_path(base_model)?;
-                if !checkpoint.is_file()
-                    || !checkpoint
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("pt"))
-                {
-                    return Err("Checkpoint fine-tune phải là tệp .pt hợp lệ.".to_string());
-                }
             }
             Ok(())
         }
@@ -796,6 +616,9 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     );
                 }
             }
+            if arguments.get("replace").is_some_and(|value| !value.is_boolean()) {
+                return Err("Tùy chọn gợi ý lại không hợp lệ.".to_string());
+            }
             Ok(())
         }
         "inspect_sources" => {
@@ -806,6 +629,30 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .ok_or_else(|| "Chọn từ 1 đến 500 nguồn media.".to_string())?;
             for path in paths {
                 validate_media_path(path.as_str().ok_or("Đường dẫn nguồn không hợp lệ.")?, true)?;
+            }
+            Ok(())
+        }
+        "image_thumbnails" => {
+            let paths = arguments
+                .get("paths")
+                .and_then(Value::as_array)
+                .filter(|paths| !paths.is_empty() && paths.len() <= 64)
+                .ok_or("Mỗi lần chỉ tải từ 1 đến 64 thumbnail.")?;
+            for path in paths {
+                let path = PathBuf::from(path.as_str().ok_or("Đường dẫn thumbnail không hợp lệ.")?);
+                if !path.is_absolute() {
+                    return Err("Đường dẫn thumbnail phải là đường dẫn tuyệt đối.".to_string());
+                }
+                let extension = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
+                    .contains(&extension.as_str())
+                {
+                    return Err("Thumbnail chỉ dành cho tệp ảnh.".to_string());
+                }
             }
             Ok(())
         }
@@ -823,6 +670,12 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .is_none()
             {
                 return Err("Chỉ số frame phải là số nguyên không âm.".to_string());
+            }
+            if arguments
+                .get("lossless")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err("Tùy chọn preview không hợp lệ.".to_string());
             }
             Ok(())
         }
@@ -860,24 +713,6 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             }
             Ok(())
         }
-        "inspect_model" => {
-            let path = canonical_existing_path(
-                arguments
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .ok_or("Thiếu đường dẫn model ONNX.")?,
-            )?;
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
-            {
-                Ok(())
-            } else {
-                Err("Hãy chọn một tệp model .onnx hợp lệ.".to_string())
-            }
-        }
         "import_yolo_checkpoint" => {
             let path = canonical_existing_path(
                 arguments
@@ -914,8 +749,22 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .get("output_dir")
                 .and_then(Value::as_str)
                 .ok_or("Thiếu thư mục đầu ra.")?;
-            let output_path = canonical_existing_path(output)?;
-            if !output_path.is_dir() {
+            // A new folder is created by the engine; its parent must already exist.
+            let requested = PathBuf::from(output);
+            let output_path = if requested.exists() {
+                canonical_existing_path(output)?
+            } else {
+                let parent = requested
+                    .parent()
+                    .filter(|parent| requested.is_absolute() && parent.is_dir())
+                    .ok_or("Thư mục đầu ra không hợp lệ.")?;
+                canonical_existing_path(&parent.to_string_lossy())?.join(
+                    requested
+                        .file_name()
+                        .ok_or("Thư mục đầu ra không hợp lệ.")?,
+                )
+            };
+            if output_path.exists() && !output_path.is_dir() {
                 return Err("Thư mục đầu ra không hợp lệ.".to_string());
             }
             let options = arguments
@@ -1052,6 +901,139 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
             {
                 return Err("Fingerprint ảnh không hợp lệ.".to_string());
             }
+            if let Some(value) = arguments.get("skipped_large_objects") {
+                if value.as_u64().is_none_or(|count| count > 300) {
+                    return Err("Số box bị bỏ qua do chạm biên crop không hợp lệ.".to_string());
+                }
+            }
+            if arguments.get("replace").is_some_and(|value| !value.is_boolean()) {
+                return Err("Tùy chọn gợi ý lại không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
+        "delete_images" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let images = arguments
+                .get("image_paths")
+                .and_then(Value::as_array)
+                .filter(|images| !images.is_empty() && images.len() <= 10000)
+                .ok_or("Hãy chọn từ 1 đến 10000 ảnh để xóa.")?;
+            for image in images {
+                // The engine also checks that every path belongs to the project.
+                let image = image.as_str().ok_or("Đường dẫn ảnh không hợp lệ.")?;
+                if !Path::new(image).is_absolute() {
+                    return Err("Đường dẫn ảnh phải là đường dẫn tuyệt đối.".to_string());
+                }
+            }
+            Ok(())
+        }
+        "delete_model" => {
+            arguments
+                .get("run_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .ok_or("Mã model không hợp lệ.")?;
+            Ok(())
+        }
+        "relocate_images" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            if let Some(root) = arguments.get("root").filter(|root| !root.is_null()) {
+                let root = root.as_str().ok_or("Thư mục ảnh không hợp lệ.")?;
+                if !Path::new(root).is_absolute() || !canonical_existing_path(root)?.is_dir() {
+                    return Err("Thư mục ảnh không hợp lệ.".to_string());
+                }
+            }
+            Ok(())
+        }
+        "review_images" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let images = arguments
+                .get("image_paths")
+                .and_then(Value::as_array)
+                .filter(|images| !images.is_empty() && images.len() <= 1_000_000)
+                .ok_or("Hãy chọn từ 1 đến 1000000 ảnh để duyệt.")?;
+            if images.iter().any(|image| {
+                image
+                    .as_str()
+                    .is_none_or(|image| !Path::new(image).is_absolute())
+            }) {
+                return Err("Đường dẫn ảnh phải là đường dẫn tuyệt đối.".to_string());
+            }
+            Ok(())
+        }
+        "import_images" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let paths = arguments
+                .get("paths")
+                .and_then(Value::as_array)
+                .filter(|paths| !paths.is_empty() && paths.len() <= 10000)
+                .ok_or("Hãy chọn từ 1 đến 10000 ảnh hoặc thư mục.")?;
+            for value in paths {
+                validate_media_path(value.as_str().ok_or("Đường dẫn ảnh không hợp lệ.")?, true)?;
+            }
+            for flag in ["mark_reviewed", "dry_run"] {
+                if arguments.get(flag).is_some_and(|value| !value.is_boolean()) {
+                    return Err("Tùy chọn nhập ảnh không hợp lệ.".to_string());
+                }
+            }
+            Ok(())
+        }
+        "import_labelme_folder" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let folder = canonical_existing_path(
+                arguments
+                    .get("folder")
+                    .and_then(Value::as_str)
+                    .ok_or("Thiếu thư mục LabelMe/X-AnyLabeling.")?,
+            )?;
+            if !folder.is_dir() {
+                return Err("Hãy chọn thư mục chứa ảnh và JSON LabelMe/X-AnyLabeling.".to_string());
+            }
+            if arguments
+                .get("mark_reviewed")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err("Tùy chọn đánh dấu đã review không hợp lệ.".to_string());
+            }
+            Ok(())
+        }
+        "set_project_classes" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("Thiếu đường dẫn dự án.")?;
+            validate_existing_project_path(path)?;
+            let names = arguments
+                .get("class_names")
+                .and_then(Value::as_array)
+                .filter(|names| !names.is_empty() && names.len() <= 1000)
+                .ok_or("Danh sách class phải có từ 1 đến 1000 tên.")?;
+            if names.iter().any(|name| {
+                name.as_str()
+                    .is_none_or(|value| value.trim().is_empty() || value.chars().count() > 200)
+            }) {
+                return Err("Tên class phải là chuỗi không rỗng, tối đa 200 ký tự.".to_string());
+            }
             Ok(())
         }
         "review_ai_negative_candidate" => {
@@ -1134,6 +1116,14 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                     return Err("Tỷ lệ ảnh negative phải từ 0 đến 100%.".to_string());
                 }
             }
+            if let Some(value) = arguments.get("required_class_ids") {
+                let ids = value
+                    .as_array()
+                    .ok_or("Danh sách class bắt buộc không hợp lệ.")?;
+                if ids.len() > 1000 || ids.iter().any(|id| id.as_u64().is_none()) {
+                    return Err("Danh sách class bắt buộc không hợp lệ.".to_string());
+                }
+            }
             let seed = arguments.get("seed").and_then(Value::as_u64).unwrap_or(42);
             if seed > u32::MAX as u64 {
                 return Err("Seed phải nằm trong khoảng 0 đến 4294967295.".to_string());
@@ -1144,56 +1134,6 @@ fn validate_request(command: &str, arguments: &Value) -> Result<(), String> {
                 .unwrap_or(30.0);
             if !segment_seconds.is_finite() || !(1.0..=3600.0).contains(&segment_seconds) {
                 return Err("Độ dài đoạn video phải từ 1 đến 3600 giây.".to_string());
-            }
-            let replay_strategy = arguments
-                .get("replay_strategy")
-                .and_then(Value::as_str)
-                .unwrap_or("all");
-            if !["all", "balanced", "new"].contains(&replay_strategy) {
-                return Err("Chính sách replay dataset không hợp lệ.".to_string());
-            }
-            let freeze_evaluation_set = arguments
-                .get("freeze_evaluation_set")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if arguments
-                .get("freeze_evaluation_set")
-                .is_some_and(|value| !value.is_boolean())
-            {
-                return Err("Cờ đóng băng validation/test không hợp lệ.".to_string());
-            }
-            if arguments
-                .get("replay_strategy")
-                .is_some_and(|value| !value.is_string())
-            {
-                return Err("Chính sách replay dataset không hợp lệ.".to_string());
-            }
-            let parent_manifest = match arguments.get("parent_manifest_path") {
-                Some(Value::String(value)) if !value.trim().is_empty() => {
-                    let path = canonical_existing_path(value)?;
-                    if !path.is_file()
-                        || path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
-                    {
-                        return Err(
-                            "Chọn manifest.json của một phiên bản FrameForge đã xuất.".to_string()
-                        );
-                    }
-                    Some(path)
-                }
-                Some(Value::Null) | None | Some(Value::String(_)) => None,
-                Some(_) => return Err("Đường dẫn parent manifest không hợp lệ.".to_string()),
-            };
-            if parent_manifest.is_some() && freeze_evaluation_set {
-                return Err(
-                    "Parent đã có val/test cố định; không thể tạo bộ mới trong cùng lượt xuất."
-                        .to_string(),
-                );
-            }
-            if parent_manifest.is_some() && test != 0.0 {
-                return Err(
-                    "Khi dùng parent, đặt Test (%) của dữ liệu mới bằng 0 để giữ nguyên test set."
-                        .to_string(),
-                );
             }
             if command == "export_yolo_dataset" {
                 let output = arguments
@@ -1254,22 +1194,6 @@ fn canonical_existing_path(value: &str) -> Result<PathBuf, String> {
     }
     path.canonicalize()
         .map_err(|error| format!("Đường dẫn không hợp lệ: {error}"))
-}
-
-fn validate_yaml_file(value: &str) -> Result<(), String> {
-    let path = canonical_existing_path(value)?;
-    if path.is_file()
-        && path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "yaml" | "yml")
-            })
-    {
-        Ok(())
-    } else {
-        Err("Hãy chọn tệp data.yaml hoặc .yml có thật.".to_string())
-    }
 }
 
 fn validate_new_project_path(value: &str) -> Result<(), String> {
@@ -1379,6 +1303,7 @@ fn engine_program() -> PathBuf {
 pub fn run() {
     tauri::Builder::default()
         .manage(EngineJobs::default())
+        .manage(EnginePool::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             engine_request,
@@ -1390,7 +1315,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ENGINE_DIAGNOSTIC_BYTES, engine_binary_path, read_engine_diagnostics};
+    use super::{
+        MAX_ENGINE_DIAGNOSTIC_BYTES, engine_binary_path, read_engine_diagnostics, validate_request,
+    };
+    use serde_json::{Value, json};
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
 
@@ -1406,6 +1334,88 @@ mod tests {
             path,
             PathBuf::from("/app/Resources/engine-runtime/frameforge-engine").join(executable)
         );
+    }
+
+    #[test]
+    fn image_import_takes_existing_absolute_paths() {
+        let root = std::env::temp_dir().join(format!("ff-images-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("p.ffproj");
+        std::fs::write(&project, b"").unwrap();
+        let project = project.to_string_lossy().into_owned();
+        let folder = root.to_string_lossy().into_owned();
+        let request = |paths: Value, dry_run: Value| {
+            validate_request(
+                "import_images",
+                &json!({"path": project, "paths": paths, "dry_run": dry_run}),
+            )
+        };
+        assert!(request(json!([folder]), json!(true)).is_ok());
+        assert!(request(json!([]), json!(true)).is_err());
+        assert!(request(json!(["relative/folder"]), json!(false)).is_err());
+        assert!(
+            request(json!([project]), json!(false)).is_err(),
+            "a project is not an image"
+        );
+        assert!(request(json!([folder]), json!("yes")).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn labelme_import_needs_a_project_and_a_folder() {
+        let root = std::env::temp_dir().join(format!("ff-labelme-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("p.ffproj");
+        std::fs::write(&project, b"").unwrap();
+        let folder = root.to_string_lossy().into_owned();
+        let project = project.to_string_lossy().into_owned();
+        let request = |folder: &str, reviewed: Value| {
+            validate_request(
+                "import_labelme_folder",
+                &json!({"path": project, "folder": folder, "mark_reviewed": reviewed}),
+            )
+        };
+        assert!(request(&folder, json!(true)).is_ok());
+        assert!(
+            request(&project, json!(true)).is_err(),
+            "a file is not a folder"
+        );
+        assert!(request(&folder, json!("yes")).is_err());
+        assert!(request("relative/folder", json!(false)).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bulk_review_takes_absolute_image_paths() {
+        let root = std::env::temp_dir().join(format!("ff-review-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("p.ffproj");
+        std::fs::write(&project, b"").unwrap();
+        let project = project.to_string_lossy().into_owned();
+        let image = root.join("a.png").to_string_lossy().into_owned();
+        let request = |images: Value| {
+            validate_request("review_images", &json!({"path": project, "image_paths": images}))
+        };
+        assert!(request(json!([image])).is_ok());
+        assert!(request(json!([])).is_err());
+        assert!(request(json!(["relative.png"])).is_err());
+        assert!(request(json!([1])).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn relocation_takes_an_optional_absolute_image_folder() {
+        let root = std::env::temp_dir().join(format!("ff-relocate-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("p.ffproj");
+        std::fs::write(&project, b"").unwrap();
+        let project = project.to_string_lossy().into_owned();
+        let folder = root.to_string_lossy().into_owned();
+        assert!(validate_request("relocate_images", &json!({"path": project})).is_ok());
+        assert!(validate_request("relocate_images", &json!({"path": project, "root": folder})).is_ok());
+        assert!(validate_request("relocate_images", &json!({"path": project, "root": "relative"})).is_err());
+        assert!(validate_request("relocate_images", &json!({"path": project, "root": project})).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
