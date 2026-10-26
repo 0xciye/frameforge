@@ -62,7 +62,6 @@ def build_engine() -> Path:
         "--workpath", str(BUILD),
         "--specpath", str(BUILD),
         "--collect-all", "cv2",
-        "--collect-all", "onnxruntime",
         "--collect-all", "ultralytics",
         "--collect-all", "torch",
         "--collect-all", "torchvision",
@@ -70,7 +69,6 @@ def build_engine() -> Path:
         "--collect-all", "polars",
         "--copy-metadata", "torch",
         "--copy-metadata", "ultralytics",
-        "--copy-metadata", "psutil",
         str(ENGINE / "frameforge_engine.py"),
     ])
 
@@ -91,10 +89,10 @@ def smoke_engine(binary: Path) -> None:
         health = smoke_request(binary, "health", app_data)
         if health.get("status") != "ok":
             raise RuntimeError("Packaged engine health check did not return status=ok.")
-        capabilities = smoke_request(binary, "training_capabilities", app_data)
+        capabilities = smoke_request(binary, "inference_capabilities", app_data)
         if capabilities.get("available") is not True:
-            raise RuntimeError(f"Packaged training runtime is incomplete: {capabilities.get('missing_packages')}")
-        print(f"Packaged engine passed health and training checks: {binary}")
+            raise RuntimeError(f"Packaged inference runtime is incomplete: {capabilities.get('missing_packages')}")
+        print(f"Packaged engine passed health and inference checks: {binary}")
         print(f"Packaged engine reports PyTorch {capabilities.get('torch_version')} and Ultralytics {capabilities.get('ultralytics_version')}.")
 
 

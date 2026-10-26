@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import math
 import os
 import time
@@ -21,6 +20,9 @@ MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 FHD_WIDTH = 1920
 FHD_HEIGHT = 1080
 
+
+# Thumbnails returned for the gallery; the full image list is always returned separately.
+MAX_GALLERY_FILES = 500
 
 def _finite(value: float) -> Optional[float]:
     return float(value) if math.isfinite(value) and value > 0 else None
@@ -173,7 +175,26 @@ def _read_frame(path: Path, frame_index: int) -> np.ndarray:
         capture.release()
 
 
-def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -> Dict[str, Any]:
+MAX_THUMBNAIL_REQUEST = 64
+
+
+def image_thumbnails(path_values: Any) -> Dict[str, Any]:
+    """Return small JPEG thumbnails for project images; unreadable files map to None."""
+    if not isinstance(path_values, list) or not 1 <= len(path_values) <= MAX_THUMBNAIL_REQUEST:
+        raise ValueError("Mỗi lần chỉ tải từ 1 đến {0} thumbnail.".format(MAX_THUMBNAIL_REQUEST))
+    thumbnails: Dict[str, Optional[str]] = {}
+    for value in path_values:
+        if not isinstance(value, str) or not value:
+            raise ValueError("Đường dẫn thumbnail không hợp lệ.")
+        path = Path(value).expanduser()
+        frame = _read_image(path, cv2.IMREAD_COLOR) if path.suffix.lower() in IMAGE_EXTENSIONS and path.is_file() else None
+        thumbnails[value] = _thumbnail_data_url(frame) if frame is not None else None
+    return {"thumbnails": thumbnails}
+
+
+def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600, lossless: bool = False) -> Dict[str, Any]:
+    """A frame for display. ``lossless`` (labeling) keeps full resolution and exact pixels as PNG, so
+    small objects stay sharp when zoomed; otherwise a JPEG capped at ``max_edge`` (extraction preview)."""
     source_path = Path(path_value).expanduser().resolve(strict=True)
     is_image = source_path.suffix.lower() in IMAGE_EXTENSIONS
     fingerprint_before = hashlib.sha256(source_path.read_bytes()).hexdigest() if is_image else None
@@ -183,13 +204,18 @@ def preview_frame(path_value: str, frame_index: int = 0, max_edge: int = 1600) -
         raise ValueError("Ảnh đang được thay đổi; hãy mở preview lại sau khi cập nhật xong.")
     source_height, source_width = frame.shape[:2]
     height, width = frame.shape[:2]
-    scale = min(1.0, max_edge / max(width, height))
-    if scale < 1:
-        frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
-    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    if lossless:
+        ok, encoded = cv2.imencode(".png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        mime = "image/png"
+    else:
+        scale = min(1.0, max_edge / max(width, height))
+        if scale < 1:
+            frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        mime = "image/jpeg"
     if not ok:
         raise ValueError("Không tạo được ảnh preview.")
-    data_url = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+    data_url = "data:{0};base64,".format(mime) + base64.b64encode(encoded.tobytes()).decode("ascii")
     result = {
         "data_url": data_url,
         "width": width,
@@ -235,51 +261,6 @@ def preview_center_crop(
         "frame_width": frame_width,
         "frame_height": frame_height,
         "crop_rect": crop_rect,
-    }
-
-
-def inspect_model(path_value: str) -> Dict[str, Any]:
-    """Load an ONNX model with the CPU provider and return actual runtime metadata."""
-    path = Path(path_value).expanduser().resolve(strict=True)
-    if not path.is_file() or path.suffix.lower() != ".onnx":
-        raise ValueError("Chọn một tệp model ONNX hợp lệ.")
-    try:
-        import onnxruntime as ort
-    except ImportError as error:
-        raise RuntimeError("Thiếu ONNX Runtime trong môi trường Python hiện tại.") from error
-
-    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    metadata = session.get_modelmeta().custom_metadata_map or {}
-    class_names = []
-    raw_names = metadata.get("names")
-    if raw_names:
-        try:
-            parsed_names = json.loads(raw_names)
-            if isinstance(parsed_names, list) and all(isinstance(name, str) for name in parsed_names):
-                class_names = parsed_names
-            elif isinstance(parsed_names, dict):
-                class_names = [str(parsed_names[key]) for key in sorted(parsed_names, key=lambda key: int(key))]
-        except (ValueError, TypeError):
-            class_names = []
-
-    def tensor(item: Any) -> Dict[str, Any]:
-        shape = []
-        for dimension in item.shape:
-            if isinstance(dimension, int) and dimension > 0:
-                shape.append(dimension)
-            else:
-                shape.append(str(dimension) if dimension else None)
-        return {"name": item.name, "shape": shape, "type": item.type}
-
-    return {
-        "path": str(path),
-        "name": path.name,
-        "format": "ONNX",
-        "inputs": [tensor(item) for item in session.get_inputs()],
-        "outputs": [tensor(item) for item in session.get_outputs()],
-        "providers": session.get_providers(),
-        "custom_metadata": metadata,
-        "class_names": class_names,
     }
 
 
@@ -575,6 +556,9 @@ def extract_frames(
         "failed_sources": 0,
     }
     exported: List[Dict[str, Any]] = []
+    # Every written image is returned without thumbnails so the project registers all of them;
+    # only the gallery list is capped.
+    written_images: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
     duplicate_threshold = max(0, min(64, int(options.get("duplicate_threshold", 1))))
     recent_hashes = _RecentHashes(duplicate_threshold)
@@ -630,21 +614,27 @@ def extract_frames(
                 while target.exists():
                     target = output / "{0}_{1}{2}".format(base, version, ".png" if image_format == "png" else ".jpg")
                     version += 1
+            overwritten = target.exists()
             if not _write_image(crop, target, image_format, quality):
                 raise OSError("Không ghi được ảnh đầu ra: {0}".format(target))
             totals["exported_images"] += 1
-            if len(exported) < 500:
+            metadata = {
+                "path": str(target),
+                "source_path": str(source),
+                "source_id": source_id,
+                "frame_index": frame_index,
+                "timestamp_seconds": timestamp,
+                "crop_rect": crop_rect,
+                "width": int(crop.shape[1]),
+                "height": int(crop.shape[0]),
+                "sharpness_score": sharpness,
+                "overwritten": overwritten,
+            }
+            written_images.append(metadata)
+            if len(exported) < MAX_GALLERY_FILES:
                 exported.append({
-                    "path": str(target),
-                    "source_path": str(source),
-                    "source_id": source_id,
+                    **metadata,
                     "name": target.name,
-                    "frame_index": frame_index,
-                    "timestamp_seconds": timestamp,
-                    "crop_rect": crop_rect,
-                    "width": int(crop.shape[1]),
-                    "height": int(crop.shape[0]),
-                    "sharpness_score": sharpness,
                     "extraction_settings": extraction_settings,
                     "thumbnail_data_url": _thumbnail_data_url(crop),
                 })
@@ -688,5 +678,7 @@ def extract_frames(
         "elapsed_seconds": round(time.monotonic() - started, 2),
         "files": exported,
         "file_list_truncated": totals["exported_images"] > len(exported),
+        "images": written_images,
+        "extraction_settings": extraction_settings,
         "errors": errors,
     }

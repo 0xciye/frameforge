@@ -15,10 +15,11 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
 import frameforge_engine  # noqa: E402
+from frameforge import media
 from frameforge.media import _RecentHashes, _center_crop, _dhash, _letterbox, extract_frames, inspect_sources, preview_center_crop, preview_frame, probe_media
-from frameforge.dataset import _balanced_replay_groups, export_yolo_dataset, validate_dataset
-from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
-from frameforge import training
+from frameforge.dataset import export_yolo_dataset, validate_dataset
+from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project, set_project_classes
+from frameforge import models
 
 
 def create_video(path: Path, frames: list[np.ndarray], fps: float = 10.0) -> None:
@@ -99,32 +100,6 @@ def create_dataset_project(tmp_path: Path, invalid_class: bool = False) -> tuple
     }
     save_project(str(project_path), project)
     return project_path, image_paths
-
-
-def create_reviewed_lineage_project(tmp_path: Path, reviewed: bool = True) -> Path:
-    project_path, _ = create_dataset_project(tmp_path)
-    project = load_project(str(project_path))
-    for image in project["images"]:
-        image["status"] = "reviewed" if reviewed else "ready"
-    for index, class_id in enumerate((0, 1)):
-        source_id = "source-{0}".format(chr(ord("c") + index))
-        source_path = tmp_path / (source_id + ".mp4")
-        image_path = tmp_path / "images" / source_id / "positive.png"
-        image_path.parent.mkdir(parents=True)
-        cv2.imwrite(str(image_path), np.full((48, 64, 3), 150 + index * 40, dtype=np.uint8))
-        project["sources"].append({"path": str(source_path), "kind": "video", "fps": 10.0})
-        project["images"].append({
-            "path": str(image_path), "source_path": str(source_path), "source_id": source_id,
-            "frame_index": 5, "timestamp_seconds": 0.5, "width": 64, "height": 48,
-            "status": "reviewed" if reviewed else "ready",
-            "annotations": [{
-                "id": source_id + "-box", "class_id": class_id,
-                "x_min": 8, "y_min": 5, "x_max": 32, "y_max": 36,
-                "review_status": "reviewed",
-            }],
-        })
-    save_project(str(project_path), project)
-    return project_path
 
 
 def test_recent_hash_index_matches_threshold_and_evicts_old_values():
@@ -243,17 +218,6 @@ def test_unknown_command_returns_structured_error():
     assert response["error"]["code"] == "unknown_command"
 
 
-def test_model_inspection_command_routes_to_onnx_inspector(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(frameforge_engine, "inspect_model", lambda path: {"path": path, "format": "ONNX"})
-
-    response = frameforge_engine.handle_request({
-        "id": "model-1", "command": "inspect_model", "arguments": {"path": "/models/detector.onnx"}
-    })
-
-    assert response["ok"] is True
-    assert response["data"] == {"path": "/models/detector.onnx", "format": "ONNX"}
-
-
 def test_center_crop_preview_command_routes_to_crop_preview(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         frameforge_engine,
@@ -269,73 +233,6 @@ def test_center_crop_preview_command_routes_to_crop_preview(monkeypatch: pytest.
 
     assert response["ok"] is True
     assert response["data"] == {"path": "/media/clip.mp4", "frame_index": 6, "width": 320, "height": 256}
-
-
-def test_smart_folder_discovery_command_routes_scan_arguments(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        frameforge_engine,
-        "scan_project_folder",
-        lambda path, max_depth, max_files, ignored_dirs, cancel_file, progress: {
-            "path": path,
-            "max_depth": max_depth,
-            "max_files": max_files,
-            "ignored_dirs": ignored_dirs,
-            "cancel_file": cancel_file,
-            "progress_enabled": progress is not None,
-        },
-    )
-
-    response = frameforge_engine.handle_request({
-        "id": "discovery-1",
-        "command": "scan_project_folder",
-        "arguments": {"path": "/project", "max_depth": 4, "max_files": 1000, "ignored_dirs": ["cache"]},
-    }, progress=lambda _event: None)
-
-    assert response["ok"] is True
-    assert response["data"] == {
-        "path": "/project", "max_depth": 4, "max_files": 1000,
-        "ignored_dirs": ["cache"], "cancel_file": None, "progress_enabled": True,
-    }
-
-
-def test_discovered_training_run_command_persists_scan_record(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        frameforge_engine,
-        "register_discovered_run",
-        lambda root, run: {"root": root, "run_id": run["experiment_id"], "checkpoint_trusted": False},
-    )
-
-    response = frameforge_engine.handle_request({
-        "id": "discovered-run-1",
-        "command": "register_discovered_run",
-        "arguments": {"discovery_root": "/project", "run": {"experiment_id": "run-123"}},
-    })
-
-    assert response["ok"] is True
-    assert response["data"] == {"root": "/project", "run_id": "run-123", "checkpoint_trusted": False}
-
-
-def test_prepare_discovered_dataset_command_routes_workspace_paths(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        frameforge_engine,
-        "prepare_discovered_dataset",
-        lambda root, data_yaml: {
-            "source_root": root,
-            "source_data_yaml": data_yaml,
-            "data_yaml": "/app-data/datasets/imported/abc/data.yaml",
-            "paths_rebased": True,
-        },
-    )
-
-    response = frameforge_engine.handle_request({
-        "id": "prepare-dataset-1",
-        "command": "prepare_discovered_dataset",
-        "arguments": {"discovery_root": "/project", "data_yaml": "/project/dataset/data.yaml"},
-    })
-
-    assert response["ok"] is True
-    assert response["data"]["source_data_yaml"] == "/project/dataset/data.yaml"
-    assert response["data"]["paths_rebased"] is True
 
 
 def test_yolo_inference_command_routes_threshold_and_cancellation(monkeypatch: pytest.MonkeyPatch):
@@ -681,15 +578,15 @@ def _create_annotation_project(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _register_annotation_checkpoint(tmp_path: Path) -> Path:
-    output_dir = tmp_path / "output" / "frameforge-training" / "queue" / "run"
+    output_dir = tmp_path / "output" / "imported" / "run"
     weights = output_dir / "weights"
     weights.mkdir(parents=True)
     checkpoint = weights / "best.pt"
     checkpoint.write_bytes(b"verified checkpoint fixture")
     digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-    training._persist_run({
+    models._persist_run({
         "run_id": "run-annotation-fixture",
-        "source": "frameforge_training",
+        "source": "frameforge_import",
         "checkpoint_trusted": True,
         "queue_id": "queue-annotation-fixture",
         "status": "completed",
@@ -701,7 +598,7 @@ def _register_annotation_checkpoint(tmp_path: Path) -> Path:
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": digest,
         "requested_imgsz": 64,
-        "created_at": training._now(),
+        "created_at": models._now(),
     })
     return checkpoint
 
@@ -1016,7 +913,8 @@ def test_dataset_validation_groups_by_source_and_excludes_unreviewed_negatives(t
     assert report["duplicate_basename_groups"] == 1
 
 
-def test_dataset_export_excludes_unreviewed_manual_annotations(tmp_path: Path):
+def test_dataset_export_includes_manual_boxes_without_review(tmp_path: Path):
+    # Boxes a person drew need no review step (user rule); only AI suggestions do.
     project_path, image_paths = create_dataset_project(tmp_path)
     project = load_project(str(project_path))
     unreviewed = next(item for item in project["images"] if item["path"] == str(image_paths["a_positive"]))
@@ -1027,67 +925,48 @@ def test_dataset_export_excludes_unreviewed_manual_annotations(tmp_path: Path):
     report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
 
     assert report["valid"] is True
-    assert report["included_image_count"] == 2
-    assert report["positive_image_count"] == 1
-    assert report["unreviewed_annotation_excluded_count"] == 1
+    assert report["included_image_count"] == 3
+    assert report["positive_image_count"] == 2
+    assert report["unreviewed_annotation_excluded_count"] == 0
 
     output_root = tmp_path / "review-gated-exports"
     output_root.mkdir()
     result = export_yolo_dataset(str(project_path), str(output_root), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
     manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
-    assert all(item["source_image"] != str(image_paths["a_positive"]) for item in manifest["images"])
+    assert any(item["source_image"] == str(image_paths["a_positive"]) for item in manifest["images"])
 
 
-def test_dataset_lineage_excludes_unreviewed_training_annotations_from_parent(tmp_path: Path):
-    project_path = create_reviewed_lineage_project(tmp_path)
-    output_root = tmp_path / "parent-exports"
+def test_dataset_required_classes_keep_only_images_with_every_class(tmp_path: Path):
+    project_path, image_paths = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    both = next(item for item in project["images"] if item["path"] == str(image_paths["a_positive"]))
+    both["annotations"].append({
+        "id": "a-body", "class_id": 1, "x_min": 30, "y_min": 10, "x_max": 50, "y_max": 40,
+        "review_status": "reviewed",
+    })
+    save_project(str(project_path), project)
+
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0, required_class_ids=[0, 1])
+
+    # a_positive has head + body; b_positive has only body; a_negative has no box; all but a_positive drop.
+    assert report["valid"] is True
+    assert report["included_image_count"] == 1
+    assert report["missing_required_excluded_count"] == 2
+    assert report["required_class_ids"] == [0, 1]
+
+    output_root = tmp_path / "required-exports"
     output_root.mkdir()
-    base = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
-        freeze_evaluation_set=True, negative_ratio=1.0,
+    result = export_yolo_dataset(
+        str(project_path), str(output_root), "source", 1.0, 0, 0, 23, negative_ratio=1.0, required_class_ids=[0, 1],
     )
-    manifest_path = Path(base["path"]) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    train_positive = next(
-        item for item in manifest["images"] if item["split"] == "train" and item["annotation_count"] > 0
-    )
-    train_positive["annotation_provenance"][0]["review_status"] = "unreviewed"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    manifest = json.loads((Path(result["path"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert [item["source_image"] for item in manifest["images"]] == [str(image_paths["a_positive"])]
+    assert manifest["split"]["required_class_ids"] == [0, 1]
 
-    report = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0, 23,
-        parent_manifest_path=str(manifest_path), replay_strategy="all", negative_ratio=1.0,
-    )
-
-    assert report["valid"] is True, report["errors"]
-    assert report["unreviewed_parent_train_excluded_count"] == 1
-    assert any("ảnh train trong parent" in warning for warning in report["warnings"])
-
-
-def test_dataset_lineage_rejects_unreviewed_annotations_in_frozen_parent(tmp_path: Path):
-    project_path = create_reviewed_lineage_project(tmp_path)
-    output_root = tmp_path / "parent-exports"
-    output_root.mkdir()
-    base = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, 23,
-        freeze_evaluation_set=True, negative_ratio=1.0,
-    )
-    manifest_path = Path(base["path"]) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    evaluation_positive = next(
-        item for item in manifest["images"]
-        if item["split"] in {"val", "test"} and item["annotation_count"] > 0
-    )
-    evaluation_positive["annotation_provenance"][0]["review_status"] = "unreviewed"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
-
-    report = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0, 23,
-        parent_manifest_path=str(manifest_path), replay_strategy="all",
-    )
-
-    assert report["valid"] is False
-    assert any("Fixed validation/test" in error for error in report["errors"]), report["errors"]
+    unfiltered = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0, required_class_ids=[])
+    assert unfiltered["included_image_count"] == 3
+    invalid = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0, required_class_ids=[5])
+    assert invalid["valid"] is False
 
 
 def test_dataset_negative_sampling_respects_ratio_seed_and_visual_diversity(tmp_path: Path):
@@ -1192,7 +1071,8 @@ def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_pat
     assert report["valid"] is True
     assert report["pending_suggestion_count"] == 1
     assert report["reviewed_negative_count"] == 0
-    assert report["candidate_negative_excluded_count"] == 2
+    assert report["candidate_negative_excluded_count"] == 1
+    assert report["pending_ai_image_excluded_count"] == 1
     assert report["included_image_count"] == 2
     assert report["annotation_count"] == 3
 
@@ -1207,6 +1087,25 @@ def test_dataset_export_excludes_pending_ai_as_box_and_reviewed_negative(tmp_pat
     assert ai_provenance["review_status"] == "reviewed"
     assert ai_provenance["source_model_id"] == "run-fixture"
     assert ai_provenance["checkpoint_sha256"] == "b" * 64
+
+
+def test_dataset_excludes_image_with_accepted_and_pending_ai_boxes(tmp_path: Path):
+    # Exporting only the accepted box would label the pending object as background.
+    project_path, image_paths = create_dataset_project(tmp_path)
+    project = load_project(str(project_path))
+    mixed = next(item for item in project["images"] if item["path"] == str(image_paths["b_positive"]))
+    mixed["annotations"].append({
+        "id": "pending-head", "class_id": 0, "x_min": 2, "y_min": 2, "x_max": 12, "y_max": 12,
+        "confidence": 0.6, "source": "ai", "review_status": "needs_review",
+        "source_model_id": "run-fixture", "checkpoint_sha256": "a" * 64,
+    })
+    save_project(str(project_path), project)
+
+    report = validate_dataset(str(project_path), "source", 0.5, 0.5, 0, 23, negative_ratio=1.0)
+
+    assert report["pending_ai_image_excluded_count"] == 1
+    assert report["positive_image_count"] == 1
+    assert any("gợi ý AI chờ duyệt" in warning for warning in report["warnings"])
 
 
 def test_dataset_requires_review_for_ai_candidate_negative_and_records_provenance(tmp_path: Path):
@@ -1260,6 +1159,8 @@ def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_pa
     assert data_config["train"] == "images/train"
     assert data_config["val"] == "images/val"
     assert data_config["names"] == {0: "head", 1: "body"}
+    # A relative "path" would resolve against the trainer's working directory (Ultralytics), not this folder.
+    assert "path" not in data_config
     assert len(manifest["images"]) == 3
     assert all(
         item["split"] == "train" for item in manifest["images"]
@@ -1283,139 +1184,6 @@ def test_yolo_export_writes_normalized_labels_manifest_and_unique_version(tmp_pa
     assert len(list(output_root.glob("frameforge_dataset_*"))) == 2
 
 
-def test_frozen_validation_and_test_require_reviewed_images(tmp_path: Path):
-    project_path = create_reviewed_lineage_project(tmp_path, reviewed=False)
-    report = validate_dataset(
-        str(project_path), "source", 0.5, 0.25, 0.25, 23, freeze_evaluation_set=True,
-    )
-
-    assert report["valid"] is False
-    assert any("mọi ảnh đã được người dùng review" in error for error in report["errors"])
-
-
-def test_frozen_validation_and_test_require_nonempty_group_splits(tmp_path: Path):
-    project_path, _ = create_dataset_project(tmp_path)
-    project = load_project(str(project_path))
-    for image in project["images"]:
-        image["status"] = "reviewed"
-    save_project(str(project_path), project)
-
-    report = validate_dataset(
-        str(project_path), "source", 0.5, 0.25, 0.25, 23, freeze_evaluation_set=True,
-    )
-
-    assert report["valid"] is False
-    assert any("validation và test sau khi chia nhóm" in error for error in report["errors"])
-
-
-def test_dataset_lineage_reuses_frozen_splits_and_supports_new_only_replay(tmp_path: Path):
-    project_path = create_reviewed_lineage_project(tmp_path)
-    output_root = tmp_path / "lineage-exports"
-    output_root.mkdir()
-    seed = 3
-    base = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.5, 0.25, 0.25, seed,
-        freeze_evaluation_set=True, negative_ratio=1.0,
-    )
-    base_root = Path(base["path"])
-    base_manifest = json.loads((base_root / "manifest.json").read_text(encoding="utf-8"))
-    assert base["version"] == 1
-    assert base_manifest["fixed_validation_set"]["enabled"] is True
-    assert base_manifest["frozen_test_set"]["enabled"] is True
-    assert len(base_manifest["annotation_revision"]) == 64
-    assert all(len(item["label_sha256"]) == 64 and item["group_key"] for item in base_manifest["images"])
-    assert all(
-        hashlib.sha256((base_root / item["exported_label"]).read_bytes()).hexdigest() == item["label_sha256"]
-        for item in base_manifest["images"]
-    )
-    fixed_negative_hashes = {
-        item["sha256"] for item in base_manifest["images"]
-        if item["split"] in {"val", "test"} and item["annotation_count"] == 0
-    }
-    assert fixed_negative_hashes
-
-    project = load_project(str(project_path))
-    frozen_test_source = next(item["source_image"] for item in base_manifest["images"] if item["split"] == "test")
-    changed_test_image = next(item for item in project["images"] if item["path"] == frozen_test_source)
-    changed_test_image["status"] = "ready"
-    changed_test_image["annotations"] = []
-    new_source = tmp_path / "source-e.mp4"
-    new_image = tmp_path / "images" / "source-e" / "new.png"
-    new_image.parent.mkdir(parents=True)
-    cv2.imwrite(str(new_image), np.full((48, 64, 3), 235, dtype=np.uint8))
-    project["sources"].append({"path": str(new_source), "kind": "video", "fps": 10.0})
-    project["images"].append({
-        "path": str(new_image), "source_path": str(new_source), "source_id": "source-e",
-        "frame_index": 1, "timestamp_seconds": 0.1, "width": 64, "height": 48,
-        "status": "reviewed", "annotations": [{
-            "id": "source-e-box", "class_id": 0,
-            "x_min": 10, "y_min": 4, "x_max": 34, "y_max": 35,
-            "review_status": "reviewed",
-        }],
-    })
-    save_project(str(project_path), project)
-
-    report = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0.0, seed,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new", negative_ratio=0.0,
-    )
-    assert report["valid"] is True, report["errors"]
-    assert report["new_image_count"] == 1
-    assert report["replayed_image_count"] == 0
-    assert report["fixed_validation_count"] == base["split_counts"]["val"]
-    assert report["frozen_test_count"] == base["split_counts"]["test"]
-    assert report["reviewed_negative_count"] == len(fixed_negative_hashes)
-    assert report["negative_ratio_actual"] > report["negative_ratio_requested"]
-    assert any("fixed validation/test vượt quota" in warning for warning in report["warnings"])
-
-    child = export_yolo_dataset(
-        str(project_path), str(output_root), "source", 0.8, 0.2, 0.0, seed,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="new", negative_ratio=0.0,
-    )
-    child_manifest = json.loads((Path(child["path"]) / "manifest.json").read_text(encoding="utf-8"))
-    assert child["version"] == 2
-    assert child["parent_dataset_id"] == base["dataset_id"]
-    assert child_manifest["parent_manifest_sha256"] == hashlib.sha256((base_root / "manifest.json").read_bytes()).hexdigest()
-    assert child_manifest["replay_strategy"] == "new"
-    for split in ("val", "test"):
-        before = sorted((item["sha256"], item["label_sha256"]) for item in base_manifest["images"] if item["split"] == split)
-        after = sorted((item["sha256"], item["label_sha256"]) for item in child_manifest["images"] if item["split"] == split)
-        assert after == before
-    assert {
-        item["sha256"] for item in child_manifest["images"]
-        if item["split"] in {"val", "test"} and item["annotation_count"] == 0
-    } == fixed_negative_hashes
-    parent_train_digests = {item["sha256"] for item in base_manifest["images"] if item["split"] == "train"}
-    child_train_digests = {item["sha256"] for item in child_manifest["images"] if item["split"] == "train"}
-    assert parent_train_digests.isdisjoint(child_train_digests)
-    assert child_train_digests == {hashlib.sha256(new_image.read_bytes()).hexdigest()}
-
-    all_replay = validate_dataset(
-        str(project_path), "source", 0.8, 0.2, 0.0, seed,
-        parent_manifest_path=str(base_root / "manifest.json"), replay_strategy="all", negative_ratio=1.0,
-    )
-    assert all_replay["valid"] is True
-    assert all_replay["replayed_image_count"] == base["split_counts"]["train"]
-
-
-def test_balanced_replay_selects_deterministic_class_groups():
-    samples = [
-        {"group_key": "a", "annotations": [{"class_id": 0}]},
-        {"group_key": "b", "annotations": [{"class_id": 0}]},
-        {"group_key": "c", "annotations": [{"class_id": 0}]},
-        {"group_key": "d", "annotations": [{"class_id": 1}]},
-        {"group_key": "negative", "annotations": []},
-    ]
-
-    first = _balanced_replay_groups(samples, 23)
-    second = _balanced_replay_groups(samples, 23)
-
-    assert first == second
-    assert "d" in first
-    assert len(first & {"a", "b", "c"}) == 1
-    assert len(first & {"negative"}) == 1
-
-
 def test_dataset_validation_blocks_invalid_class_ids_and_corrupt_images(tmp_path: Path):
     invalid_class_project, _ = create_dataset_project(tmp_path / "invalid-class", invalid_class=True)
     invalid_class_report = validate_dataset(
@@ -1431,3 +1199,92 @@ def test_dataset_validation_blocks_invalid_class_ids_and_corrupt_images(tmp_path
     )
     assert corrupt_report["valid"] is False
     assert any("hỏng hoặc không đọc được" in error for error in corrupt_report["errors"])
+
+
+def test_extraction_returns_every_written_image_beyond_gallery_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    video_path = tmp_path / "many.avi"
+    output_path = tmp_path / "many"
+    create_video(video_path, [distinct_frame(index) for index in range(6)])
+    monkeypatch.setattr(media, "MAX_GALLERY_FILES", 2)
+    options = {
+        "interval": 1,
+        "interval_unit": "frames",
+        "filter_duplicates": False,
+        "filter_blurry": False,
+        "crop_mode": "center",
+        "output_width": 32,
+        "output_height": 24,
+        "image_format": "png",
+        "existing_file_behavior": "overwrite",
+    }
+
+    first = extract_frames([str(video_path)], str(output_path), options)
+    second = extract_frames([str(video_path)], str(output_path), options)
+
+    assert first["exported_images"] == 6
+    assert len(first["files"]) == 2 and first["file_list_truncated"] is True
+    assert len(first["images"]) == 6
+    assert len({image["path"] for image in first["images"]}) == 6
+    assert all("thumbnail_data_url" not in image for image in first["images"])
+    assert all(image["overwritten"] is False for image in first["images"])
+    assert first["extraction_settings"]["crop_mode"] == "center"
+    assert all(image["overwritten"] is True for image in second["images"])
+
+
+def test_project_classes_follow_model_only_before_labels_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+
+    with pytest.raises(ValueError, match="trùng"):
+        set_project_classes(str(project_path), ["person", "Person"])
+    result = set_project_classes(str(project_path), [" person ", "car", "bike"])
+
+    assert result["class_names"] == ["person", "car", "bike"]
+    assert load_project(str(project_path))["class_names"] == ["person", "car", "bike"]
+
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+    save_annotations(str(project_path), image_path, [{
+        "class_id": 2, "x_min": 1, "y_min": 1, "x_max": 10, "y_max": 10,
+        "source": "manual", "review_status": "unreviewed",
+    }], "ready", fingerprint)
+    with pytest.raises(ValueError, match="đã có nhãn"):
+        set_project_classes(str(project_path), ["head", "body"])
+    assert load_project(str(project_path))["class_names"] == ["person", "car", "bike"]
+
+
+def test_edge_only_suggestion_records_attempt_without_negative_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    project_path, image_path = _create_annotation_project(tmp_path)
+    checkpoint = _register_annotation_checkpoint(tmp_path)
+    fingerprint = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+
+    saved = save_ai_suggestions(str(project_path), image_path, [], fingerprint, str(checkpoint), 2)
+
+    assert saved["negative_candidate"] is None
+    assert saved["annotations"] == []
+    image = load_project(str(project_path))["images"][0]
+    assert image["negative_candidates"] == []
+    assert image["inference_attempts"][0]["image_fingerprint"] == fingerprint
+    assert image["inference_attempts"][0]["skipped_large_objects"] == 2
+    with pytest.raises(ValueError, match="chạm biên"):
+        save_ai_suggestions(str(project_path), image_path, [], fingerprint, str(checkpoint), 2)
+    report = validate_dataset(str(project_path), "source", 1.0, 0.0, 0.0, 1)
+    assert report["included_image_count"] == 0
+
+
+def test_image_thumbnails_returns_small_jpegs_and_none_for_unreadable(tmp_path: Path):
+    image_path = tmp_path / "crop.png"
+    assert cv2.imwrite(str(image_path), np.full((400, 300, 3), 80, dtype=np.uint8))
+    missing = tmp_path / "missing.jpg"
+
+    result = media.image_thumbnails([str(image_path), str(missing)])
+
+    thumbnail = result["thumbnails"][str(image_path)]
+    assert thumbnail.startswith("data:image/jpeg;base64,")
+    decoded = cv2.imdecode(np.frombuffer(base64.b64decode(thumbnail.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
+    assert max(decoded.shape[:2]) == 180
+    assert result["thumbnails"][str(missing)] is None
+    with pytest.raises(ValueError):
+        media.image_thumbnails([])

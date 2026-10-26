@@ -10,20 +10,20 @@ import pytest
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
-from frameforge import inference, training
+from frameforge import inference, models
 from frameforge.project import create_project, load_project, save_project
 
 
 def register_checkpoint(tmp_path: Path) -> Path:
-    output_dir = tmp_path / "output" / "frameforge-training" / "queue" / "run"
+    output_dir = tmp_path / "output" / "imported" / "run"
     weights = output_dir / "weights"
     weights.mkdir(parents=True)
     checkpoint = weights / "best.pt"
     checkpoint.write_bytes(b"verified checkpoint fixture")
     digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-    training._persist_run({
+    models._persist_run({
         "run_id": "run-inference-fixture",
-        "source": "frameforge_training",
+        "source": "frameforge_import",
         "checkpoint_trusted": True,
         "queue_id": "queue-inference-fixture",
         "status": "completed",
@@ -35,7 +35,7 @@ def register_checkpoint(tmp_path: Path) -> Path:
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": digest,
         "requested_imgsz": 64,
-        "created_at": training._now(),
+        "created_at": models._now(),
     })
     return checkpoint
 
@@ -77,7 +77,7 @@ def install_fake_yolo(monkeypatch: pytest.MonkeyPatch, names=None, prediction_bo
     module = ModuleType("ultralytics")
     module.YOLO = FakeYOLO
     monkeypatch.setitem(sys.modules, "ultralytics", module)
-    monkeypatch.setattr(inference, "training_capabilities", lambda: {
+    monkeypatch.setattr(inference, "inference_capabilities", lambda: {
         "available": True, "preferred_device": "cpu",
     })
     return FakeYOLO
@@ -245,3 +245,129 @@ def test_auto_label_project_does_not_turn_skipped_large_objects_into_negatives(
     assert loaded["images"][0]["path"] == str(image_paths[0])
     assert loaded["images"][0]["annotations"] == []
     assert loaded["images"][0]["negative_candidates"] == []
+
+
+def test_auto_label_project_does_not_rerun_edge_only_images_with_same_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    project_path, image_paths = make_project(tmp_path, 1)
+    FakeYOLO = install_fake_yolo(monkeypatch, prediction_boxes=([[0, 2, 32, 20]], [0.9], [0]))
+
+    first = inference.auto_label_project(str(project_path), str(checkpoint))
+    second = inference.auto_label_project(str(project_path), str(checkpoint))
+
+    assert first["skipped_large_objects"] == 1
+    assert second["processed_images"] == 0
+    assert second["skipped_attempted"] == 1
+    assert len(FakeYOLO.instances) == 1
+    attempts = load_project(str(project_path))["images"][0]["inference_attempts"]
+    assert [attempt["skipped_large_objects"] for attempt in attempts] == [1]
+
+    image_paths[0].write_bytes(cv2.imencode(".jpg", np.full((24, 32, 3), 90, dtype=np.uint8))[1].tobytes())
+    third = inference.auto_label_project(str(project_path), str(checkpoint))
+    assert third["skipped_attempted"] == 0
+    assert third["processed_images"] == 1
+
+
+def test_inference_uses_registered_checkpoint_imgsz(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    image = create_image(tmp_path / "crop.jpg")
+    project_path, _ = make_project(tmp_path, 1)
+    FakeYOLO = install_fake_yolo(monkeypatch)
+
+    inference.predict_crops(str(checkpoint), [str(image)])
+    inference.auto_label_project(str(project_path), str(checkpoint))
+
+    calls = [call for instance in FakeYOLO.instances for call in instance.calls]
+    assert calls and all(call["imgsz"] == 64 for call in calls)
+
+
+def test_duplicate_boxes_of_one_object_keep_the_most_confident():
+    from frameforge.inference import _drop_duplicate_boxes
+
+    def box(class_id, confidence, xyxy):
+        return {"class_id": class_id, "class_name": str(class_id), "confidence": confidence, "bbox_xyxy": xyxy}
+
+    tall = box(1, 0.44, [10.0, 10.0, 30.0, 73.0])     # 20 x 63 body
+    short = box(1, 0.61, [10.0, 10.0, 29.0, 46.0])    # 19 x 36 body on the same person (IoU ~0.54, inside ~1.0)
+    head = box(0, 0.55, [14.0, 4.0, 20.0, 11.0])      # other class: never merged with a body
+    other_body = box(1, 0.50, [60.0, 10.0, 80.0, 73.0])  # a second person
+    kept = _drop_duplicate_boxes([tall, short, head, other_body])
+
+    assert [item["confidence"] for item in kept] == [0.61, 0.55, 0.50]
+    assert tall not in kept
+
+
+def test_touching_boxes_of_two_objects_both_stay():
+    from frameforge.inference import _drop_duplicate_boxes
+
+    left = {"class_id": 0, "class_name": "head", "confidence": 0.9, "bbox_xyxy": [0.0, 0.0, 10.0, 10.0]}
+    right = {"class_id": 0, "class_name": "head", "confidence": 0.8, "bbox_xyxy": [7.0, 0.0, 17.0, 10.0]}  # IoU 0.18
+    assert len(_drop_duplicate_boxes([left, right])) == 2
+
+
+def test_suggest_again_replaces_every_existing_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from frameforge.project import save_ai_suggestions
+
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    checkpoint = register_checkpoint(tmp_path)
+    project_path, image_paths = make_project(tmp_path, 2)
+    project = load_project(str(project_path))
+    project["images"][0]["status"] = "reviewed"
+    project["images"][0]["annotations"] = [{
+        "id": "manual-1", "class_id": 1, "x_min": 1, "y_min": 1, "x_max": 9, "y_max": 9,
+        "source": "manual", "review_status": "reviewed",
+    }]
+    save_project(str(project_path), project)
+    install_fake_yolo(monkeypatch)
+
+    # Without replace the labeled image is left alone.
+    first = inference.auto_label_project(str(project_path), str(checkpoint))
+    assert first["processed_images"] == 1
+    labeled = load_project(str(project_path))["images"][0]
+    assert [item["id"] for item in labeled["annotations"]] == ["manual-1"]
+
+    again = inference.auto_label_project(str(project_path), str(checkpoint), replace=True)
+    assert again["processed_images"] == 2
+    images = load_project(str(project_path))["images"]
+    for image in images:
+        assert len(image["annotations"]) == 3
+        assert all(item["source"] == "ai" and item["review_status"] == "needs_review" for item in image["annotations"])
+        assert image["status"] == "ready"
+
+    # One image: the same checkpoint again is refused, unless it replaces the boxes.
+    fingerprint = hashlib.sha256(image_paths[1].read_bytes()).hexdigest()
+    prediction = [{"class_id": 0, "confidence": 0.7, "bbox_xyxy": [4, 4, 14, 14]}]
+    with pytest.raises(ValueError):
+        save_ai_suggestions(str(project_path), str(image_paths[1]), prediction, fingerprint, str(checkpoint))
+    saved = save_ai_suggestions(str(project_path), str(image_paths[1]), prediction, fingerprint, str(checkpoint), replace=True)
+    assert saved["replaced"] is True
+    image = next(item for item in load_project(str(project_path))["images"] if item["path"] == str(image_paths[1]))
+    assert [item["x_min"] for item in image["annotations"]] == [4.0]
+
+
+def test_delete_model_removes_registry_entry_and_only_its_own_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRAMEFORGE_APP_DATA", str(tmp_path / "app-data"))
+    outside = register_checkpoint(tmp_path)  # output_dir outside FrameForge's model folder
+    inside_dir = models._model_root() / "imported" / "run-inside"
+    (inside_dir / "weights").mkdir(parents=True)
+    inside = inside_dir / "weights" / "best.pt"
+    inside.write_bytes(b"inside checkpoint")
+    models._persist_run({
+        "run_id": "run-inside", "source": "frameforge_import", "checkpoint_trusted": True, "status": "completed",
+        "class_names": ["head", "body"], "output_dir": str(inside_dir), "checkpoint_path": str(inside),
+        "checkpoint_sha256": hashlib.sha256(inside.read_bytes()).hexdigest(), "requested_imgsz": 64,
+        "created_at": models._now(),
+    })
+
+    models.delete_model("run-inside")
+    models.delete_model("run-inference-fixture")
+
+    assert not inside_dir.exists()
+    assert outside.exists()
+    assert models.list_models()["runs"] == []
+    with pytest.raises(ValueError):
+        models.delete_model("run-inside")

@@ -9,27 +9,29 @@ import sys
 from typing import Any, Callable, Dict, Optional
 
 from frameforge.dataset import export_yolo_dataset, validate_dataset
-from frameforge.discovery import prepare_discovered_dataset, scan_project_folder
+from frameforge.deletion import delete_images
 from frameforge.inference import auto_label_project, predict_crops
-from frameforge.media import extract_frames, inspect_model, inspect_sources, preview_center_crop, preview_frame
-from frameforge.project import create_project, load_project, review_ai_negative_candidate, save_ai_suggestions, save_annotations, save_project
-from frameforge.session import load_session, save_session
-from frameforge.training import (
-    compare_model_challenger,
-    evaluate_yolo_checkpoint,
-    get_model_promotion_state,
-    get_evaluation_targets,
-    inspect_training_dataset,
-    import_yolo_checkpoint,
-    list_model_evaluations,
-    list_training_runs,
-    promote_model_challenger,
-    register_discovered_run,
-    rollback_model_promotion,
-    save_evaluation_targets,
-    train_yolo_queue,
-    training_capabilities,
+from frameforge.labelme import import_images, import_labelme_folder
+from frameforge.media import extract_frames, image_thumbnails, inspect_sources, preview_center_crop, preview_frame
+from frameforge.relocate import relocate_images
+from frameforge.review import review_images
+from frameforge.models import delete_model, import_yolo_checkpoint, inference_capabilities, list_models
+from frameforge.project import (
+    create_project,
+    load_project,
+    review_ai_negative_candidate,
+    save_ai_suggestions,
+    save_annotations,
+    save_project,
+    set_project_classes,
 )
+from frameforge.session import load_session, save_session
+from frameforge.sidecar import sync_project as sync_sidecars, write_project as write_sidecars
+
+
+READS_SIDECARS = {"load_project", "validate_dataset", "export_yolo_dataset", "auto_label_project", "review_images"}
+WRITES_ONE_SIDECAR = {"save_annotations", "save_ai_suggestions", "review_ai_negative_candidate"}
+WRITES_ALL_SIDECARS = {"save_project", "set_project_classes", "review_images"}
 
 
 def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
@@ -56,27 +58,20 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                     "inspect_sources",
                     "preview_frame",
                     "preview_center_crop",
+                    "image_thumbnails",
                     "extract_frames",
                     "save_annotations",
                     "ai_annotation_review",
                     "dataset_validation",
                     "yolo_export",
                     "project_persistence",
-                    "model_inspection",
-                    "training_capabilities",
-                    "training_dataset_inspection",
-                    "yolo11n_training",
+                    "project_class_schema",
+                    "inference_capabilities",
                     "yolo11n_inference",
                     "project_batch_inference",
                     "candidate_negative_review",
-                    "training_registry",
+                    "model_registry",
                     "trusted_model_import",
-                    "fixed_set_evaluation",
-                    "evaluation_targets",
-                    "champion_challenger_management",
-                    "external_training_registry",
-                    "smart_folder_discovery",
-                    "workspace_folder_import",
                     "session_recovery",
                 ],
             },
@@ -91,12 +86,13 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
         }
 
     try:
+        # Labels live in the JSON beside each image: read files changed outside FrameForge first.
+        if command in READS_SIDECARS:
+            sync_sidecars(arguments["path"])
         if command == "inspect_sources":
             result = inspect_sources(arguments.get("paths", []))
-        elif command == "inspect_model":
-            result = inspect_model(arguments["path"])
         elif command == "preview_frame":
-            result = preview_frame(arguments["path"], arguments.get("frame_index", 0))
+            result = preview_frame(arguments["path"], arguments.get("frame_index", 0), lossless=arguments.get("lossless") is True)
         elif command == "preview_center_crop":
             result = preview_center_crop(
                 arguments["path"],
@@ -104,6 +100,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments["width"],
                 arguments["height"],
             )
+        elif command == "image_thumbnails":
+            result = image_thumbnails(arguments.get("paths"))
         elif command == "extract_frames":
             result = extract_frames(
                 arguments.get("paths", []),
@@ -130,6 +128,29 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments["predictions"],
                 arguments["image_fingerprint"],
                 arguments["checkpoint"],
+                arguments.get("skipped_large_objects", 0),
+                arguments.get("replace") is True,
+            )
+        elif command == "set_project_classes":
+            result = set_project_classes(arguments["path"], arguments["class_names"])
+        elif command == "delete_images":
+            result = delete_images(arguments["path"], arguments["image_paths"])
+        elif command == "relocate_images":
+            result = relocate_images(arguments["path"], arguments.get("root"))
+        elif command == "review_images":
+            result = review_images(arguments["path"], arguments["image_paths"])
+        elif command == "import_images":
+            result = import_images(
+                arguments["path"],
+                arguments["paths"],
+                arguments.get("mark_reviewed", False),
+                arguments.get("dry_run", False),
+            )
+        elif command == "import_labelme_folder":
+            result = import_labelme_folder(
+                arguments["path"],
+                arguments["folder"],
+                arguments.get("mark_reviewed", False),
             )
         elif command == "review_ai_negative_candidate":
             result = review_ai_negative_candidate(
@@ -147,10 +168,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("test_ratio", 0.1),
                 arguments.get("seed", 42),
                 arguments.get("segment_seconds", 30),
-                arguments.get("parent_manifest_path"),
-                arguments.get("replay_strategy", "all"),
-                arguments.get("freeze_evaluation_set", False),
                 arguments.get("negative_ratio", 0.1),
+                arguments.get("required_class_ids"),
             )
         elif command == "export_yolo_dataset":
             result = export_yolo_dataset(
@@ -162,10 +181,8 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 arguments.get("test_ratio", 0.1),
                 arguments.get("seed", 42),
                 arguments.get("segment_seconds", 30),
-                arguments.get("parent_manifest_path"),
-                arguments.get("replay_strategy", "all"),
-                arguments.get("freeze_evaluation_set", False),
                 arguments.get("negative_ratio", 0.1),
+                arguments.get("required_class_ids"),
             )
         elif command == "load_project":
             result = load_project(arguments["path"])
@@ -173,45 +190,14 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
             result = save_session(arguments["project"], arguments["session"])
         elif command == "load_session":
             result = load_session()
-        elif command == "training_capabilities":
-            result = training_capabilities(arguments.get("output_dir"))
-        elif command == "inspect_training_dataset":
-            result = inspect_training_dataset(arguments["data_yaml"], progress)
-        elif command == "list_training_runs":
-            result = list_training_runs()
+        elif command == "inference_capabilities":
+            result = inference_capabilities()
+        elif command == "list_models":
+            result = list_models()
+        elif command == "delete_model":
+            result = delete_model(arguments.get("run_id"))
         elif command == "import_yolo_checkpoint":
             result = import_yolo_checkpoint(arguments.get("path"), arguments.get("trust_source"))
-        elif command == "evaluate_yolo_checkpoint":
-            result = evaluate_yolo_checkpoint(arguments, progress)
-        elif command == "list_model_evaluations":
-            result = list_model_evaluations(arguments.get("run_id"))
-        elif command == "get_evaluation_targets":
-            result = get_evaluation_targets()
-        elif command == "save_evaluation_targets":
-            result = save_evaluation_targets(arguments)
-        elif command == "get_model_promotion_state":
-            result = get_model_promotion_state()
-        elif command == "compare_model_challenger":
-            result = compare_model_challenger(arguments)
-        elif command == "promote_model_challenger":
-            result = promote_model_challenger(arguments)
-        elif command == "rollback_model_promotion":
-            result = rollback_model_promotion()
-        elif command == "register_discovered_run":
-            result = register_discovered_run(arguments["discovery_root"], arguments["run"])
-        elif command == "prepare_discovered_dataset":
-            result = prepare_discovered_dataset(arguments["discovery_root"], arguments["data_yaml"])
-        elif command == "scan_project_folder":
-            result = scan_project_folder(
-                arguments["path"],
-                arguments.get("max_depth", 8),
-                arguments.get("max_files", 50_000),
-                arguments.get("ignored_dirs"),
-                arguments.get("cancel_file"),
-                progress,
-            )
-        elif command == "train_yolo_queue":
-            result = train_yolo_queue(arguments, progress)
         elif command == "predict_crops":
             result = predict_crops(
                 arguments["checkpoint"],
@@ -223,23 +209,36 @@ def handle_request(request: Any, progress: Optional[Callable[[Dict[str, Any]], N
                 progress,
             )
         elif command == "auto_label_project":
-            result = auto_label_project(
-                arguments["path"],
-                arguments["checkpoint"],
-                arguments.get("confidence_threshold", 0.25),
-                arguments.get("iou_threshold", 0.7),
-                arguments.get("cancel_file"),
-                progress,
-            )
+            try:
+                result = auto_label_project(
+                    arguments["path"],
+                    arguments["checkpoint"],
+                    arguments.get("confidence_threshold", 0.25),
+                    arguments.get("iou_threshold", 0.7),
+                    arguments.get("cancel_file"),
+                    progress,
+                    arguments.get("replace") is True,
+                )
+            finally:
+                # Chunks saved before a cancel or failure still belong in the JSON files.
+                write_sidecars(arguments["path"])
         else:
             return {
                 "id": request_id,
                 "ok": False,
                 "error": {
                     "code": "unknown_command",
-                    "message": "Supported commands: health, inspect_sources, inspect_model, preview_frame, preview_center_crop, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, review_ai_negative_candidate, auto_label_project, validate_dataset, export_yolo_dataset, load_project, save_session, load_session, training_capabilities, inspect_training_dataset, list_training_runs, evaluate_yolo_checkpoint, list_model_evaluations, get_evaluation_targets, save_evaluation_targets, get_model_promotion_state, compare_model_challenger, promote_model_challenger, rollback_model_promotion, register_discovered_run, prepare_discovered_dataset, scan_project_folder, train_yolo_queue, predict_crops.",
+                    "message": "Supported commands: health, inspect_sources, preview_frame, preview_center_crop, image_thumbnails, extract_frames, create_project, save_project, save_annotations, save_ai_suggestions, set_project_classes, review_images, relocate_images, import_images, import_labelme_folder, review_ai_negative_candidate, load_project, save_session, load_session, inference_capabilities, list_models, delete_model, import_yolo_checkpoint, predict_crops, auto_label_project, validate_dataset, export_yolo_dataset.",
                 },
             }
+        if command in WRITES_ONE_SIDECAR:
+            written = write_sidecars(arguments["path"], [result.get("image_path") or arguments["image_path"]])
+        elif command in WRITES_ALL_SIDECARS:
+            written = write_sidecars(arguments["path"])
+        else:
+            written = None
+        if written and written["errors"] and isinstance(result, dict):
+            result["json_errors"] = written["errors"]
     except (KeyError, OSError, ValueError, TypeError) as error:
         return {
             "id": request_id,

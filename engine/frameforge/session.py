@@ -38,6 +38,17 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _repair_mojibake(value: Any) -> Any:
+    if not isinstance(value, str) or not any(marker in value for marker in ("Ã", "Â", "Æ", "Å", "â€")):
+        return value
+    for _ in range(3):
+        try:
+            value = value.encode("cp1252").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            break
+    return value
+
+
 def save_session(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
     """Atomically replace the hidden project snapshot and its small UI state file."""
     if not isinstance(project, dict) or not isinstance(session, dict):
@@ -45,7 +56,13 @@ def save_session(project: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, 
     metadata = dict(session)
     metadata["source_project_sha256"] = None
     project_path_value = session.get("project_path")
-    if isinstance(project_path_value, str) and project_path_value:
+    # A light session belongs to a saved project without unsaved changes: the project file itself is
+    # the state, so neither its images nor a hash of a possibly huge file are stored.
+    light = session.get("light") is True and isinstance(project_path_value, str) and bool(project_path_value)
+    metadata["light"] = light
+    if light:
+        project = {**project, "images": [], "sources": []}
+    elif isinstance(project_path_value, str) and project_path_value:
         try:
             source_project = Path(project_path_value).expanduser().resolve(strict=True)
             if source_project.is_file():
@@ -86,6 +103,7 @@ def load_session() -> Dict[str, Any]:
         raise ValueError("Không khôi phục được phiên làm việc: {0}".format(error)) from error
     if not isinstance(session, dict):
         raise ValueError("Metadata phiên làm việc bị hỏng.")
+    project["name"] = _repair_mojibake(project.get("name"))
     original_path = session.get("project_path")
     original_exists = False
     original_unchanged = False
@@ -95,7 +113,9 @@ def load_session() -> Dict[str, Any]:
             candidate = candidate.resolve(strict=True)
             original_exists = candidate.is_file() and _is_frameforge_project(candidate)
             expected_digest = session.get("source_project_sha256")
-            if original_exists and isinstance(expected_digest, str):
+            if original_exists and session.get("light") is True:
+                original_unchanged = True
+            elif original_exists and isinstance(expected_digest, str):
                 original_unchanged = _sha256_file(candidate) == expected_digest
         except (OSError, ValueError):
             original_exists = False

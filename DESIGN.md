@@ -1,48 +1,35 @@
 # Thiết kế
 
+## Runtime desktop
+
+- Bản portable nạp frontend đã build trong `frontendDist` qua Tauri custom protocol; chỉ `tauri dev` mới trỏ tới Vite `devUrl`/localhost. Người dùng mở executable/app portable trực tiếp, không khởi chạy server web riêng.
+
 ## Hướng hình ảnh
 
 Workspace desktop tối, gọn và thiên về thao tác: nền than chì nhiều lớp, separator mảnh, chữ xám sáng, xanh dương dành cho lựa chọn và hành động chính. Màu xanh lá/vàng/đỏ chỉ báo trạng thái. Bố cục và mật độ lấy từ screenshot FrameForge người dùng cung cấp.
 
 ## Bố cục
 
-- Thanh công cụ trên cùng: dự án mới/mở/lưu, kiểm tra ONNX và trạng thái engine.
-- Tabs quy trình: Trích xuất, Gán nhãn, Dataset và Huấn luyện. Nút Auto label trên toolbar mở tab Gán nhãn; inference ảnh hiện tại hoặc cả project được chạy từ khu vực AI trong tab này.
+- Thanh công cụ trên cùng: dự án mới/mở/lưu, Auto label, Xuất YOLO và trạng thái engine.
+- Tabs quy trình theo pipeline: Trích xuất (nhập ảnh/video), Gán nhãn (nhập model, gợi ý AI, duyệt/gán lại) và Dataset (lưu dataset). Không có tab huấn luyện. Nút Auto label trên toolbar mở tab Gán nhãn; inference ảnh hiện tại hoặc cả project được chạy từ khu vực AI trong tab này.
 - Cột trái: import, kéo thả và chọn nguồn media; drag overlay phản hồi khi người dùng kéo tệp vào cửa sổ.
 - Trung tâm: preview frame thật đến tối đa 1920×1080, điều khiển frame/timeline; video lớn hơn FHD bị từ chối.
 - Cột phải: sampling, filter, chế độ crop, kích thước crop/output, định dạng và thư mục đầu ra.
-- Gallery ngang ở dưới: thumbnail của ảnh thật vừa trích; trạng thái tổng kết ở thanh cuối.
+- Gallery ngang ở dưới: hiển thị mọi ảnh trong dự án (mới nhất trước), chỉ render vùng đang cuộn tới và tải thumbnail thật theo lô; ảnh đã review có ghi chú. Trạng thái tổng kết ở thanh cuối.
 
 ## Dataset
 
 - Tab Dataset cho phép chọn split theo video nguồn hoặc đoạn thời gian, đặt tỷ lệ và seed, xem số ảnh/box/class cùng cảnh báo trước khi xuất.
-- Điều khiển negative sampling có preset 0/5/10/25% và tỷ lệ tùy chỉnh; report nêu số ảnh negative được giữ/bỏ cùng tỷ lệ thực tế. Giữ nguyên negative trong fixed validation/test của parent.
+- Điều khiển negative sampling có preset 0/5/10/25% và tỷ lệ tùy chỉnh; report nêu số ảnh negative được giữ/bỏ cùng tỷ lệ thực tế.
 - Ảnh trống chưa review không được export; candidate negative do inference tạo ra chỉ thành negative đã review sau khi người dùng xác nhận ảnh trống. Negative đã xác nhận có nhãn TXT rỗng. Ảnh được sao chép nguyên pixel, còn labels chuẩn hóa theo kích thước nguồn.
 - Box AI dùng nét đứt và nhãn confidence để phân biệt với nhãn thủ công. Mỗi gợi ý có thao tác Duyệt/Loại; chỉnh sửa box AI cũng xác nhận gợi ý. Gợi ý chưa duyệt/bị loại không vào export mặc định; ảnh chỉ có gợi ý chờ review không được tính negative.
-- Chọn checkpoint nội bộ đã xác minh hoặc nhập `.pt` YOLO11n tương thích qua xác nhận tin cậy; danh sách hiển thị tên file đã nhập và chỉ dùng model khớp class schema. Inference áp dụng vào ảnh đang mở hoặc toàn bộ project theo batch có giới hạn. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry. Hủy giữ các chunk đã lưu; ảnh thay đổi trong lúc chạy bị bỏ qua khi commit.
+- Nút “Nhập model .pt” trong khu vực Gợi ý AI nhập checkpoint YOLO11n tương thích qua xác nhận tin cậy; khi dự án chưa có ảnh, tab Gán nhãn vẫn hiện panel Model để nhập trước. Danh sách hiển thị mọi checkpoint hợp lệ, đánh dấu “class khác dự án”; khi dự án chưa có nhãn có nút “Dùng class của model cho dự án”. Trường “Ngưỡng confidence (%)” 1–99, mặc định 25. Danh sách box có “Duyệt tất cả (n)” và “Loại tất cả” cho gợi ý đang chờ; danh sách hiển thị tên file đã nhập và chỉ dùng model khớp class schema. Inference áp dụng vào ảnh đang mở hoặc toàn bộ project theo batch có giới hạn. Hiển thị trạng thái chạy/dừng, lỗi, kết quả và thao tác làm mới registry. Hủy giữ các chunk đã lưu; ảnh thay đổi trong lúc chạy bị bỏ qua khi commit.
 - Mỗi lần export tạo thư mục phiên bản mới với `data.yaml` và manifest; thao tác không sửa dự án hay ảnh nguồn.
-- Có thể đóng băng val/test khi cả hai split đều có ảnh và mọi ảnh đã được review. Khi tạo child version, chọn parent manifest và replay policy train (`all`, `balanced`, `new`); ảnh và label val/test được giữ nguyên, còn nhóm của chúng không đi vào train. Report hiển thị ảnh mới, replay và fixed-set counts.
 
 ## Lọc frame gần giống
 
 - Thanh dHash biểu thị khoảng cách Hamming tối đa giữa hash cảm nhận 64-bit. Mặc định 1 nghĩa là chỉ bỏ crop gần như trùng (khoảng cách ≤1) so với một trong tối đa 4.096 crop đã giữ gần nhất; ngưỡng cao hơn lọc mạnh hơn, không phải số lượng crop cần xóa.
 - Engine chỉ so sánh với tối đa 4.096 hash của crop được giữ gần nhất. Sau khi extraction xong, gallery hiển thị số crop gần giống thực tế đã bị lọc.
-
-## Huấn luyện
-
-- Tab Huấn luyện kiểm tra dependency, thiết bị khả dụng và dataset local trước khi bật queue. Nếu không chọn checkpoint fine-tune, mỗi imgsz tạo run mới từ YOLO11n pretrained; khi chọn checkpoint đã đăng ký, tự điền `imgsz` từ checkpoint hoặc `args.yaml` cùng run. Nếu cả hai thiếu, dùng mặc định Ultralytics 640 và báo rõ; registry cũ chưa ghi nguồn được báo là chưa xác định. Fine-tune chỉ nhận checkpoint YOLO11n detection đã đăng ký, còn checksum hợp lệ và khớp class schema. Model nhập hiển thị tên file trong lựa chọn checkpoint.
-- Progress, loss, validation metrics, runtime và khả năng dừng được lấy từ callback training thật. Checkpoint, config và log lưu trong thư mục output; model pretrained cache trong app data. Giữ `cache=False` cho dataset lớn; nhập Patience = 0 để tắt early stopping và chạy đủ epoch đã đặt.
-- Với dataset vừa nhập từ thư mục chuyển máy, người dùng chọn thư mục output riêng trước khi chạy; ảnh và nhãn tại nguồn vẫn giữ nguyên.
-- Card “Đánh giá model trên fixed set” chọn checkpoint registry, validation/test đã đóng băng, `imgsz`, batch, confidence, NMS IoU và thiết bị. Chỉ bật khi split hiện tại có fixed-set ID. Đánh giá có thể hủy giữa các batch; tác vụ dở dang không được ghi thành kết quả.
-- Hiển thị Precision/Recall/F1/mAP50/mAP50–95 tổng thể và theo class cùng mục tiêu người dùng đặt. Để trống là không đặt ngưỡng. Kèm dataset/fixed-set/checkpoint fingerprint, thiết bị/framework và cảnh báo tập nhỏ/thiếu class; latency/FPS/throughput/RAM ghi “Chưa đo” cho đến khi có benchmark triển khai.
-- Hiển thị Champion hiện tại, Challenger mới nhất, bảng delta metric, blockers/target và lịch sử. Chỉ dùng fixed validation có cùng fingerprint/schema/điều kiện; mặc định không chấp nhận regression. Promote và rollback đều cần xác nhận rõ, model cũ được giữ trong registry.
-
-## Nhập thư mục làm việc
-
-- Chọn thư mục làm việc đã chuyển để quét cấu trúc, dataset YAML, cấu hình run, metric CSV, checkpoint và model export; hiện progress, giới hạn quét và nút hủy.
-- Dataset được đưa sang bước kiểm tra bằng `data.yaml` local trong App Data; file list được chuẩn hóa còn ảnh/nhãn được dùng tại chỗ. Nếu YAML nằm ngoài dataset, chỉ nối path cũ khi duy nhất một thư mục trong workspace khớp tất cả split; trường hợp mơ hồ hoặc tìm kiếm chưa đầy đủ bị chặn. Preflight từ chối nguồn mất, ngoài scope hoặc đi qua symlink.
-- Kết quả run ngoài là metadata chỉ đọc. Lưu vào registry cần thao tác riêng; checkpoint `.pt` chưa được nạp hoặc xác minh tương thích nên không xuất hiện làm model fine-tune.
-- Checkpoint `.pt` có nút nhập riêng với cảnh báo tin cậy; sau xác nhận, FrameForge giới hạn kích thước, sao chép vào vùng quản lý riêng, xác minh checksum trước khi nạp bản sao, kiểm tra YOLO11n detection/class rồi xác minh lại checksum. Chỉ sau đó checkpoint mới được đăng ký.
 
 Ba vùng làm việc giữ đồng thời trên màn hình. Splitter giữa source/preview/settings và trên gallery kéo được bằng chuột hoặc phím mũi tên; kích thước lưu ở local storage. Ở cửa sổ hẹp hơn 1240px, panel co theo CSS trong khi nội dung settings/gallery cuộn độc lập. Cửa sổ Tauri khởi tạo ở 1440×960, tối thiểu 1024×700.
 
